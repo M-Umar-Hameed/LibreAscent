@@ -1,0 +1,7 @@
+# Freedom - Adult Content Domain Blocklist
+# This file contains domains to block.
+# One domain per line. Lines starting with # are comments.
+# This is a placeholder - full lists will be fetched from open-source sources.
+#
+# To add domains, add one per line below.
+# To contribute, submit a PR to the Freedom repository.

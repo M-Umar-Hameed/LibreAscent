@@ -1,0 +1,353 @@
+import { InteractionGuard } from "@/components/InteractionGuard";
+import { useAppStore } from "@/stores/useAppStore";
+import { Ionicons } from "@expo/vector-icons";
+import * as Haptics from "expo-haptics";
+import { useRouter } from "expo-router";
+import type { ReactNode } from "react";
+import { useState } from "react";
+import { Pressable, ScrollView, Switch, Text, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+
+export default function SettingsScreen(): ReactNode {
+  const {
+    autoStartOnBoot,
+    setAutoStart,
+    theme,
+    setTheme,
+    passwordHash,
+    controlMode,
+  } = useAppStore();
+  const router = useRouter();
+
+  const [pendingAction, setPendingAction] = useState<
+    "boot" | "password" | null
+  >(null);
+
+  const handleBootToggle = (isEnabling: boolean): void => {
+    if (controlMode === "flexible" || isEnabling) {
+      toggleBoot();
+    } else {
+      setPendingAction("boot");
+    }
+  };
+
+  const toggleBoot = (): void => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setAutoStart(!autoStartOnBoot);
+    setPendingAction(null);
+  };
+
+  const handlePasswordToggle = (isEnabling: boolean): void => {
+    if (controlMode === "flexible" || isEnabling) {
+      togglePassword();
+    } else {
+      setPendingAction("password");
+    }
+  };
+
+  const togglePassword = (): void => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    // TODO: Open password modal
+    setPendingAction(null);
+  };
+
+  return (
+    <SafeAreaView
+      className="flex-1 bg-white dark:bg-freedom-primary"
+      edges={["top"]}
+    >
+      <ScrollView
+        className="flex-1 px-4 pt-4"
+        contentContainerStyle={{ paddingBottom: 100 }}
+      >
+        <Text className="text-2xl font-bold text-black dark:text-white mb-6">
+          Settings
+        </Text>
+
+        {/* Protection Settings */}
+        <Text className="text-sm font-semibold text-freedom-text-muted uppercase mb-3">
+          Protection
+        </Text>
+        <View className="bg-gray-100 dark:bg-freedom-surface rounded-xl mb-6">
+          <View className="flex-row items-center justify-between p-4 border-b border-gray-200 dark:border-freedom-secondary">
+            <View className="flex-1">
+              <Text className="text-black dark:text-white">
+                Auto-start on Boot
+              </Text>
+              <Text className="text-freedom-text-muted text-sm">
+                Start protection when device restarts
+              </Text>
+            </View>
+            <Switch
+              value={autoStartOnBoot}
+              onValueChange={handleBootToggle}
+              trackColor={{ false: "#ccc", true: "#2DD4BF" }}
+              thumbColor={autoStartOnBoot ? "#fff" : "#999"}
+            />
+          </View>
+          <View className="flex-row items-center justify-between p-4">
+            <View className="flex-1">
+              <Text className="text-black dark:text-white">
+                Password Protection
+              </Text>
+              <Text className="text-freedom-text-muted text-sm">
+                Require password to disable protection
+              </Text>
+            </View>
+            <Switch
+              value={!!passwordHash}
+              onValueChange={handlePasswordToggle}
+              trackColor={{ false: "#ccc", true: "#2DD4BF" }}
+              thumbColor={passwordHash ? "#fff" : "#999"}
+            />
+          </View>
+        </View>
+
+        {/* Control & Schedule */}
+        <Text className="text-sm font-semibold text-freedom-text-muted uppercase mb-3">
+          Control & Schedule
+        </Text>
+        <View className="bg-gray-100 dark:bg-freedom-surface rounded-xl mb-6">
+          <Pressable
+            onPress={() => {
+              void Haptics.selectionAsync();
+              router.push("/settings/control-modes");
+            }}
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4 border-b border-gray-200 dark:border-freedom-secondary"
+          >
+            <View className="flex-row items-center">
+              <Ionicons name="shield-outline" size={20} color="#2DD4BF" />
+              <View className="ml-3">
+                <Text className="text-black dark:text-white">
+                  Control Modes
+                </Text>
+                <Text className="text-freedom-text-muted text-xs">
+                  Flexible, Locked, or Hardcore
+                </Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#94A3B8" />
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              void Haptics.selectionAsync();
+              router.push("/settings/schedule");
+            }}
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4"
+          >
+            <View className="flex-row items-center">
+              <Ionicons name="alarm-outline" size={20} color="#2DD4BF" />
+              <View className="ml-3">
+                <Text className="text-black dark:text-white">Schedule</Text>
+                <Text className="text-freedom-text-muted text-xs">
+                  Plan your protection times
+                </Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#94A3B8" />
+          </Pressable>
+        </View>
+
+        {/* Display Settings */}
+        <Text className="text-sm font-semibold text-freedom-text-muted uppercase mb-3">
+          Display
+        </Text>
+        <View className="bg-gray-100 dark:bg-freedom-surface rounded-xl mb-6">
+          <View className="flex-row items-center justify-between p-4">
+            <View className="flex-row items-center">
+              <Ionicons
+                name={
+                  theme === "dark"
+                    ? "moon-outline"
+                    : theme === "light"
+                      ? "sunny-outline"
+                      : "color-palette-outline"
+                }
+                size={20}
+                color="#2DD4BF"
+              />
+              <Text className="text-black dark:text-white ml-3">Theme</Text>
+            </View>
+            <View className="flex-row gap-2">
+              <Pressable
+                onPress={() => {
+                  void Haptics.selectionAsync();
+                  setTheme("light");
+                }}
+                className={`px-3 py-1.5 rounded-lg active:opacity-70 ${theme === "light" ? "bg-freedom-accent" : "bg-gray-300 dark:bg-freedom-accent"}`}
+              >
+                <Text
+                  className={`${theme === "light" ? "text-freedom-primary" : "text-black dark:text-white"} text-xs font-semibold`}
+                >
+                  Light
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  void Haptics.selectionAsync();
+                  setTheme("dark");
+                }}
+                className={`px-3 py-1.5 rounded-lg active:opacity-70 ${theme === "dark" ? "bg-freedom-accent" : "bg-gray-300 dark:bg-freedom-accent"}`}
+              >
+                <Text
+                  className={`${theme === "dark" ? "text-freedom-primary" : "text-black dark:text-white"} text-xs font-semibold`}
+                >
+                  Dark
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  void Haptics.selectionAsync();
+                  setTheme("system");
+                }}
+                className={`px-3 py-1.5 rounded-lg active:opacity-70 ${theme === "system" ? "bg-freedom-accent" : "bg-gray-300 dark:bg-freedom-accent"}`}
+              >
+                <Text
+                  className={`${theme === "system" ? "text-freedom-primary" : "text-black dark:text-white"} text-xs font-semibold`}
+                >
+                  System
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+
+        {/* Permissions */}
+        <Text className="text-sm font-semibold text-freedom-text-muted uppercase mb-3">
+          Permissions
+        </Text>
+        <View className="bg-gray-100 dark:bg-freedom-surface rounded-xl mb-6">
+          <Pressable
+            onPress={() => {
+              void Haptics.selectionAsync();
+              router.push("/settings/permissions");
+            }}
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4 border-b border-gray-200 dark:border-freedom-secondary"
+          >
+            <View className="flex-row items-center">
+              <Ionicons name="finger-print-outline" size={20} color="#2DD4BF" />
+              <Text className="text-black dark:text-white ml-3">
+                Manage Permissions
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#94A3B8" />
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              void Haptics.selectionAsync();
+              // router.push("/(tabs)/settings/update-sources");
+            }}
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4"
+          >
+            <View className="flex-row items-center">
+              <Ionicons
+                name="cloud-download-outline"
+                size={20}
+                color="#2DD4BF"
+              />
+              <Text className="text-black dark:text-white ml-3">
+                Update Sources
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#94A3B8" />
+          </Pressable>
+        </View>
+
+        {/* Data */}
+        <Text className="text-sm font-semibold text-freedom-text-muted uppercase mb-3">
+          Data
+        </Text>
+        <View className="bg-gray-100 dark:bg-freedom-surface rounded-xl mb-6">
+          <Pressable
+            onPress={() => {
+              void Haptics.selectionAsync();
+            }}
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4 border-b border-gray-200 dark:border-freedom-secondary"
+          >
+            <View className="flex-row items-center">
+              <Ionicons name="share-outline" size={20} color="#2DD4BF" />
+              <Text className="text-black dark:text-white ml-3">
+                Export Settings
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#94A3B8" />
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              void Haptics.selectionAsync();
+            }}
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4"
+          >
+            <View className="flex-row items-center">
+              <Ionicons name="download-outline" size={20} color="#F59E0B" />
+              <Text className="text-black dark:text-white ml-3">
+                Import Settings
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="#94A3B8" />
+          </Pressable>
+        </View>
+
+        {/* About */}
+        <Text className="text-sm font-semibold text-freedom-text-muted uppercase mb-3">
+          About
+        </Text>
+        <View className="bg-gray-100 dark:bg-freedom-surface rounded-xl mb-6">
+          <View className="p-4 border-b border-gray-200 dark:border-freedom-secondary">
+            <Text className="text-black dark:text-white">Version</Text>
+            <Text className="text-freedom-text-muted text-sm">1.0.0</Text>
+          </View>
+          <Pressable
+            onPress={() => {
+              void Haptics.selectionAsync();
+            }}
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4 border-b border-gray-200 dark:border-freedom-secondary"
+          >
+            <Text className="text-black dark:text-white">
+              GitHub Repository
+            </Text>
+            <Ionicons name="open" size={20} color="#94A3B8" />
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              void Haptics.selectionAsync();
+            }}
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4 border-b border-gray-200 dark:border-freedom-secondary"
+          >
+            <Text className="text-black dark:text-white">
+              Support Resources
+            </Text>
+            <Ionicons name="chevron-forward" size={20} color="#94A3B8" />
+          </Pressable>
+          <Pressable
+            onPress={() => {
+              void Haptics.selectionAsync();
+            }}
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4"
+          >
+            <Text className="text-black dark:text-white">
+              Open Source Licenses
+            </Text>
+            <Ionicons name="chevron-forward" size={20} color="#94A3B8" />
+          </Pressable>
+        </View>
+      </ScrollView>
+
+      <InteractionGuard
+        visible={pendingAction !== null}
+        actionName={
+          pendingAction === "boot"
+            ? "Disable Auto-start"
+            : "Disable Password Protection"
+        }
+        onSuccess={() => {
+          if (pendingAction === "boot") toggleBoot();
+          else if (pendingAction === "password") togglePassword();
+        }}
+        onCancel={() => {
+          setPendingAction(null);
+        }}
+      />
+    </SafeAreaView>
+  );
+}

@@ -1,0 +1,18 @@
+{
+  "sources": [
+    {
+      "name": "StevenBlack Hosts",
+      "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn/hosts",
+      "category": "adult",
+      "format": "hosts"
+    },
+    {
+      "name": "Block List Project - Porn",
+      "url": "https://raw.githubusercontent.com/blocklistproject/Lists/master/porn.txt",
+      "category": "adult",
+      "format": "domains"
+    }
+  ],
+  "lastUpdated": null,
+  "updateIntervalDays": 7
+}

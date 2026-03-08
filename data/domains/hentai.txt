@@ -1,0 +1,3 @@
+# Freedom - Hentai Content Domain Blocklist
+# This file contains hentai-specific domains to block.
+# One domain per line. Lines starting with # are comments.

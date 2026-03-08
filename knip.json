@@ -1,0 +1,35 @@
+{
+  "entry": ["app/**/*.tsx", "modules/**/src/index.ts"],
+  "project": ["**/*.{ts,tsx}"],
+  "ignore": [
+    "modules/**",
+    "components/external-link.tsx",
+    "components/haptic-tab.tsx",
+    "components/themed-text.tsx",
+    "components/themed-view.tsx",
+    "constants/colors.ts",
+    "constants/permissions.ts",
+    "constants/theme.ts",
+    "hooks/use-color-scheme.ts",
+    "hooks/use-color-scheme.web.ts",
+    "hooks/use-theme-color.ts",
+    "components/ui/collapsible.tsx",
+    "components/ui/icon-symbol.ios.tsx",
+    "components/ui/icon-symbol.tsx"
+  ],
+  "ignoreExportsUsedInFile": true,
+  "ignoreDependencies": [
+    "freedom-accessibility-service",
+    "freedom-device-admin",
+    "freedom-foreground-service",
+    "freedom-overlay",
+    "freedom-vpn-service",
+    "@react-native-async-storage/async-storage",
+    "@react-navigation/elements",
+    "date-fns",
+    "expo-image",
+    "expo-symbols",
+    "expo-web-browser",
+    "expo-updates"
+  ]
+}

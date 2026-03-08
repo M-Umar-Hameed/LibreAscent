@@ -1,0 +1,4 @@
+# Freedom - Adult Content Keyword List
+# Keywords that trigger content blocking when found in URLs.
+# One keyword per line. Lines starting with # are comments.
+# These are matched against URL paths and query parameters.

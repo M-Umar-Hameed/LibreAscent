@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+
+# Windows nvm fix: use node directly to run lint-staged
+node ./node_modules/lint-staged/bin/lint-staged.js

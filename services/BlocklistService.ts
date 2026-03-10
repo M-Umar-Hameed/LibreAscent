@@ -99,7 +99,6 @@ export const BlocklistService = {
         .replace(/^https?:\/\//, "")
         .replace(/\/.*$/, "")
         .replace(/:.*$/, "")
-        .replace(/^www\./, "")
         .toLowerCase();
 
       if (trimmed && trimmed.includes(".") && !trimmed.includes(" ")) {
@@ -110,21 +109,112 @@ export const BlocklistService = {
   },
 
   /**
+   * Parse a keyword list text file (one word per line).
+   */
+  parseKeywordList: (content: string): string[] => {
+    const keywords: string[] = [];
+    const lines = content.split("\n");
+    for (const line of lines) {
+      const trimmed = line.trim().toLowerCase();
+      if (
+        !trimmed ||
+        trimmed.startsWith("#") ||
+        trimmed.startsWith("!") ||
+        trimmed.startsWith("[")
+      ) {
+        continue;
+      }
+      // Only include words that are 3+ chars and don't contain spaces (single words)
+      if (trimmed.length >= 3 && !trimmed.includes(" ")) {
+        keywords.push(trimmed);
+      }
+    }
+    return keywords;
+  },
+
+  /**
    * Fetch a blocklist from a remote URL.
    */
   fetchRemoteList: async (
     url: string,
-    _format: "domains" | "hosts",
+    _format: "domains" | "hosts" | "keywords",
   ): Promise<string[]> => {
     try {
+      // Handle comma-separated multi-URL strings for multi-language sources
+      if (url.includes(",")) {
+        const urls = url
+          .split(",")
+          .map((u) => u.trim())
+          .filter(Boolean);
+        const results = await Promise.all(
+          urls.map((u) => BlocklistService.fetchRemoteList(u, _format)),
+        );
+        return results.flat();
+      }
+
+      // Special handling for Bon-Appetit meta.json — resolve dynamic block file URL
+      if (
+        url.includes("Bon-Appetit/porn-domains") &&
+        url.endsWith("meta.json")
+      ) {
+        return await BlocklistService.fetchBonAppetitList(url);
+      }
+
       const response = await fetch(url);
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
       const content = await response.text();
+
+      if (_format === "keywords") {
+        return BlocklistService.parseKeywordList(content);
+      }
       return BlocklistService.parseDomainList(content);
     } catch (error) {
+      // eslint-disable-next-line no-console
       console.warn(`[BlocklistService] Failed to fetch ${url}:`, error);
+      return [];
+    }
+  },
+
+  /**
+   * Fetch the Bon-Appetit porn-domains list via its meta.json.
+   * The repo uses dynamic filenames, so we first fetch meta.json
+   * to discover the current block file URL.
+   */
+  fetchBonAppetitList: async (metaUrl: string): Promise<string[]> => {
+    try {
+      const baseUrl = metaUrl.replace("meta.json", "");
+      const metaResponse = await fetch(metaUrl);
+      if (!metaResponse.ok)
+        throw new Error(`meta.json HTTP ${metaResponse.status}`);
+      const meta = await metaResponse.json();
+
+      // meta.json structure: { blocklist: { name: "block.xxx.txt" }, allowlist: { ... } }
+      // meta.json contains the current block filename
+      const blockFile = meta.block || meta.blocklist;
+      if (!blockFile) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[BlocklistService] Bon-Appetit meta.json missing block filename",
+        );
+        return [];
+      }
+
+      const blockUrl = `${baseUrl}${blockFile}`;
+      // eslint-disable-next-line no-console
+      console.log(`[BlocklistService] Bon-Appetit resolved: ${blockUrl}`);
+
+      const response = await fetch(blockUrl);
+      if (!response.ok) throw new Error(`Block file HTTP ${response.status}`);
+      const content = await response.text();
+      return BlocklistService.parseDomainList(content);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[BlocklistService] Failed to fetch Bon-Appetit list:",
+        error,
+      );
       return [];
     }
   },
@@ -144,69 +234,87 @@ export const BlocklistService = {
   },
 
   /**
-   * Fetch all known adult blocklists from source and update store.
+   * Fetch all enabled blocklists from sources and update categories/store.
    */
-  updateAdultBlocklist: async (): Promise<boolean> => {
+  updateBlocklists: async (
+    onProgress?: (progress: number, total: number, name: string) => void,
+  ): Promise<boolean> => {
     try {
-      const adultSources = [
-        {
-          url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/porn/hosts",
-          format: "hosts" as const,
-        },
-        {
-          url: "https://raw.githubusercontent.com/blocklistproject/Lists/master/porn.txt",
-          format: "domains" as const,
-        },
-        {
-          url: "https://raw.githubusercontent.com/4skinSkywalker/Anti-Porn-HOSTS-File/master/HOSTS.txt",
-          format: "hosts" as const,
-        },
-      ];
+      const state = useBlockingStore.getState();
+      const enabledSources = state.sources.filter((s) => s.enabled);
 
-      const hentaiSources = [
-        {
-          url: "https://raw.githubusercontent.com/newedgex/ani-manga-blocklist/main/refined-blacklist.txt",
-          format: "domains" as const,
-        },
-      ];
+      if (enabledSources.length === 0) return true;
 
       const adultDomains = new Set<string>();
-      for (const source of adultSources) {
-        const list = await BlocklistService.fetchRemoteList(
-          source.url,
-          source.format,
-        );
-        list.forEach((domain) => adultDomains.add(domain));
-      }
-
       const hentaiDomains = new Set<string>();
-      for (const source of hentaiSources) {
+      const fetchedKeywords = new Set<string>();
+
+      let count = 0;
+      for (const source of enabledSources) {
+        onProgress?.(
+          count + 1,
+          enabledSources.length,
+          `Fetching ${source.name}...`,
+        );
+
         const list = await BlocklistService.fetchRemoteList(
           source.url,
           source.format,
         );
-        list.forEach((domain) => hentaiDomains.add(domain));
+
+        if (list.length > 0) {
+          if (source.format === "keywords") {
+            list.forEach((k) => fetchedKeywords.add(k));
+          } else if (
+            source.id === "hentai-refined" ||
+            source.name.toLowerCase().includes("hentai")
+          ) {
+            list.forEach((d) => hentaiDomains.add(d));
+          } else {
+            list.forEach((d) => adultDomains.add(d));
+          }
+        }
+        count++;
       }
 
-      const adultDomainList = Array.from(adultDomains);
-      const hentaiDomainList = Array.from(hentaiDomains);
+      onProgress?.(
+        enabledSources.length,
+        enabledSources.length,
+        "Syncing to native services...",
+      );
 
-      useBlockingStore
-        .getState()
-        .updateCategoryDomains("adult", adultDomainList);
-      useBlockingStore
-        .getState()
-        .updateCategoryDomains("hentai", hentaiDomainList);
+      // Update domain categories
+      if (adultDomains.size > 0 || hentaiDomains.size > 0) {
+        useBlockingStore
+          .getState()
+          .updateCategoryDomains("adult", [...adultDomains]);
+        useBlockingStore
+          .getState()
+          .updateCategoryDomains("hentai", [...hentaiDomains]);
+      } else if (
+        enabledSources.filter((s) => s.format !== "keywords").length > 0
+      ) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[BlocklistService] All domain fetch attempts returned empty. Keeping existing domains.",
+        );
+      }
 
-      // Immediately push updated domains to native VPN + Accessibility modules
+      // Merge fetched keywords with existing user keywords (preserve user's manual keywords)
+      if (fetchedKeywords.size > 0) {
+        const currentKeywords = useBlockingStore.getState().keywords;
+        const merged = new Set([...currentKeywords, ...fetchedKeywords]);
+        useBlockingStore.getState().setKeywords([...merged]);
+        // eslint-disable-next-line no-console
+        console.log(
+          `[BlocklistService] Keywords updated: ${currentKeywords.length} -> ${merged.size} (${fetchedKeywords.size} from sources)`,
+        );
+      }
+
       await BlocklistService.syncBlocklistToNative();
-
       return true;
     } catch (error) {
-      console.error(
-        "[BlocklistService] Failed to update adult blocklist:",
-        error,
-      );
+      console.error("[BlocklistService] Failed to update blocklists:", error);
       return false;
     }
   },

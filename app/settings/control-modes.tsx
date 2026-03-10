@@ -1,4 +1,5 @@
 import { InteractionGuard } from "@/components/InteractionGuard";
+import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import { useAppStore } from "@/stores/useAppStore";
 import type { ControlMode } from "@/types/blocking";
 import { Ionicons } from "@expo/vector-icons";
@@ -75,6 +76,11 @@ export default function ControlModesScreen(): ReactNode {
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setSurveillance(pendingSurveillance);
     setControlMode(pendingMode);
+
+    // Notify native layer about the change immediately
+    // We can use syncAllConfigs or a targeted update
+    void FreedomAccessibility.updateHardcoreMode(pendingMode === "hardcore");
+
     router.back();
   };
 

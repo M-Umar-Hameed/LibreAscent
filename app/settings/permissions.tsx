@@ -138,7 +138,7 @@ export default function PermissionsScreen(): ReactNode {
         >
           <Ionicons name="arrow-back" size={24} color="#2DD4BF" />
         </Pressable>
-        <Text className="text-xl font-bold text-black dark:text-white ml-2">
+        <Text className="text-xl font-bold text-black dark:text-white ml-2 tracking-tight leading-none">
           Permissions
         </Text>
       </View>
@@ -156,7 +156,8 @@ export default function PermissionsScreen(): ReactNode {
               onPress={() => {
                 handlePermissionPress(item.id, item.status);
               }}
-              className={`p-4 flex-row items-center justify-between border-b border-gray-200 dark:border-freedom-secondary active:bg-gray-200 dark:active:bg-freedom-accent/10 ${index === permissionItems.length - 1 ? "border-b-0" : ""}`}
+              aria-label={`Grant ${item.title} permission`}
+              className={`p-5 flex-row items-center justify-between border-b border-gray-200 dark:border-freedom-secondary active:bg-gray-200 dark:active:bg-freedom-accent/10 ${index === permissionItems.length - 1 ? "border-b-0" : ""}`}
             >
               <View className="flex-row items-center flex-1">
                 <View

@@ -13,7 +13,7 @@ export default function BlockOverlayScreen(): ReactNode {
         </View>
 
         {/* Stay Away Message */}
-        <Text className="text-4xl font-bold text-white text-center mb-4">
+        <Text className="text-4xl font-bold text-white text-center mb-4 tracking-tight leading-tight">
           Stay Away
         </Text>
         <Text className="text-lg text-freedom-text-muted text-center mb-8">

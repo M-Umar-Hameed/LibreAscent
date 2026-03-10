@@ -74,7 +74,7 @@ export default function BlockAdultScreen(): ReactNode {
     setPendingAction(null);
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     setIsUpdating(true);
-    const success = await BlocklistService.updateAdultBlocklist();
+    const success = await BlocklistService.updateBlocklists();
     setIsUpdating(false);
 
     if (success) {

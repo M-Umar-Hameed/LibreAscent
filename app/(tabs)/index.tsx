@@ -36,10 +36,10 @@ export default function DashboardScreen(): ReactNode {
         className="flex-1 px-4 pt-4"
         contentContainerStyle={{ paddingBottom: 100 }}
       >
-        <Text className="text-3xl font-bold text-black dark:text-white text-center mb-2">
+        <Text className="text-3xl font-bold text-black dark:text-white text-center mb-2 tracking-tighter leading-tight">
           Freedom
         </Text>
-        <Text className="text-freedom-text-muted-bright text-center mb-8">
+        <Text className="text-freedom-text-muted-bright text-center mb-10 tracking-tight max-w-[280px] self-center">
           Your shield against addiction
         </Text>
 
@@ -56,17 +56,17 @@ export default function DashboardScreen(): ReactNode {
             />
           </View>
           <Text
-            className="text-2xl font-black text-center tracking-tight"
+            className="text-2xl font-black text-center tracking-tighter leading-tight"
             style={{ color: isScheduled ? "#2DD4BF" : "#94A3B8" }}
           >
             {isScheduled ? "Protection Active" : "Protection Paused"}
           </Text>
-          <View className="flex-row items-center mt-2 bg-white/50 dark:bg-black/20 px-3 py-1 rounded-full">
+          <View className="flex-row items-center mt-3 bg-white/50 dark:bg-black/20 px-3 py-1 rounded-full">
             <View
               className="w-2 h-2 rounded-full mr-2"
               style={{ backgroundColor: modeInfo.color }}
             />
-            <Text className="text-freedom-text-muted text-xs font-semibold uppercase">
+            <Text className="text-freedom-text-muted text-[10px] font-bold uppercase tracking-widest">
               {modeInfo.label} Mode
             </Text>
           </View>
@@ -79,25 +79,36 @@ export default function DashboardScreen(): ReactNode {
 
         {/* Stats Row */}
         <View className="flex-row gap-3 mb-6">
-          <View className="flex-1 bg-gray-100 dark:bg-freedom-surface rounded-xl p-4">
-            <Text className="text-freedom-text-muted text-xs">Days Clean</Text>
-            <Text className="text-2xl font-bold text-black dark:text-white">
+          <View
+            aria-label="Days clean"
+            className="flex-1 bg-gray-100 dark:bg-freedom-surface rounded-2xl p-4 shadow-sm"
+          >
+            <Text className="text-freedom-text-muted text-xs font-semibold uppercase tracking-wider mb-1">
+              Days Clean
+            </Text>
+            <Text className="text-3xl font-bold text-black dark:text-white">
               {stats.daysClean}
             </Text>
           </View>
-          <View className="flex-1 bg-gray-100 dark:bg-freedom-surface rounded-xl p-4">
-            <Text className="text-freedom-text-muted text-xs">
-              Blocked Today
+          <View
+            aria-label="Blocked today"
+            className="flex-1 bg-gray-100 dark:bg-freedom-surface rounded-2xl p-4 shadow-sm"
+          >
+            <Text className="text-freedom-text-muted text-xs font-semibold uppercase tracking-wider mb-1">
+              Today
             </Text>
-            <Text className="text-2xl font-bold text-black dark:text-white">
+            <Text className="text-3xl font-bold text-black dark:text-white">
               {stats.blockedToday}
             </Text>
           </View>
-          <View className="flex-1 bg-gray-100 dark:bg-freedom-surface rounded-xl p-4">
-            <Text className="text-freedom-text-muted text-xs">
-              Total Blocked
+          <View
+            aria-label="Total blocked"
+            className="flex-1 bg-gray-100 dark:bg-freedom-surface rounded-2xl p-4 shadow-sm"
+          >
+            <Text className="text-freedom-text-muted text-xs font-semibold uppercase tracking-wider mb-1">
+              Total
             </Text>
-            <Text className="text-2xl font-bold text-black dark:text-white">
+            <Text className="text-3xl font-bold text-black dark:text-white">
               {stats.totalBlocked}
             </Text>
           </View>

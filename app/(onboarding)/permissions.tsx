@@ -95,7 +95,8 @@ function PermissionCard({
         onPressIn={!permission.granted ? handlePressIn : undefined}
         onPressOut={!permission.granted ? handlePressOut : undefined}
         disabled={permission.loading}
-        className={`rounded-2xl p-4 mb-3 ${
+        aria-label={`Grant ${permission.title} permission`}
+        className={`rounded-2xl p-5 mb-3 ${
           permission.granted
             ? "bg-freedom-success/10 border border-freedom-success/30"
             : "bg-freedom-surface border border-freedom-accent/20"
@@ -241,6 +242,7 @@ export default function PermissionsScreen(): ReactNode {
           {/* Primary: Start Protection */}
           <Pressable
             onPress={handleContinue}
+            aria-label="Continue to dashboard"
             className={`w-full py-4 rounded-2xl items-center ${
               allGranted
                 ? "bg-freedom-success"

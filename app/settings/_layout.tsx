@@ -7,6 +7,7 @@ export default function SettingsLayout(): ReactNode {
       <Stack.Screen name="permissions" />
       <Stack.Screen name="control-modes" />
       <Stack.Screen name="schedule" />
+      <Stack.Screen name="update-sources" />
     </Stack>
   );
 }

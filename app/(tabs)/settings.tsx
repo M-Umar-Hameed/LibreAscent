@@ -1,11 +1,20 @@
 import { InteractionGuard } from "@/components/InteractionGuard";
+import { BlocklistService } from "@/services/BlocklistService";
 import { useAppStore } from "@/stores/useAppStore";
+import {
+  useBlockingStore,
+  type BlockingState,
+} from "@/stores/useBlockingStore";
 import { Ionicons } from "@expo/vector-icons";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
 import * as Haptics from "expo-haptics";
+import * as Linking from "expo-linking";
 import { useRouter } from "expo-router";
+import * as Sharing from "expo-sharing";
 import type { ReactNode } from "react";
 import { useState } from "react";
-import { Pressable, ScrollView, Switch, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, Switch, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function SettingsScreen(): ReactNode {
@@ -17,6 +26,14 @@ export default function SettingsScreen(): ReactNode {
     passwordHash,
     controlMode,
   } = useAppStore();
+  const {
+    keywords,
+    includedUrls,
+    excludedUrls,
+    adultBlockingEnabled,
+    sources,
+    importSettings,
+  } = useBlockingStore();
   const router = useRouter();
 
   const [pendingAction, setPendingAction] = useState<
@@ -51,6 +68,79 @@ export default function SettingsScreen(): ReactNode {
     setPendingAction(null);
   };
 
+  const handleExport = async (): Promise<void> => {
+    try {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      const settings = {
+        keywords,
+        includedUrls,
+        excludedUrls,
+        adultBlockingEnabled,
+        sources,
+        exportedAt: new Date().toISOString(),
+        version: "1.1.1",
+      };
+
+      const docDir = FileSystem.documentDirectory;
+      const fileUri = `${docDir}freedom_settings.json`;
+      await FileSystem.writeAsStringAsync(
+        fileUri,
+        JSON.stringify(settings, null, 2),
+      );
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri);
+      } else {
+        Alert.alert("Error", "Sharing is not available on this device.");
+      }
+    } catch (e) {
+      console.error("[Settings] Export failed:", e);
+      Alert.alert("Error", "Failed to export settings.");
+    }
+  };
+
+  const handleImport = async (): Promise<void> => {
+    try {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "application/json",
+        copyToCacheDirectory: true,
+      });
+
+      if (result.canceled) return;
+
+      const fileContent = await FileSystem.readAsStringAsync(
+        result.assets[0].uri,
+      );
+      const data = JSON.parse(fileContent) as Partial<BlockingState>;
+
+      // Basic validation
+      if (!data.keywords && !data.sources) {
+        Alert.alert("Error", "Invalid settings file.");
+        return;
+      }
+
+      importSettings(data);
+      Alert.alert(
+        "Success",
+        "Settings imported successfully. Syncing with native services...",
+      );
+      await BlocklistService.syncBlocklistToNative();
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (e) {
+      console.error("[Settings] Import failed:", e);
+      Alert.alert(
+        "Error",
+        "Failed to import settings. Ensure the file is a valid Freedom settings JSON.",
+      );
+    }
+  };
+
+  const openRepo = (): void => {
+    void Haptics.selectionAsync();
+    void Linking.openURL("https://github.com/M-Umar-Hameed/Freedom");
+  };
+
   return (
     <SafeAreaView
       className="flex-1 bg-white dark:bg-freedom-primary"
@@ -60,7 +150,7 @@ export default function SettingsScreen(): ReactNode {
         className="flex-1 px-4 pt-4"
         contentContainerStyle={{ paddingBottom: 100 }}
       >
-        <Text className="text-2xl font-bold text-black dark:text-white mb-6">
+        <Text className="text-2xl font-bold text-black dark:text-white mb-6 tracking-tight leading-tight">
           Settings
         </Text>
 
@@ -83,6 +173,7 @@ export default function SettingsScreen(): ReactNode {
               onValueChange={handleBootToggle}
               trackColor={{ false: "#ccc", true: "#2DD4BF" }}
               thumbColor={autoStartOnBoot ? "#fff" : "#999"}
+              aria-label="Toggle auto-start on boot"
             />
           </View>
           <View className="flex-row items-center justify-between p-4">
@@ -99,6 +190,7 @@ export default function SettingsScreen(): ReactNode {
               onValueChange={handlePasswordToggle}
               trackColor={{ false: "#ccc", true: "#2DD4BF" }}
               thumbColor={passwordHash ? "#fff" : "#999"}
+              aria-label="Toggle password protection"
             />
           </View>
         </View>
@@ -235,7 +327,7 @@ export default function SettingsScreen(): ReactNode {
           <Pressable
             onPress={() => {
               void Haptics.selectionAsync();
-              // router.push("/(tabs)/settings/update-sources");
+              router.push("/settings/update-sources");
             }}
             className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4"
           >
@@ -259,10 +351,9 @@ export default function SettingsScreen(): ReactNode {
         </Text>
         <View className="bg-gray-100 dark:bg-freedom-surface rounded-xl mb-6">
           <Pressable
-            onPress={() => {
-              void Haptics.selectionAsync();
-            }}
-            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4 border-b border-gray-200 dark:border-freedom-secondary"
+            onPress={handleExport}
+            aria-label="Export Settings"
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-5 border-b border-gray-200 dark:border-freedom-secondary"
           >
             <View className="flex-row items-center">
               <Ionicons name="share-outline" size={20} color="#2DD4BF" />
@@ -273,10 +364,9 @@ export default function SettingsScreen(): ReactNode {
             <Ionicons name="chevron-forward" size={20} color="#94A3B8" />
           </Pressable>
           <Pressable
-            onPress={() => {
-              void Haptics.selectionAsync();
-            }}
-            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4"
+            onPress={handleImport}
+            aria-label="Import Settings"
+            className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-5"
           >
             <View className="flex-row items-center">
               <Ionicons name="download-outline" size={20} color="#F59E0B" />
@@ -295,12 +385,12 @@ export default function SettingsScreen(): ReactNode {
         <View className="bg-gray-100 dark:bg-freedom-surface rounded-xl mb-6">
           <View className="p-4 border-b border-gray-200 dark:border-freedom-secondary">
             <Text className="text-black dark:text-white">Version</Text>
-            <Text className="text-freedom-text-muted text-sm">1.0.0</Text>
+            <Text className="text-freedom-text-muted text-sm">
+              1.1.1 (Touka_Debo)
+            </Text>
           </View>
           <Pressable
-            onPress={() => {
-              void Haptics.selectionAsync();
-            }}
+            onPress={openRepo}
             className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4 border-b border-gray-200 dark:border-freedom-secondary"
           >
             <Text className="text-black dark:text-white">
@@ -311,6 +401,9 @@ export default function SettingsScreen(): ReactNode {
           <Pressable
             onPress={() => {
               void Haptics.selectionAsync();
+              void Linking.openURL(
+                "https://github.com/M-Umar-Hameed/Freedom/issues",
+              );
             }}
             className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4 border-b border-gray-200 dark:border-freedom-secondary"
           >
@@ -322,6 +415,9 @@ export default function SettingsScreen(): ReactNode {
           <Pressable
             onPress={() => {
               void Haptics.selectionAsync();
+              void Linking.openURL(
+                "https://github.com/M-Umar-Hameed/Freedom/blob/main/LICENSE",
+              );
             }}
             className="active:bg-gray-200 dark:active:bg-freedom-secondary flex-row items-center justify-between p-4"
           >

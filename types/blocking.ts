@@ -6,6 +6,15 @@ export interface BlockingCategory {
   enabled: boolean;
 }
 
+export interface BlocklistSource {
+  id: string;
+  url: string;
+  name: string;
+  enabled: boolean;
+  format: "domains" | "hosts" | "keywords";
+  lastFetchedAt?: string;
+}
+
 export interface BlockingStats {
   blockedToday: number;
   totalBlocked: number;

@@ -47,3 +47,11 @@ export interface SurveillanceConfig {
   startHour?: number; // 0-23 for 'time'
   endHour?: number; // 0-23 for 'time'
 }
+
+export interface BlockedApp {
+  packageName: string;
+  appName: string;
+  enabled: boolean;
+  controlMode: ControlMode | "individual"; // Can use main mode or individual override
+  surveillance: SurveillanceConfig;
+}

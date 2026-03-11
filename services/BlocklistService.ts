@@ -11,7 +11,79 @@ export const BlocklistService = {
    * and push to the native VPN and Accessibility blocklists.
    */
   syncBlocklistToNative: async (): Promise<void> => {
+    await BlocklistService.syncDomainsToNative();
+    await BlocklistService.syncKeywordsToNative();
+    await BlocklistService.syncAppsToNative();
+  },
+
+  /**
+   * Lightweight sync: only update master flag + per-category enabled states.
+   * No domain transfer — instant effect on native side.
+   */
+  syncCategoryFlagsToNative: async (): Promise<void> => {
     const state = useBlockingStore.getState();
+
+    try {
+      await FreedomAccessibility.updateAdultBlockingEnabled(
+        state.adultBlockingEnabled,
+      );
+    } catch (e) {
+      console.warn("[BlocklistService] Failed to sync master flag:", e);
+    }
+
+    for (const category of state.categories) {
+      try {
+        await FreedomAccessibility.setCategoryEnabled(
+          category.id,
+          state.adultBlockingEnabled && category.enabled,
+        );
+      } catch (e) {
+        console.warn(
+          `[BlocklistService] Failed to sync category ${category.id} enabled:`,
+          e,
+        );
+      }
+    }
+  },
+
+  syncDomainsToNative: async (options?: {
+    skipResync?: boolean;
+  }): Promise<void> => {
+    const state = useBlockingStore.getState();
+
+    // Always sync flags (instant)
+    await BlocklistService.syncCategoryFlagsToNative();
+
+    // If we only want to toggle flags, skip the heavy domain transfer
+    if (options?.skipResync) return;
+
+    // Sync per-category domains to Accessibility (heavy but only after updateBlocklists)
+    for (const category of state.categories) {
+      try {
+        await FreedomAccessibility.updateCategoryDomains(
+          category.id,
+          category.domains,
+        );
+      } catch (e) {
+        console.warn(
+          `[BlocklistService] Failed to sync category ${category.id} domains:`,
+          e,
+        );
+      }
+    }
+
+    // Sync included/excluded URLs to Accessibility
+    try {
+      await FreedomAccessibility.setIncludedDomains(state.includedUrls);
+      await FreedomAccessibility.updateWhitelist(state.excludedUrls);
+    } catch (e) {
+      console.warn(
+        "[BlocklistService] Failed to sync URLs to Accessibility:",
+        e,
+      );
+    }
+
+    // VPN gets combined list (VPN uses addCategory/removeCategory for toggles)
     const allDomains: string[] = [];
 
     for (const category of state.categories) {
@@ -36,13 +108,63 @@ export const BlocklistService = {
     } catch (e) {
       console.warn("[BlocklistService] Failed to sync to VPN:", e);
     }
+  },
+
+  /**
+   * Sync VPN category toggle: add or remove a category from VPN blocklist.
+   */
+  syncVpnCategoryToggle: async (
+    categoryId: string,
+    enabled: boolean,
+  ): Promise<void> => {
+    const state = useBlockingStore.getState();
+    const category = state.categories.find((c) => c.id === categoryId);
+    if (!category || category.domains.length === 0) return;
 
     try {
-      await FreedomAccessibility.updateBlockedDomains(allDomains);
-      await FreedomAccessibility.updateBlockedKeywords(state.keywords);
-      await FreedomAccessibility.updateWhitelist(state.excludedUrls);
+      if (enabled && state.adultBlockingEnabled) {
+        await FreedomVpn.addCategory(categoryId, category.domains);
+      } else {
+        await FreedomVpn.removeCategory(categoryId);
+      }
     } catch (e) {
-      console.warn("[BlocklistService] Failed to sync to Accessibility:", e);
+      console.warn(
+        `[BlocklistService] Failed to sync VPN category ${categoryId}:`,
+        e,
+      );
+    }
+  },
+
+  syncKeywordsToNative: async (): Promise<void> => {
+    const state = useBlockingStore.getState();
+    try {
+      await FreedomAccessibility.updateBlockedKeywords(state.keywords);
+    } catch (e) {
+      console.warn(
+        "[BlocklistService] Failed to sync keywords to Accessibility:",
+        e,
+      );
+    }
+  },
+
+  syncAppsToNative: async (): Promise<void> => {
+    const state = useBlockingStore.getState();
+    try {
+      await FreedomAccessibility.updateBlockedApps(
+        state.blockedApps
+          .filter((a) => a.enabled)
+          .map((a) => ({
+            packageName: a.packageName,
+            appName: a.appName,
+            surveillanceType: a.surveillance.type,
+            surveillanceValue: a.surveillance.value,
+          })),
+      );
+    } catch (e) {
+      console.warn(
+        "[BlocklistService] Failed to sync apps to Accessibility:",
+        e,
+      );
     }
   },
 

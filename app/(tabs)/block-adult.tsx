@@ -60,14 +60,40 @@ export default function BlockAdultScreen(): ReactNode {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     toggleStoreCategory(id);
     setPendingAction(null);
+
+    // Sync VPN category toggle in the background (uses addCategory/removeCategory)
+    const updatedState = useBlockingStore.getState();
+    const cat = updatedState.categories.find((c) => c.id === id);
+    void BlocklistService.syncVpnCategoryToggle(id, !!cat?.enabled);
+
     await ProtectionService.syncAllConfigs();
+
+    // Auto-fetch if the enabled category has no domains
+    if (cat?.enabled && (!cat.domains || cat.domains.length === 0)) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[BlockAdult] Category ${id} has 0 domains, triggering update...`,
+      );
+      void performUpdate();
+    }
   };
 
   const toggleMaster = async (): Promise<void> => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setAdultBlockingEnabled(!adultBlockingEnabled);
+    const newEnabled = !adultBlockingEnabled;
+    setAdultBlockingEnabled(newEnabled);
     setPendingAction(null);
-    await ProtectionService.syncAllConfigs();
+
+    // Sync VPN categories based on new master state
+    const state = useBlockingStore.getState();
+    for (const cat of state.categories) {
+      void BlocklistService.syncVpnCategoryToggle(
+        cat.id,
+        newEnabled && cat.enabled,
+      );
+    }
+
+    await ProtectionService.syncAllConfigs({ skipResync: true });
   };
 
   const performUpdate = async (): Promise<void> => {
@@ -144,6 +170,12 @@ export default function BlockAdultScreen(): ReactNode {
                   <Text className="text-freedom-text-muted text-sm">
                     {category.description}
                   </Text>
+                  {category.id === "hentai" && (
+                    <Text className="text-freedom-accent text-xs mt-1 italic font-medium">
+                      Note: Whitelist your favorite anime/manga/manhua/manhwa
+                      sites to avoid blocks.
+                    </Text>
+                  )}
                   <Text className="text-freedom-text-muted text-xs mt-1">
                     {category.domains?.length || 0} domains
                   </Text>

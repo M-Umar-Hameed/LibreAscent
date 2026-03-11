@@ -2,7 +2,9 @@ import { BROWSERS } from "@/constants/browsers";
 import { incrementDailyBlockedCount, logBlockedUrl } from "@/db/database";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import * as FreedomVpn from "@/modules/freedom-vpn-service/src";
+import { BlockingCategory } from "@/types/blocking";
 import { useAppStore } from "@/stores/useAppStore";
+import { useBlockingStore } from "@/stores/useBlockingStore";
 import { BlocklistService } from "./BlocklistService";
 
 /**
@@ -43,10 +45,67 @@ export const ProtectionService = {
     return FreedomVpn.isVpnActive();
   },
 
-  /**
-   * Re-sync ALL configurations.
-   */
-  syncAllConfigs: async (): Promise<void> => {
+  _syncTimeout: null as ReturnType<typeof setTimeout> | null,
+  _lastDomainContent: "" as string, // Hash of last synced domains
+
+  syncAllConfigs: async (options?: { skipResync?: boolean }): Promise<void> => {
+    if (ProtectionService._syncTimeout) {
+      clearTimeout(ProtectionService._syncTimeout);
+    }
+
+    return new Promise((resolve) => {
+      ProtectionService._syncTimeout = setTimeout(() => {
+        void (async () => {
+          try {
+            const state = useBlockingStore.getState();
+
+            // 1. INSTANT: Sync master flag + per-category enabled flags (no domain transfer)
+            await BlocklistService.syncCategoryFlagsToNative();
+
+            // 2. Smart compare: only re-send domains if domain DATA changed (not just enabled flags)
+            // Hash excludes 'enabled' — toggling a category doesn't trigger domain re-transfer
+            const currentDomainContent = JSON.stringify({
+              categories: state.categories.map((c: BlockingCategory) => ({
+                id: c.id,
+                domainCount: c.domains.length,
+              })),
+              included: state.includedUrls,
+              excluded: state.excludedUrls,
+            });
+
+            const domainsChanged =
+              currentDomainContent !== ProtectionService._lastDomainContent;
+
+            if (domainsChanged && !options?.skipResync) {
+              console.log(
+                `[ProtectionService] Domain data changed, performing full sync...`,
+              );
+              await BlocklistService.syncDomainsToNative({ skipResync: false });
+              ProtectionService._lastDomainContent = currentDomainContent;
+            }
+
+            // 3. Sync other parts in parallel
+            await Promise.all([
+              ProtectionService.syncBrowserConfigs(),
+              BlocklistService.syncKeywordsToNative(),
+              BlocklistService.syncAppsToNative(),
+            ]);
+
+            const controlMode = useAppStore.getState().controlMode;
+            await FreedomAccessibility.updateHardcoreMode(
+              controlMode === "hardcore",
+            );
+          } catch (e) {
+            console.error("[ProtectionService] Sync failed:", e);
+          } finally {
+            resolve();
+          }
+        })();
+      }, 300); // 300ms debounce
+    });
+  },
+
+  syncBrowserConfigs: async (): Promise<void> => {
     try {
       await FreedomAccessibility.updateBrowserConfigs(
         BROWSERS.map((b) => ({
@@ -61,11 +120,6 @@ export const ProtectionService = {
         e,
       );
     }
-
-    await BlocklistService.syncBlocklistToNative();
-
-    const controlMode = useAppStore.getState().controlMode;
-    await FreedomAccessibility.updateHardcoreMode(controlMode === "hardcore");
   },
 
   /**

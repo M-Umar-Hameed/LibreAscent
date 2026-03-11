@@ -74,15 +74,18 @@ export default function RootLayout(): ReactNode {
     nativeWind.setColorScheme(isDark ? "dark" : "light");
   }, [isDark, nativeWind]);
 
-  // Sync blocklists to Native VPN dynamically
   const keywords = useBlockingStore((s) => s.keywords);
   const categories = useBlockingStore((s) => s.categories);
   const includedUrls = useBlockingStore((s) => s.includedUrls);
   const excludedUrls = useBlockingStore((s) => s.excludedUrls);
   const adultBlockingEnabled = useBlockingStore((s) => s.adultBlockingEnabled);
+  const blockedApps = useBlockingStore((s) => s.blockedApps);
 
+  // Centralized debounced sync for all protection settings
   useEffect(() => {
     if (isMounted) {
+      // If adultBlockingEnabled is the only thing that changed,
+      // ProtectionService will handle the light sync via internal logic soon.
       void ProtectionService.syncAllConfigs().catch(console.error);
     }
   }, [
@@ -91,6 +94,7 @@ export default function RootLayout(): ReactNode {
     includedUrls,
     excludedUrls,
     adultBlockingEnabled,
+    blockedApps,
     isMounted,
   ]);
 

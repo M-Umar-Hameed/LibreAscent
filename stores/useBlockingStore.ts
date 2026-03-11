@@ -1,5 +1,9 @@
 import { sqliteStorage } from "@/db/database";
-import type { BlockingCategory, BlocklistSource } from "@/types/blocking";
+import type {
+  BlockedApp,
+  BlockingCategory,
+  BlocklistSource,
+} from "@/types/blocking";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -17,6 +21,9 @@ export interface BlockingState {
 
   // Custom Sources
   sources: BlocklistSource[];
+
+  // Blocked Apps
+  blockedApps: BlockedApp[];
 
   // Keyword actions
   addKeyword: (keyword: string) => void;
@@ -43,6 +50,12 @@ export interface BlockingState {
   toggleSource: (id: string) => void;
   updateSourceDomains: (id: string, domains: string[]) => void;
 
+  // App actions
+  addBlockedApp: (app: BlockedApp) => void;
+  removeBlockedApp: (packageName: string) => void;
+  toggleBlockedApp: (packageName: string) => void;
+  updateAppControl: (packageName: string, config: Partial<BlockedApp>) => void;
+
   // Mass actions
   importSettings: (data: Partial<BlockingState>) => void;
 }
@@ -56,13 +69,6 @@ export const DEFAULT_SOURCES: BlocklistSource[] = [
     enabled: true,
   },
   {
-    id: "hostsvn-porn",
-    name: "HostsVN (Porn)",
-    url: "https://raw.githubusercontent.com/bigdargon/hostsVN/master/option/porn-hosts",
-    format: "hosts",
-    enabled: true,
-  },
-  {
     id: "blocklist-project-porn",
     name: "BlocklistProject (Porn)",
     url: "https://raw.githubusercontent.com/blocklistproject/Lists/4fbe4d2ac6cf334130319556db6e44c8576a1299/porn.txt",
@@ -72,7 +78,7 @@ export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
     id: "bon-appetit-porn",
     name: "Bon-Appetit (Porn Domains)",
-    url: "https://raw.githubusercontent.com/Bon-Appetit/porn-domains/main/meta.json",
+    url: "https://raw.githubusercontent.com/Bon-Appetit/porn-domains/refs/heads/main/block.c180c6fed4.45godp.txt",
     format: "domains",
     enabled: true,
   },
@@ -111,13 +117,16 @@ export const useBlockingStore = create<BlockingState>()(
         {
           id: "hentai",
           name: "Hentai",
-          description: "Animated adult content and manga",
+          description:
+            "Animated adult content and manga. (Contains some manga sites; whitelist your fav manga/manhwa/manhua if needed)",
           domains: [],
           enabled: true,
         },
       ],
       adultBlockingEnabled: true,
       sources: DEFAULT_SOURCES,
+      blockedApps: [],
+
       addKeyword: (keyword) =>
         set((state) => {
           const lower = keyword.trim().toLowerCase();
@@ -140,12 +149,9 @@ export const useBlockingStore = create<BlockingState>()(
       addIncludedUrl: (url) =>
         set((state) => {
           const lower = url.trim().toLowerCase();
-          // console.log(`[useBlockingStore] addIncludedUrl called for: ${lower}`);
           if (!lower || state.includedUrls.includes(lower)) {
-            // console.log(`[useBlockingStore] Url ${lower} not added (empty or already exists)`);
             return state;
           }
-          // console.log(`[useBlockingStore] Successfully added ${lower} to includedUrls`);
           return { includedUrls: [...state.includedUrls, lower] };
         }),
 
@@ -185,7 +191,6 @@ export const useBlockingStore = create<BlockingState>()(
 
       updateCategoryDomains: (id, domains) =>
         set((state) => {
-          // Keep a unique list to avoid storing duplicates and bloating sqlite
           const uniqueDomains = Array.from(new Set(domains));
           return {
             categories: state.categories.map((cat) =>
@@ -224,6 +229,34 @@ export const useBlockingStore = create<BlockingState>()(
           ),
         })),
 
+      addBlockedApp: (app) =>
+        set((state) => {
+          if (state.blockedApps.some((a) => a.packageName === app.packageName))
+            return state;
+          return { blockedApps: [...state.blockedApps, app] };
+        }),
+
+      removeBlockedApp: (packageName) =>
+        set((state) => ({
+          blockedApps: state.blockedApps.filter(
+            (a) => a.packageName !== packageName,
+          ),
+        })),
+
+      toggleBlockedApp: (packageName) =>
+        set((state) => ({
+          blockedApps: state.blockedApps.map((a) =>
+            a.packageName === packageName ? { ...a, enabled: !a.enabled } : a,
+          ),
+        })),
+
+      updateAppControl: (packageName, config) =>
+        set((state) => ({
+          blockedApps: state.blockedApps.map((a) =>
+            a.packageName === packageName ? { ...a, ...config } : a,
+          ),
+        })),
+
       importSettings: (data) =>
         set((state) => ({
           keywords: data.keywords || state.keywords,
@@ -232,6 +265,7 @@ export const useBlockingStore = create<BlockingState>()(
           adultBlockingEnabled:
             data.adultBlockingEnabled ?? state.adultBlockingEnabled,
           sources: data.sources || state.sources,
+          blockedApps: data.blockedApps || state.blockedApps,
         })),
     }),
     {
@@ -239,22 +273,9 @@ export const useBlockingStore = create<BlockingState>()(
       storage: createJSONStorage(() => sqliteStorage),
       onRehydrateStorage: () => (state) => {
         if (state) {
-          // Force default keywords if they somehow got wiped out
-          if (state.keywords.length === 0) {
-            state.setKeywords([
-              "porn",
-              "sex",
-              "hentai",
-              "xvideos",
-              "xnxx",
-              "xhamster",
-              "porntrex",
-              "xhaccess",
-            ]);
-          }
+          // Removed forced keyword rehydration so users can legitimately have 0 keywords
 
           let currentSources = [...state.sources];
-          // Remove old obsolete sources
           currentSources = currentSources.filter(
             (s) =>
               s.id !== "forbidden-words-eng" &&
@@ -263,7 +284,6 @@ export const useBlockingStore = create<BlockingState>()(
           );
 
           let changed = false;
-          // Inject missing defaults
           for (const ds of DEFAULT_SOURCES) {
             if (!currentSources.some((s) => s.id === ds.id)) {
               currentSources.push(ds);
@@ -271,7 +291,6 @@ export const useBlockingStore = create<BlockingState>()(
             }
           }
           if (changed || currentSources.length !== state.sources.length) {
-            // Can't call set() directly out here easily, use importSettings to trigger a save
             state.importSettings({ sources: currentSources });
           }
         }

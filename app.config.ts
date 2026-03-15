@@ -4,7 +4,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: "Freedom",
   slug: "freedom",
-  version: "1.2.0",
+  version: "1.3.0",
   orientation: "portrait",
   icon: "./assets/images/icon.png",
   scheme: "freedom",
@@ -37,6 +37,14 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     favicon: "./assets/images/favicon.png",
   },
   plugins: [
+    [
+      "expo-build-properties",
+      {
+        android: {
+          largeHeap: true,
+        },
+      },
+    ],
     "expo-router",
     [
       "expo-splash-screen",

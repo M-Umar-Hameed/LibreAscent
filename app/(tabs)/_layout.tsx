@@ -51,16 +51,13 @@ export default function TabLayout(): ReactNode {
       <Tabs.Screen
         name="block-keywords"
         options={{
-          title: "Keywords",
-          tabBarIcon: ({ color }) => (
-            <Ionicons name="key-outline" size={24} color={color} />
-          ),
+          href: null,
         }}
       />
       <Tabs.Screen
         name="block-websites"
         options={{
-          title: "Sites",
+          title: "Content",
           tabBarIcon: ({ color }) => (
             <Ionicons name="globe-outline" size={24} color={color} />
           ),

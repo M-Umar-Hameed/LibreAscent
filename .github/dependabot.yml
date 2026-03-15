@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # 1. Frontend & Logic (NPM)
+  - package-ecosystem: "npm"
+    directory: "/"
+    # Schedule: "weekly" saves your Action minutes vs "daily"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    # Groups: Updates all "react" related things in one single PR
+    groups:
+      react-dependencies:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      tauri-dependencies:
+        patterns:
+          - "@tauri-apps/*"
+    # Limits: Open max 5 PRs at a time so you don't get overwhelmed
+    open-pull-requests-limit: 5
+
+  # 2. Github Actions (Keep your CI workflows up to date)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"

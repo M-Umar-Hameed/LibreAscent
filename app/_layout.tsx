@@ -1,3 +1,4 @@
+import { AppLockScreen } from "@/components/AppLockScreen";
 import { ProtectionService } from "@/services/ProtectionService";
 import { useAppStore } from "@/stores/useAppStore";
 import { useBlockingStore } from "@/stores/useBlockingStore";
@@ -18,8 +19,8 @@ import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useColorScheme as useNativeWindColorScheme } from "nativewind";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
-import { useColorScheme } from "react-native";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AppState, useColorScheme } from "react-native";
 import "react-native-reanimated";
 import "../global.css";
 
@@ -33,12 +34,34 @@ export default function RootLayout(): ReactNode {
   const isOnboarded = useAppStore((s) => s.isOnboarded);
   const theme = useAppStore((s) => s.theme);
   const hydrateStats = useAppStore((s) => s.hydrateStats);
+  const appLockEnabled = useAppStore((s) => s.appLockEnabled);
   const systemColorScheme = useColorScheme();
   const navigationState = useRootNavigationState();
   const segments = useSegments();
   const nativeWind = useNativeWindColorScheme();
   const [isMounted, setIsMounted] = useState(false);
   const [fontsLoaded, setFontsLoaded] = useState(false);
+  const [isLocked, setIsLocked] = useState(true);
+
+  const handleUnlock = useCallback(() => {
+    setIsLocked(false);
+  }, []);
+
+  // Re-lock when app comes back from background
+  useEffect(() => {
+    if (!appLockEnabled) {
+      setIsLocked(false);
+      return;
+    }
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "background") {
+        setIsLocked(true);
+      }
+    });
+    return () => {
+      subscription.remove();
+    };
+  }, [appLockEnabled]);
 
   useEffect(() => {
     async function prepare(): Promise<void> {
@@ -69,28 +92,31 @@ export default function RootLayout(): ReactNode {
     return theme === "dark";
   }, [theme, systemColorScheme]);
 
-  // Update nativewind color scheme whenever isDark changes
+  // Update nativewind color scheme whenever theme changes
   useEffect(() => {
-    nativeWind.setColorScheme(isDark ? "dark" : "light");
-  }, [isDark, nativeWind]);
+    if (theme === "system") {
+      nativeWind.setColorScheme("system");
+    } else {
+      nativeWind.setColorScheme(theme);
+    }
+  }, [theme, nativeWind]);
 
   const keywords = useBlockingStore((s) => s.keywords);
-  const categories = useBlockingStore((s) => s.categories);
   const includedUrls = useBlockingStore((s) => s.includedUrls);
   const excludedUrls = useBlockingStore((s) => s.excludedUrls);
   const adultBlockingEnabled = useBlockingStore((s) => s.adultBlockingEnabled);
   const blockedApps = useBlockingStore((s) => s.blockedApps);
 
   // Centralized debounced sync for all protection settings
+  // Note: categories are NOT included — they contain 100k+ domains and are
+  // synced separately via BlocklistService.updateBlocklists() which calls
+  // its own syncBlocklistToNative() after fetching.
   useEffect(() => {
     if (isMounted) {
-      // If adultBlockingEnabled is the only thing that changed,
-      // ProtectionService will handle the light sync via internal logic soon.
       void ProtectionService.syncAllConfigs().catch(console.error);
     }
   }, [
     keywords,
-    categories,
     includedUrls,
     excludedUrls,
     adultBlockingEnabled,
@@ -151,6 +177,10 @@ export default function RootLayout(): ReactNode {
         />
       </Stack>
       <StatusBar style={isDark ? "light" : "dark"} />
+      <AppLockScreen
+        visible={appLockEnabled && isLocked}
+        onUnlock={handleUnlock}
+      />
     </ThemeProvider>
   );
 }

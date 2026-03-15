@@ -1,3 +1,4 @@
+import { InteractionGuard } from "@/components/InteractionGuard";
 import { BlocklistService } from "@/services/BlocklistService";
 import { useBlockingStore } from "@/stores/useBlockingStore";
 import { Ionicons } from "@expo/vector-icons";
@@ -6,7 +7,6 @@ import { useRouter } from "expo-router";
 import { useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   Modal,
   Pressable,
@@ -18,7 +18,14 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function UpdateSourcesScreen(): React.ReactNode {
   const router = useRouter();
-  const { sources, addSource, removeSource, toggleSource } = useBlockingStore();
+  const {
+    sources,
+    addSource,
+    removeSource,
+    toggleSource,
+    adultControlMode,
+    adultSurveillance,
+  } = useBlockingStore();
 
   const [isAdding, setIsAdding] = useState(false);
   const [newName, setNewName] = useState("");
@@ -34,13 +41,36 @@ export default function UpdateSourcesScreen(): React.ReactNode {
     name: "",
   });
 
+  // Guard state
+  const [guardVisible, setGuardVisible] = useState(false);
+  const [pendingAction, setPendingAction] = useState<{
+    type: "remove" | "toggle";
+    id: string;
+  } | null>(null);
+
+  // Themed alert modal
+  const [alertModal, setAlertModal] = useState<{
+    visible: boolean;
+    title: string;
+    message: string;
+    type: "success" | "error";
+  }>({ visible: false, title: "", message: "", type: "success" });
+
+  const showAlert = (
+    title: string,
+    message: string,
+    type: "success" | "error",
+  ): void => {
+    setAlertModal({ visible: true, title, message, type });
+  };
+
   const handleAddSource = (): void => {
     if (!newName || !newUrl) {
-      Alert.alert("Error", "Please fill in both name and URL.");
+      showAlert("Error", "Please fill in both name and URL.", "error");
       return;
     }
     if (!newUrl.startsWith("http")) {
-      Alert.alert("Error", "URL must start with http:// or https://");
+      showAlert("Error", "URL must start with http:// or https://", "error");
       return;
     }
 
@@ -56,10 +86,37 @@ export default function UpdateSourcesScreen(): React.ReactNode {
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
 
+  const handleRemovePress = (id: string): void => {
+    if (adultControlMode === "flexible") {
+      executeAction("remove", id);
+    } else {
+      setPendingAction({ type: "remove", id });
+      setGuardVisible(true);
+    }
+  };
+
+  const handleTogglePress = (id: string, isEnabling: boolean): void => {
+    // Enabling a source strengthens protection — instant
+    if (adultControlMode === "flexible" || isEnabling) {
+      executeAction("toggle", id);
+    } else {
+      setPendingAction({ type: "toggle", id });
+      setGuardVisible(true);
+    }
+  };
+
+  const executeAction = (type: "remove" | "toggle", id: string): void => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (type === "remove") removeSource(id);
+    else toggleSource(id);
+    setGuardVisible(false);
+    setPendingAction(null);
+  };
+
   const handleUpdateAll = async (): Promise<void> => {
     const enabledCount = sources.filter((s) => s.enabled).length;
     if (enabledCount === 0) {
-      Alert.alert("Error", "No enabled sources to update.");
+      showAlert("Error", "No enabled sources to update.", "error");
       return;
     }
 
@@ -72,12 +129,17 @@ export default function UpdateSourcesScreen(): React.ReactNode {
     setIsUpdating(false);
 
     if (success) {
-      Alert.alert("Success", "All sources updated and synced.");
+      showAlert(
+        "Sources Updated",
+        "All blocklists have been fetched and synced to native services.",
+        "success",
+      );
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } else {
-      Alert.alert(
-        "Error",
-        "Failed to update some sources. Check your connection.",
+      showAlert(
+        "Update Failed",
+        "Failed to update some sources. Check your internet connection.",
+        "error",
       );
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     }
@@ -141,8 +203,7 @@ export default function UpdateSourcesScreen(): React.ReactNode {
               <View className="flex-row items-center ml-2">
                 <Pressable
                   onPress={() => {
-                    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                    toggleSource(item.id);
+                    handleTogglePress(item.id, !item.enabled);
                   }}
                   className="p-2"
                 >
@@ -154,10 +215,7 @@ export default function UpdateSourcesScreen(): React.ReactNode {
                 </Pressable>
                 <Pressable
                   onPress={() => {
-                    void Haptics.impactAsync(
-                      Haptics.ImpactFeedbackStyle.Medium,
-                    );
-                    removeSource(item.id);
+                    handleRemovePress(item.id);
                   }}
                   className="p-2"
                 >
@@ -291,6 +349,49 @@ export default function UpdateSourcesScreen(): React.ReactNode {
         </View>
       </Modal>
 
+      {/* Themed Alert Modal */}
+      <Modal visible={alertModal.visible} transparent animationType="fade">
+        <View className="flex-1 bg-black/60 items-center justify-center px-6">
+          <View className="bg-white dark:bg-freedom-surface w-full rounded-3xl p-6 items-center border border-freedom-highlight/20">
+            <View
+              className={`w-16 h-16 rounded-full items-center justify-center mb-4 ${
+                alertModal.type === "success"
+                  ? "bg-freedom-success/20"
+                  : "bg-freedom-danger/20"
+              }`}
+            >
+              <Ionicons
+                name={
+                  alertModal.type === "success"
+                    ? "checkmark-circle"
+                    : "alert-circle"
+                }
+                size={36}
+                color={alertModal.type === "success" ? "#10B981" : "#EF4444"}
+              />
+            </View>
+            <Text className="text-xl font-bold text-black dark:text-white text-center mb-2">
+              {alertModal.title}
+            </Text>
+            <Text className="text-freedom-text-muted text-center mb-6">
+              {alertModal.message}
+            </Text>
+            <Pressable
+              onPress={() => {
+                setAlertModal((prev) => ({ ...prev, visible: false }));
+              }}
+              className={`w-full py-4 rounded-xl items-center ${
+                alertModal.type === "success"
+                  ? "bg-freedom-highlight"
+                  : "bg-freedom-danger"
+              }`}
+            >
+              <Text className="text-white font-bold text-lg">OK</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
       {/* Progress Modal */}
       {isUpdating && (
         <View className="absolute inset-0 bg-black/30 justify-center items-center pointer-events-none">
@@ -316,6 +417,26 @@ export default function UpdateSourcesScreen(): React.ReactNode {
           </View>
         </View>
       )}
+
+      {/* Interaction Guard */}
+      <InteractionGuard
+        visible={guardVisible}
+        actionName={
+          pendingAction?.type === "remove"
+            ? "Remove Blocklist Source"
+            : "Disable Blocklist Source"
+        }
+        surveillanceOverride={adultSurveillance}
+        onSuccess={() => {
+          if (pendingAction) {
+            executeAction(pendingAction.type, pendingAction.id);
+          }
+        }}
+        onCancel={() => {
+          setGuardVisible(false);
+          setPendingAction(null);
+        }}
+      />
     </SafeAreaView>
   );
 }

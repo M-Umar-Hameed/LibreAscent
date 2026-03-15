@@ -3,6 +3,8 @@ import type {
   BlockedApp,
   BlockingCategory,
   BlocklistSource,
+  ControlMode,
+  SurveillanceConfig,
 } from "@/types/blocking";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
@@ -14,10 +16,15 @@ export interface BlockingState {
   // Websites
   includedUrls: string[];
   excludedUrls: string[];
+  siteControlMode: ControlMode;
+  siteSurveillance: SurveillanceConfig;
 
   // Categories
   categories: BlockingCategory[];
   adultBlockingEnabled: boolean;
+  adultControlMode: ControlMode;
+  adultSurveillance: SurveillanceConfig;
+  categoryDomainCounts: Record<string, number>;
 
   // Custom Sources
   sources: BlocklistSource[];
@@ -36,6 +43,8 @@ export interface BlockingState {
   removeIncludedUrl: (url: string) => void;
   addExcludedUrl: (url: string) => void;
   removeExcludedUrl: (url: string) => void;
+  setSiteControlMode: (mode: ControlMode) => void;
+  setSiteSurveillance: (config: SurveillanceConfig) => void;
 
   // Category actions
   toggleCategory: (id: string) => void;
@@ -43,6 +52,9 @@ export interface BlockingState {
   removeCategory: (id: string) => void;
   updateCategoryDomains: (id: string, domains: string[]) => void;
   setAdultBlockingEnabled: (enabled: boolean) => void;
+  setAdultControlMode: (mode: ControlMode) => void;
+  setAdultSurveillance: (config: SurveillanceConfig) => void;
+  setCategoryDomainCount: (id: string, count: number) => void;
 
   // Source actions
   addSource: (source: Omit<BlocklistSource, "id">) => void;
@@ -76,9 +88,16 @@ export const DEFAULT_SOURCES: BlocklistSource[] = [
     enabled: true,
   },
   {
-    id: "hentai-refined",
-    name: "Hentai Refined",
-    url: "https://raw.githubusercontent.com/newedgex/ani-manga-blocklist/main/refined-blacklist.txt",
+    id: "porn-blocklist",
+    name: "Porn Blocklist",
+    url: "https://github.com/M-Umar-Hameed/Freedom/blob/main/assets/blocklistsource/porn-blocklist.txt",
+    format: "domains",
+    enabled: true,
+  },
+  {
+    id: "hentai-blocklist",
+    name: "Hentai Blocklist",
+    url: "https://github.com/M-Umar-Hameed/Freedom/blob/main/assets/blocklistsource/hentai-blocklist.txt",
     format: "domains",
     enabled: true,
   },
@@ -90,8 +109,13 @@ export const useBlockingStore = create<BlockingState>()(
       keywords: [],
       includedUrls: [],
       excludedUrls: [],
+      siteControlMode: "flexible",
+      siteSurveillance: { type: "none", value: 0 },
       categories: [],
       adultBlockingEnabled: true,
+      adultControlMode: "flexible",
+      adultSurveillance: { type: "none", value: 0 },
+      categoryDomainCounts: {},
       sources: DEFAULT_SOURCES,
       blockedApps: [],
 
@@ -140,6 +164,9 @@ export const useBlockingStore = create<BlockingState>()(
           excludedUrls: state.excludedUrls.filter((u) => u !== url),
         })),
 
+      setSiteControlMode: (mode) => set({ siteControlMode: mode }),
+      setSiteSurveillance: (config) => set({ siteSurveillance: config }),
+
       toggleCategory: (id) =>
         set((state) => ({
           categories: state.categories.map((cat) =>
@@ -169,6 +196,14 @@ export const useBlockingStore = create<BlockingState>()(
 
       setAdultBlockingEnabled: (enabled) =>
         set({ adultBlockingEnabled: enabled }),
+
+      setAdultControlMode: (mode) => set({ adultControlMode: mode }),
+      setAdultSurveillance: (config) => set({ adultSurveillance: config }),
+
+      setCategoryDomainCount: (id, count) =>
+        set((state) => ({
+          categoryDomainCounts: { ...state.categoryDomainCounts, [id]: count },
+        })),
 
       addSource: (source) =>
         set((state) => ({
@@ -241,26 +276,9 @@ export const useBlockingStore = create<BlockingState>()(
       storage: createJSONStorage(() => sqliteStorage),
       onRehydrateStorage: () => (state) => {
         if (state) {
-          // Removed forced keyword rehydration so users can legitimately have 0 keywords
-
-          let currentSources = [...state.sources];
-          currentSources = currentSources.filter(
-            (s) =>
-              s.id !== "forbidden-words-eng" &&
-              s.id !== "forbidden-words-multi" &&
-              s.id !== "bad-words-carback1",
-          );
-
-          let changed = false;
-          for (const ds of DEFAULT_SOURCES) {
-            if (!currentSources.some((s) => s.id === ds.id)) {
-              currentSources.push(ds);
-              changed = true;
-            }
-          }
-          if (changed || currentSources.length !== state.sources.length) {
-            state.importSettings({ sources: currentSources });
-          }
+          // Force-reset sources to exactly DEFAULT_SOURCES on every launch.
+          // This ensures old/stale sources from previous versions are removed.
+          state.importSettings({ sources: [...DEFAULT_SOURCES] });
         }
       },
     },

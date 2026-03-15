@@ -1,4 +1,5 @@
 import { useAppStore } from "@/stores/useAppStore";
+import type { SurveillanceConfig } from "@/types/blocking";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import type React from "react";
@@ -10,6 +11,7 @@ interface InteractionGuardProps {
   onSuccess: () => void;
   onCancel: () => void;
   actionName: string;
+  surveillanceOverride?: SurveillanceConfig;
 }
 
 export const InteractionGuard: React.FC<InteractionGuardProps> = ({
@@ -17,8 +19,10 @@ export const InteractionGuard: React.FC<InteractionGuardProps> = ({
   onSuccess,
   onCancel,
   actionName,
+  surveillanceOverride,
 }) => {
-  const { surveillance } = useAppStore();
+  const globalSurveillance = useAppStore((s) => s.surveillance);
+  const surveillance = surveillanceOverride ?? globalSurveillance;
   const [timeLeft, setTimeLeft] = useState(surveillance.value);
   const [clickCount, setClickCount] = useState(0);
 

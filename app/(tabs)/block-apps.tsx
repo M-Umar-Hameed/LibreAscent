@@ -16,6 +16,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { BlocklistService } from "@/services/BlocklistService";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 interface AppInfo {
@@ -76,6 +77,7 @@ export default function BlockAppsScreen(): React.JSX.Element {
     addBlockedApp(newApp);
     setIsAddModalVisible(false);
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    void BlocklistService.syncAppsToNative();
   };
 
   const performActionWithGuard = (
@@ -99,6 +101,8 @@ export default function BlockAppsScreen(): React.JSX.Element {
     if (type === "remove") removeBlockedApp(packageName);
     if (type === "toggle") toggleBlockedApp(packageName);
     if (type === "update" && config) updateAppControl(packageName, config);
+
+    void BlocklistService.syncAppsToNative();
 
     setGuardVisible(false);
     setPendingAction(null);
@@ -162,7 +166,9 @@ export default function BlockAppsScreen(): React.JSX.Element {
             name={
               item.surveillance.type === "none"
                 ? "shield-outline"
-                : "timer-outline"
+                : item.surveillance.type === "time"
+                  ? "time-outline"
+                  : "timer-outline"
             }
             size={14}
             color="#2DD4BF"
@@ -170,7 +176,9 @@ export default function BlockAppsScreen(): React.JSX.Element {
           <Text className="text-freedom-highlight text-xs ml-1 font-medium">
             {item.surveillance.type === "none"
               ? "Always Blocked"
-              : `${item.surveillance.type.toUpperCase()}: ${item.surveillance.value}${item.surveillance.type === "timer" ? "s" : ""}`}
+              : item.surveillance.type === "time"
+                ? `Scheduled: ${item.startTime || "?"} - ${item.endTime || "?"}`
+                : `${item.surveillance.type.toUpperCase()}: ${item.surveillance.value}${item.surveillance.type === "timer" ? "s" : ""}`}
           </Text>
         </View>
       )}
@@ -287,7 +295,7 @@ export default function BlockAppsScreen(): React.JSX.Element {
             </Text>
 
             <ScrollView className="max-h-80">
-              {(["none", "timer", "click"] as const).map((type) => (
+              {(["none", "timer", "click", "time"] as const).map((type) => (
                 <Pressable
                   key={type}
                   onPress={() => {
@@ -308,7 +316,11 @@ export default function BlockAppsScreen(): React.JSX.Element {
                 >
                   <View className="flex-row items-center justify-between">
                     <Text className="text-white font-bold capitalize">
-                      {type === "none" ? "Hard Block (No Bypass)" : type}
+                      {type === "none"
+                        ? "Hard Block (No Bypass)"
+                        : type === "time"
+                          ? "Scheduled"
+                          : type}
                     </Text>
                     {editingApp?.surveillance.type === type && (
                       <Ionicons
@@ -321,7 +333,8 @@ export default function BlockAppsScreen(): React.JSX.Element {
                 </Pressable>
               ))}
 
-              {editingApp?.surveillance.type !== "none" && (
+              {(editingApp?.surveillance.type === "timer" ||
+                editingApp?.surveillance.type === "click") && (
                 <View className="mt-4">
                   <Text className="text-white mb-2 font-medium">
                     {editingApp?.surveillance.type === "timer"
@@ -371,6 +384,52 @@ export default function BlockAppsScreen(): React.JSX.Element {
                     >
                       <Ionicons name="add" size={24} color="white" />
                     </Pressable>
+                  </View>
+                </View>
+              )}
+
+              {editingApp?.surveillance.type === "time" && (
+                <View className="mt-4">
+                  <Text className="text-freedom-text-muted mb-4 text-xs">
+                    Set specific hours when this app should be blocked.
+                  </Text>
+                  <View className="flex-row gap-x-4">
+                    <View className="flex-1">
+                      <Text className="text-freedom-text-muted text-xs mb-2 uppercase font-bold">
+                        Start Time
+                      </Text>
+                      <View className="bg-white/5 rounded-xl border border-white/10 flex-row items-center px-4">
+                        <TextInput
+                          className="flex-1 h-12 text-white font-bold"
+                          placeholder="HH:mm"
+                          placeholderTextColor="#475569"
+                          value={editingApp?.startTime || ""}
+                          onChangeText={(text) => {
+                            setEditingApp((prev) =>
+                              prev ? { ...prev, startTime: text } : null,
+                            );
+                          }}
+                        />
+                      </View>
+                    </View>
+                    <View className="flex-1">
+                      <Text className="text-freedom-text-muted text-xs mb-2 uppercase font-bold">
+                        End Time
+                      </Text>
+                      <View className="bg-white/5 rounded-xl border border-white/10 flex-row items-center px-4">
+                        <TextInput
+                          className="flex-1 h-12 text-white font-bold"
+                          placeholder="HH:mm"
+                          placeholderTextColor="#475569"
+                          value={editingApp?.endTime || ""}
+                          onChangeText={(text) => {
+                            setEditingApp((prev) =>
+                              prev ? { ...prev, endTime: text } : null,
+                            );
+                          }}
+                        />
+                      </View>
+                    </View>
                   </View>
                 </View>
               )}

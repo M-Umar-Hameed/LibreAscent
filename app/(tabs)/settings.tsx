@@ -6,15 +6,26 @@ import {
   type BlockingState,
 } from "@/stores/useBlockingStore";
 import { Ionicons } from "@expo/vector-icons";
+import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Haptics from "expo-haptics";
 import * as Linking from "expo-linking";
+import * as LocalAuthentication from "expo-local-authentication";
 import { useRouter } from "expo-router";
 import * as Sharing from "expo-sharing";
 import type { ReactNode } from "react";
 import { useState } from "react";
-import { Alert, Pressable, ScrollView, Switch, Text, View } from "react-native";
+import {
+  Alert,
+  Modal,
+  Pressable,
+  ScrollView,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function SettingsScreen(): ReactNode {
@@ -23,7 +34,10 @@ export default function SettingsScreen(): ReactNode {
     setAutoStart,
     theme,
     setTheme,
-    passwordHash,
+    appLockEnabled,
+    setAppLockEnabled,
+    setAppLockType,
+    setAppLockHash,
     controlMode,
   } = useAppStore();
   const {
@@ -36,9 +50,9 @@ export default function SettingsScreen(): ReactNode {
   } = useBlockingStore();
   const router = useRouter();
 
-  const [pendingAction, setPendingAction] = useState<
-    "boot" | "password" | null
-  >(null);
+  const [pendingAction, setPendingAction] = useState<"boot" | "applock" | null>(
+    null,
+  );
 
   const handleBootToggle = (isEnabling: boolean): void => {
     if (controlMode === "flexible" || isEnabling) {
@@ -54,18 +68,86 @@ export default function SettingsScreen(): ReactNode {
     setPendingAction(null);
   };
 
-  const handlePasswordToggle = (isEnabling: boolean): void => {
-    if (controlMode === "flexible" || isEnabling) {
-      togglePassword();
+  // App lock setup modal state
+  const [lockSetupVisible, setLockSetupVisible] = useState(false);
+  const [lockSetupStep, setLockSetupStep] = useState<
+    "choose" | "password" | "confirm"
+  >("choose");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [lockSetupError, setLockSetupError] = useState("");
+
+  const handleAppLockToggle = (isEnabling: boolean): void => {
+    if (isEnabling) {
+      setLockSetupStep("choose");
+      setNewPassword("");
+      setConfirmPassword("");
+      setLockSetupError("");
+      setLockSetupVisible(true);
+    } else if (controlMode === "flexible") {
+      disableAppLock();
     } else {
-      setPendingAction("password");
+      setPendingAction("applock");
     }
   };
 
-  const togglePassword = (): void => {
+  const disableAppLock = (): void => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    // TODO: Open password modal
+    setAppLockEnabled(false);
+    setAppLockType(null);
+    setAppLockHash(null);
     setPendingAction(null);
+  };
+
+  const handleChoosePasskey = async (): Promise<void> => {
+    const compatible = await LocalAuthentication.hasHardwareAsync();
+    const enrolled = await LocalAuthentication.isEnrolledAsync();
+    if (!compatible || !enrolled) {
+      setLockSetupError(
+        "Biometric authentication is not available on this device. Please use a password instead.",
+      );
+      return;
+    }
+    const result = await LocalAuthentication.authenticateAsync({
+      promptMessage: "Confirm your fingerprint for app lock",
+      disableDeviceFallback: true,
+    });
+    if (result.success) {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setAppLockEnabled(true);
+      setAppLockType("passkey");
+      setAppLockHash(null);
+      setLockSetupVisible(false);
+    } else {
+      setLockSetupError("Biometric authentication failed. Try again.");
+    }
+  };
+
+  const handleChoosePassword = (): void => {
+    setLockSetupError("");
+    setLockSetupStep("password");
+  };
+
+  const handlePasswordSetup = async (): Promise<void> => {
+    if (newPassword.length < 4) {
+      setLockSetupError("Password must be at least 4 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setLockSetupError("Passwords do not match.");
+      return;
+    }
+    const hash = await Crypto.digestStringAsync(
+      Crypto.CryptoDigestAlgorithm.SHA256,
+      newPassword,
+    );
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setAppLockEnabled(true);
+    setAppLockType("password");
+    setAppLockHash(hash);
+    setNewPassword("");
+    setConfirmPassword("");
+    setLockSetupVisible(false);
   };
 
   const handleExport = async (): Promise<void> => {
@@ -78,7 +160,7 @@ export default function SettingsScreen(): ReactNode {
         adultBlockingEnabled,
         sources,
         exportedAt: new Date().toISOString(),
-        version: "1.1.1",
+        version: "1.3.0",
       };
 
       const docDir = FileSystem.documentDirectory;
@@ -178,19 +260,17 @@ export default function SettingsScreen(): ReactNode {
           </View>
           <View className="flex-row items-center justify-between p-4">
             <View className="flex-1">
-              <Text className="text-black dark:text-white">
-                Password Protection
-              </Text>
+              <Text className="text-black dark:text-white">App Lock</Text>
               <Text className="text-freedom-text-muted text-sm">
-                Require password to disable protection
+                Require password or passkey to open the app
               </Text>
             </View>
             <Switch
-              value={!!passwordHash}
-              onValueChange={handlePasswordToggle}
+              value={appLockEnabled}
+              onValueChange={handleAppLockToggle}
               trackColor={{ false: "#ccc", true: "#2DD4BF" }}
-              thumbColor={passwordHash ? "#fff" : "#999"}
-              aria-label="Toggle password protection"
+              thumbColor={appLockEnabled ? "#fff" : "#999"}
+              aria-label="Toggle app lock"
             />
           </View>
         </View>
@@ -386,7 +466,7 @@ export default function SettingsScreen(): ReactNode {
           <View className="p-4 border-b border-gray-200 dark:border-freedom-secondary">
             <Text className="text-black dark:text-white">Version</Text>
             <Text className="text-freedom-text-muted text-sm">
-              1.1.1 (Touka_Debo)
+              1.3.0 (Touka_Debo)
             </Text>
           </View>
           <Pressable
@@ -429,16 +509,167 @@ export default function SettingsScreen(): ReactNode {
         </View>
       </ScrollView>
 
+      {/* App Lock Setup Modal */}
+      <Modal visible={lockSetupVisible} animationType="fade" transparent>
+        <View className="flex-1 bg-black/60 justify-center px-6">
+          <View className="bg-white dark:bg-freedom-surface rounded-3xl p-6 border border-freedom-highlight/20">
+            {lockSetupStep === "choose" ? (
+              <>
+                <View className="items-center mb-6">
+                  <View className="w-16 h-16 rounded-full bg-freedom-highlight/20 items-center justify-center mb-4">
+                    <Ionicons name="lock-closed" size={32} color="#2DD4BF" />
+                  </View>
+                  <Text className="text-xl font-bold text-black dark:text-white text-center">
+                    Set Up App Lock
+                  </Text>
+                  <Text className="text-freedom-text-muted text-center mt-2">
+                    Choose how you want to lock the app
+                  </Text>
+                </View>
+
+                {lockSetupError ? (
+                  <Text className="text-red-500 text-center text-sm mb-4">
+                    {lockSetupError}
+                  </Text>
+                ) : null}
+
+                <Pressable
+                  onPress={() => {
+                    void handleChoosePasskey();
+                  }}
+                  className="bg-freedom-highlight/10 border-2 border-freedom-highlight p-4 rounded-2xl flex-row items-center mb-3"
+                >
+                  <View className="w-12 h-12 rounded-full bg-freedom-highlight items-center justify-center">
+                    <Ionicons name="finger-print" size={28} color="white" />
+                  </View>
+                  <View className="ml-4 flex-1">
+                    <Text className="text-black dark:text-white font-bold text-base">
+                      Passkey (Fingerprint)
+                    </Text>
+                    <Text className="text-freedom-text-muted text-xs mt-0.5">
+                      Quick unlock with your fingerprint
+                    </Text>
+                  </View>
+                </Pressable>
+
+                <Pressable
+                  onPress={handleChoosePassword}
+                  className="bg-gray-100 dark:bg-freedom-primary border-2 border-gray-200 dark:border-freedom-secondary p-4 rounded-2xl flex-row items-center mb-6"
+                >
+                  <View className="w-12 h-12 rounded-full bg-gray-300 dark:bg-freedom-accent items-center justify-center">
+                    <Ionicons name="keypad" size={28} color="white" />
+                  </View>
+                  <View className="ml-4 flex-1">
+                    <Text className="text-black dark:text-white font-bold text-base">
+                      Password
+                    </Text>
+                    <Text className="text-freedom-text-muted text-xs mt-0.5">
+                      Set a custom password
+                    </Text>
+                  </View>
+                </Pressable>
+
+                <Pressable
+                  onPress={() => {
+                    setLockSetupVisible(false);
+                  }}
+                  className="py-3 items-center"
+                >
+                  <Text className="text-freedom-text-muted font-semibold">
+                    Cancel
+                  </Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <View className="items-center mb-6">
+                  <View className="w-16 h-16 rounded-full bg-freedom-highlight/20 items-center justify-center mb-4">
+                    <Ionicons name="keypad" size={32} color="#2DD4BF" />
+                  </View>
+                  <Text className="text-xl font-bold text-black dark:text-white text-center">
+                    Set Password
+                  </Text>
+                  <Text className="text-freedom-text-muted text-center mt-2">
+                    Minimum 4 characters
+                  </Text>
+                </View>
+
+                {lockSetupError ? (
+                  <Text className="text-red-500 text-center text-sm mb-4">
+                    {lockSetupError}
+                  </Text>
+                ) : null}
+
+                <Text className="text-freedom-text-muted text-sm mb-1">
+                  Password
+                </Text>
+                <TextInput
+                  value={newPassword}
+                  onChangeText={(text) => {
+                    setNewPassword(text);
+                    setLockSetupError("");
+                  }}
+                  placeholder="Enter password"
+                  placeholderTextColor="#64748B"
+                  secureTextEntry
+                  autoFocus
+                  className="bg-gray-100 dark:bg-freedom-secondary p-3 rounded-lg text-black dark:text-white mb-4"
+                />
+
+                <Text className="text-freedom-text-muted text-sm mb-1">
+                  Confirm Password
+                </Text>
+                <TextInput
+                  value={confirmPassword}
+                  onChangeText={(text) => {
+                    setConfirmPassword(text);
+                    setLockSetupError("");
+                  }}
+                  placeholder="Confirm password"
+                  placeholderTextColor="#64748B"
+                  secureTextEntry
+                  className="bg-gray-100 dark:bg-freedom-secondary p-3 rounded-lg text-black dark:text-white mb-6"
+                />
+
+                <View className="flex-row">
+                  <Pressable
+                    onPress={() => {
+                      setLockSetupStep("choose");
+                      setNewPassword("");
+                      setConfirmPassword("");
+                      setLockSetupError("");
+                    }}
+                    className="flex-1 p-3 rounded-xl border border-gray-200 dark:border-freedom-secondary mr-2"
+                  >
+                    <Text className="text-center text-black dark:text-white">
+                      Back
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => {
+                      void handlePasswordSetup();
+                    }}
+                    className="flex-1 p-3 rounded-xl bg-freedom-accent"
+                  >
+                    <Text className="text-center text-freedom-primary font-bold">
+                      Set Password
+                    </Text>
+                  </Pressable>
+                </View>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
       <InteractionGuard
         visible={pendingAction !== null}
         actionName={
-          pendingAction === "boot"
-            ? "Disable Auto-start"
-            : "Disable Password Protection"
+          pendingAction === "boot" ? "Disable Auto-start" : "Disable App Lock"
         }
         onSuccess={() => {
           if (pendingAction === "boot") toggleBoot();
-          else if (pendingAction === "password") togglePassword();
+          else if (pendingAction === "applock") disableAppLock();
         }}
         onCancel={() => {
           setPendingAction(null);

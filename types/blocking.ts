@@ -54,4 +54,6 @@ export interface BlockedApp {
   enabled: boolean;
   controlMode: ControlMode | "individual"; // Can use main mode or individual override
   surveillance: SurveillanceConfig;
+  startTime?: string; // HH:mm
+  endTime?: string; // HH:mm
 }

@@ -22,7 +22,9 @@ interface AppState {
 
   // Settings
   autoStartOnBoot: boolean;
-  passwordHash: string | null;
+  appLockEnabled: boolean;
+  appLockType: "password" | "passkey" | null;
+  appLockHash: string | null;
   theme: "light" | "dark" | "system";
   controlMode: ControlMode;
   schedule: ScheduleEntry[];
@@ -37,7 +39,9 @@ interface AppState {
   resetCleanStreak: () => void;
   setAutoStart: (value: boolean) => void;
   setTheme: (theme: "light" | "dark" | "system") => void;
-  setPasswordHash: (hash: string | null) => void;
+  setAppLockEnabled: (enabled: boolean) => void;
+  setAppLockType: (type: "password" | "passkey" | null) => void;
+  setAppLockHash: (hash: string | null) => void;
   setControlMode: (mode: ControlMode) => void;
   setSchedule: (schedule: ScheduleEntry[]) => void;
   setSurveillance: (config: SurveillanceConfig) => void;
@@ -65,7 +69,9 @@ export const useAppStore = create<AppState>()(
       },
 
       autoStartOnBoot: true,
-      passwordHash: null,
+      appLockEnabled: false,
+      appLockType: null,
+      appLockHash: null,
       theme: "system",
       controlMode: "flexible",
       schedule: [],
@@ -98,7 +104,9 @@ export const useAppStore = create<AppState>()(
 
       setAutoStart: (value) => set({ autoStartOnBoot: value }),
       setTheme: (theme) => set({ theme }),
-      setPasswordHash: (hash) => set({ passwordHash: hash }),
+      setAppLockEnabled: (enabled) => set({ appLockEnabled: enabled }),
+      setAppLockType: (type) => set({ appLockType: type }),
+      setAppLockHash: (hash) => set({ appLockHash: hash }),
       setControlMode: (mode) => set({ controlMode: mode }),
       setSchedule: (schedule) => set({ schedule }),
       setSurveillance: (config) => set({ surveillance: config }),

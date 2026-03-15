@@ -1,3 +1,13 @@
+# ------------------------------------[UPDATE]--------------------------------------
+# Title: Freedom - Hentai List
+# Added: March 15, 2026
+# Help: https://github.com/blocklistproject/lists/wiki/
+# License: https://unlicense.org
+# Total number of network filters: 500282
+# -------------------------------------[INFO]---------------------------------------
+#
+# Hentai list
+# ------------------------------------[FILTERS]-------------------------------------
 0.0.0.0 0hentai.com
 0.0.0.0 0hentai0.tumblr.com
 0.0.0.0 myhentaicomics.com

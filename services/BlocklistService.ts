@@ -46,6 +46,25 @@ export const BlocklistService = {
     }
   },
 
+  /**
+   * Batch size for domain transfers across the JS-native bridge.
+   * Each batch stays well under the bridge memory limit.
+   */
+  BATCH_SIZE: 10000,
+
+  /**
+   * Send an array in batches to avoid OOM on the JS-native bridge.
+   */
+  sendInBatches: async (
+    domains: string[],
+    batchFn: (batch: string[]) => Promise<void>,
+  ): Promise<void> => {
+    for (let i = 0; i < domains.length; i += BlocklistService.BATCH_SIZE) {
+      const batch = domains.slice(i, i + BlocklistService.BATCH_SIZE);
+      await batchFn(batch);
+    }
+  },
+
   syncDomainsToNative: async (options?: {
     skipResync?: boolean;
   }): Promise<void> => {
@@ -57,22 +76,55 @@ export const BlocklistService = {
     // If we only want to toggle flags, skip the heavy domain transfer
     if (options?.skipResync) return;
 
-    // Sync per-category domains to Accessibility (heavy but only after updateBlocklists)
+    // Sync per-category domains to both Accessibility and VPN in batches
     for (const category of state.categories) {
+      const isActive =
+        state.adultBlockingEnabled &&
+        category.enabled &&
+        category.domains.length > 0;
+
+      if (!isActive) {
+        try {
+          await FreedomVpn.removeCategory(category.id);
+        } catch (e) {
+          console.warn(
+            `[BlocklistService] Failed to remove VPN category ${category.id}:`,
+            e,
+          );
+        }
+        continue;
+      }
+
+      // Clear existing category data before batching
       try {
-        await FreedomAccessibility.updateCategoryDomains(
-          category.id,
+        await FreedomVpn.removeCategory(category.id);
+      } catch {
+        // ignore — category might not exist yet
+      }
+
+      // Batch to both VPN and Accessibility
+      try {
+        await BlocklistService.sendInBatches(
           category.domains,
+          async (batch) => {
+            await FreedomVpn.addCategory(category.id, batch);
+            await FreedomAccessibility.appendCategoryDomains(
+              category.id,
+              batch,
+            );
+          },
         );
+        // Finalize accessibility (persist + rebuild active domains)
+        await FreedomAccessibility.finalizeCategorySync(category.id);
       } catch (e) {
         console.warn(
-          `[BlocklistService] Failed to sync category ${category.id} domains:`,
+          `[BlocklistService] Failed to sync category ${category.id}:`,
           e,
         );
       }
     }
 
-    // Sync included/excluded URLs to Accessibility
+    // Sync included/excluded URLs (small lists — no batching needed)
     try {
       await FreedomAccessibility.setIncludedDomains(state.includedUrls);
       await FreedomAccessibility.updateWhitelist(state.excludedUrls);
@@ -83,30 +135,11 @@ export const BlocklistService = {
       );
     }
 
-    // VPN gets combined list (VPN uses addCategory/removeCategory for toggles)
-    const allDomains: string[] = [];
-
-    for (const category of state.categories) {
-      if (
-        state.adultBlockingEnabled &&
-        category.enabled &&
-        category.domains.length > 0
-      ) {
-        for (const domain of category.domains) {
-          allDomains.push(domain);
-        }
-      }
-    }
-
-    for (const url of state.includedUrls) {
-      allDomains.push(url);
-    }
-
     try {
-      await FreedomVpn.updateBlocklist(allDomains);
+      await FreedomVpn.updateBlocklist(state.includedUrls);
       await FreedomVpn.setWhitelist(state.excludedUrls);
     } catch (e) {
-      console.warn("[BlocklistService] Failed to sync to VPN:", e);
+      console.warn("[BlocklistService] Failed to sync URLs to VPN:", e);
     }
   },
 
@@ -150,16 +183,27 @@ export const BlocklistService = {
   syncAppsToNative: async (): Promise<void> => {
     const state = useBlockingStore.getState();
     try {
-      await FreedomAccessibility.updateBlockedApps(
-        state.blockedApps
-          .filter((a) => a.enabled)
-          .map((a) => ({
+      const configs = state.blockedApps
+        .filter((a) => a.enabled)
+        .map((a) => {
+          const config: {
+            packageName: string;
+            appName: string;
+            surveillanceType: string;
+            surveillanceValue: number;
+            startTime?: string;
+            endTime?: string;
+          } = {
             packageName: a.packageName,
             appName: a.appName,
             surveillanceType: a.surveillance.type,
             surveillanceValue: a.surveillance.value,
-          })),
-      );
+          };
+          if (a.startTime) config.startTime = a.startTime;
+          if (a.endTime) config.endTime = a.endTime;
+          return config;
+        });
+      await FreedomAccessibility.updateBlockedApps(configs);
     } catch (e) {
       console.warn(
         "[BlocklistService] Failed to sync apps to Accessibility:",
@@ -356,7 +400,9 @@ export const BlocklistService = {
   },
 
   /**
-   * Fetch all enabled blocklists from sources and update categories/store.
+   * Fetch all enabled blocklists and send directly to native in batches.
+   * Each source is fetched, parsed, sent to native, then freed from JS memory
+   * to avoid accumulating 900k+ domain strings in the JS heap.
    */
   updateBlocklists: async (
     onProgress?: (progress: number, total: number, name: string) => void,
@@ -367,73 +413,102 @@ export const BlocklistService = {
 
       if (enabledSources.length === 0) return true;
 
-      const adultDomains = new Set<string>();
-      const hentaiDomains = new Set<string>();
-      const fetchedKeywords = new Set<string>();
+      const total = enabledSources.length + 1; // +1 for finalize step
 
-      let count = 0;
-      for (const source of enabledSources) {
-        onProgress?.(
-          count + 1,
-          enabledSources.length,
-          `Fetching ${source.name}...`,
-        );
+      // Clear existing categories before re-populating
+      try {
+        await FreedomVpn.removeCategory("adult");
+        await FreedomVpn.removeCategory("hentai");
+      } catch {
+        // ignore — categories might not exist yet
+      }
+
+      let adultCount = 0;
+      let hentaiCount = 0;
+      const fetchedKeywords: string[] = [];
+
+      // Process each source individually: fetch → parse → send to native → free
+      for (let i = 0; i < enabledSources.length; i++) {
+        const source = enabledSources[i];
+        onProgress?.(i + 1, total, `Fetching ${source.name}...`);
+
+        // Yield to UI thread so progress renders
+        await new Promise((r) => setTimeout(r, 0));
 
         const list = await BlocklistService.fetchRemoteList(
           source.url,
           source.format,
         );
 
-        if (list.length > 0) {
-          if (source.format === "keywords") {
-            list.forEach((k) => fetchedKeywords.add(k));
-          } else if (
-            source.id === "hentai-refined" ||
-            source.name.toLowerCase().includes("hentai")
-          ) {
-            list.forEach((d) => hentaiDomains.add(d));
-          } else {
-            list.forEach((d) => adultDomains.add(d));
-          }
+        if (list.length === 0) continue;
+
+        if (source.format === "keywords") {
+          fetchedKeywords.push(...list);
+          continue;
         }
-        count++;
+
+        // Determine category
+        const isHentai =
+          source.id === "hentai-refined" ||
+          source.name.toLowerCase().includes("hentai");
+        const categoryId = isHentai ? "hentai" : "adult";
+
+        // Batch-send this source's domains to native immediately, then discard
+        await BlocklistService.sendInBatches(list, async (batch) => {
+          await FreedomVpn.addCategory(categoryId, batch);
+          await FreedomAccessibility.appendCategoryDomains(categoryId, batch);
+        });
+
+        if (isHentai) hentaiCount += list.length;
+        else adultCount += list.length;
+
+        // list goes out of scope here — GC can free it
       }
 
-      onProgress?.(
-        enabledSources.length,
-        enabledSources.length,
-        "Syncing to native services...",
+      // Finalize: persist + rebuild active domains on native side
+      onProgress?.(total, total, "Finalizing...");
+      await new Promise((r) => setTimeout(r, 0));
+
+      try {
+        if (adultCount > 0)
+          await FreedomAccessibility.finalizeCategorySync("adult");
+        if (hentaiCount > 0)
+          await FreedomAccessibility.finalizeCategorySync("hentai");
+      } catch (e) {
+        console.warn("[BlocklistService] finalizeCategorySync warning:", e);
+      }
+
+      // eslint-disable-next-line no-console
+      console.log(
+        `[BlocklistService] Synced ${adultCount} adult + ${hentaiCount} hentai domains`,
       );
 
-      // Update domain categories
-      if (adultDomains.size > 0 || hentaiDomains.size > 0) {
-        useBlockingStore
-          .getState()
-          .updateCategoryDomains("adult", [...adultDomains]);
-        useBlockingStore
-          .getState()
-          .updateCategoryDomains("hentai", [...hentaiDomains]);
-      } else if (
-        enabledSources.filter((s) => s.format !== "keywords").length > 0
-      ) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "[BlocklistService] All domain fetch attempts returned empty. Keeping existing domains.",
-        );
-      }
+      // Store only domain counts in Zustand
+      useBlockingStore.getState().setCategoryDomainCount("adult", adultCount);
+      useBlockingStore.getState().setCategoryDomainCount("hentai", hentaiCount);
 
-      // Merge fetched keywords with existing user keywords (preserve user's manual keywords)
-      if (fetchedKeywords.size > 0) {
+      // Merge fetched keywords with existing user keywords
+      if (fetchedKeywords.length > 0) {
         const currentKeywords = useBlockingStore.getState().keywords;
         const merged = new Set([...currentKeywords, ...fetchedKeywords]);
         useBlockingStore.getState().setKeywords([...merged]);
         // eslint-disable-next-line no-console
         console.log(
-          `[BlocklistService] Keywords updated: ${currentKeywords.length} -> ${merged.size} (${fetchedKeywords.size} from sources)`,
+          `[BlocklistService] Keywords updated: ${currentKeywords.length} -> ${merged.size}`,
         );
       }
 
-      await BlocklistService.syncBlocklistToNative();
+      // Sync URLs and keywords (small lists)
+      await BlocklistService.syncKeywordsToNative();
+      try {
+        await FreedomAccessibility.setIncludedDomains(state.includedUrls);
+        await FreedomAccessibility.updateWhitelist(state.excludedUrls);
+        await FreedomVpn.updateBlocklist(state.includedUrls);
+        await FreedomVpn.setWhitelist(state.excludedUrls);
+      } catch (e) {
+        console.warn("[BlocklistService] Failed to sync URLs:", e);
+      }
+
       return true;
     } catch (error) {
       console.error("[BlocklistService] Failed to update blocklists:", error);

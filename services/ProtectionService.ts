@@ -46,7 +46,8 @@ export const ProtectionService = {
   },
 
   _syncTimeout: null as ReturnType<typeof setTimeout> | null,
-  _lastDomainContent: "" as string, // Hash of last synced domains
+  _lastUrlContent: "" as string, // Hash of last synced URLs
+  _lastCategoryContent: "" as string, // Hash of last synced category config
 
   syncAllConfigs: async (options?: { skipResync?: boolean }): Promise<void> => {
     if (ProtectionService._syncTimeout) {
@@ -62,26 +63,42 @@ export const ProtectionService = {
             // 1. INSTANT: Sync master flag + per-category enabled flags (no domain transfer)
             await BlocklistService.syncCategoryFlagsToNative();
 
-            // 2. Smart compare: only re-send domains if domain DATA changed (not just enabled flags)
-            // Hash excludes 'enabled' — toggling a category doesn't trigger domain re-transfer
-            const currentDomainContent = JSON.stringify({
-              categories: state.categories.map((c: BlockingCategory) => ({
-                id: c.id,
-                domainCount: c.domains.length,
-              })),
+            // 2. Check what changed — avoid resending 100k+ category domains on every URL add
+            const currentUrlContent = JSON.stringify({
               included: state.includedUrls,
               excluded: state.excludedUrls,
             });
+            const currentCategoryContent = JSON.stringify(
+              state.categories.map((c: BlockingCategory) => ({
+                id: c.id,
+                domainCount: c.domains.length,
+              })),
+            );
 
-            const domainsChanged =
-              currentDomainContent !== ProtectionService._lastDomainContent;
+            const urlsChanged =
+              currentUrlContent !== ProtectionService._lastUrlContent;
+            const categoriesChanged =
+              currentCategoryContent !== ProtectionService._lastCategoryContent;
 
-            if (domainsChanged && !options?.skipResync) {
-              console.log(
-                `[ProtectionService] Domain data changed, performing full sync...`,
-              );
-              await BlocklistService.syncDomainsToNative({ skipResync: false });
-              ProtectionService._lastDomainContent = currentDomainContent;
+            if (!options?.skipResync) {
+              if (categoriesChanged) {
+                // Full domain sync — categories changed (after updateBlocklists)
+                await BlocklistService.syncDomainsToNative({
+                  skipResync: false,
+                });
+                ProtectionService._lastCategoryContent = currentCategoryContent;
+                ProtectionService._lastUrlContent = currentUrlContent;
+              } else if (urlsChanged) {
+                // Lightweight URL-only sync — update URL lists without resending all category domains
+                await FreedomAccessibility.setIncludedDomains(
+                  state.includedUrls,
+                );
+                await FreedomAccessibility.updateWhitelist(state.excludedUrls);
+                await FreedomVpn.setWhitelist(state.excludedUrls);
+                // VPN: send only user-included URLs (categories already loaded via addCategory)
+                await FreedomVpn.updateBlocklist(state.includedUrls);
+                ProtectionService._lastUrlContent = currentUrlContent;
+              }
             }
 
             // 3. Sync other parts in parallel

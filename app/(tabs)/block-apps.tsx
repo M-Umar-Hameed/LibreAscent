@@ -32,7 +32,7 @@ export default function BlockAppsScreen(): React.JSX.Element {
     toggleBlockedApp,
     updateAppControl,
   } = useBlockingStore();
-  const { controlMode } = useAppStore();
+  const { controlMode, surveillance } = useAppStore();
 
   const [isAddModalVisible, setIsAddModalVisible] = useState(false);
   const [installedApps, setInstalledApps] = useState<AppInfo[]>([]);
@@ -465,6 +465,7 @@ export default function BlockAppsScreen(): React.JSX.Element {
 
       <InteractionGuard
         visible={guardVisible}
+        surveillanceOverride={surveillance}
         onSuccess={() => {
           if (pendingAction) {
             executeAction(

@@ -49,6 +49,20 @@ export const ProtectionService = {
   _lastUrlContent: "" as string, // Hash of last synced URLs
   _lastCategoryContent: "" as string, // Hash of last synced category config
 
+  /**
+   * Snapshot the current category content so syncAllConfigs doesn't
+   * re-trigger a domain sync after updateBlocklists already sent them.
+   */
+  snapshotCategoryContent: (): void => {
+    const state = useBlockingStore.getState();
+    ProtectionService._lastCategoryContent = JSON.stringify(
+      state.categories.map((c: BlockingCategory) => ({
+        id: c.id,
+        domainCount: state.categoryDomainCounts[c.id] ?? c.domains.length,
+      })),
+    );
+  },
+
   syncAllConfigs: async (options?: { skipResync?: boolean }): Promise<void> => {
     if (ProtectionService._syncTimeout) {
       clearTimeout(ProtectionService._syncTimeout);
@@ -71,7 +85,8 @@ export const ProtectionService = {
             const currentCategoryContent = JSON.stringify(
               state.categories.map((c: BlockingCategory) => ({
                 id: c.id,
-                domainCount: c.domains.length,
+                domainCount:
+                  state.categoryDomainCounts[c.id] ?? c.domains.length,
               })),
             );
 

@@ -1,5 +1,6 @@
 import { InteractionGuard } from "@/components/InteractionGuard";
 import { BlocklistService } from "@/services/BlocklistService";
+import { useAppStore } from "@/stores/useAppStore";
 import { useBlockingStore } from "@/stores/useBlockingStore";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
@@ -18,14 +19,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function UpdateSourcesScreen(): React.ReactNode {
   const router = useRouter();
-  const {
-    sources,
-    addSource,
-    removeSource,
-    toggleSource,
-    adultControlMode,
-    adultSurveillance,
-  } = useBlockingStore();
+  const { sources, addSource, removeSource, toggleSource } = useBlockingStore();
+  const { controlMode, surveillance } = useAppStore();
 
   const [isAdding, setIsAdding] = useState(false);
   const [newName, setNewName] = useState("");
@@ -87,7 +82,7 @@ export default function UpdateSourcesScreen(): React.ReactNode {
   };
 
   const handleRemovePress = (id: string): void => {
-    if (adultControlMode === "flexible") {
+    if (controlMode === "flexible") {
       executeAction("remove", id);
     } else {
       setPendingAction({ type: "remove", id });
@@ -97,7 +92,7 @@ export default function UpdateSourcesScreen(): React.ReactNode {
 
   const handleTogglePress = (id: string, isEnabling: boolean): void => {
     // Enabling a source strengthens protection — instant
-    if (adultControlMode === "flexible" || isEnabling) {
+    if (controlMode === "flexible" || isEnabling) {
       executeAction("toggle", id);
     } else {
       setPendingAction({ type: "toggle", id });
@@ -426,7 +421,7 @@ export default function UpdateSourcesScreen(): React.ReactNode {
             ? "Remove Blocklist Source"
             : "Disable Blocklist Source"
         }
-        surveillanceOverride={adultSurveillance}
+        surveillanceOverride={surveillance}
         onSuccess={() => {
           if (pendingAction) {
             executeAction(pendingAction.type, pendingAction.id);

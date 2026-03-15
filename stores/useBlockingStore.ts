@@ -3,8 +3,6 @@ import type {
   BlockedApp,
   BlockingCategory,
   BlocklistSource,
-  ControlMode,
-  SurveillanceConfig,
 } from "@/types/blocking";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
@@ -16,14 +14,10 @@ export interface BlockingState {
   // Websites
   includedUrls: string[];
   excludedUrls: string[];
-  siteControlMode: ControlMode;
-  siteSurveillance: SurveillanceConfig;
 
   // Categories
   categories: BlockingCategory[];
   adultBlockingEnabled: boolean;
-  adultControlMode: ControlMode;
-  adultSurveillance: SurveillanceConfig;
   categoryDomainCounts: Record<string, number>;
 
   // Custom Sources
@@ -43,8 +37,6 @@ export interface BlockingState {
   removeIncludedUrl: (url: string) => void;
   addExcludedUrl: (url: string) => void;
   removeExcludedUrl: (url: string) => void;
-  setSiteControlMode: (mode: ControlMode) => void;
-  setSiteSurveillance: (config: SurveillanceConfig) => void;
 
   // Category actions
   toggleCategory: (id: string) => void;
@@ -52,8 +44,6 @@ export interface BlockingState {
   removeCategory: (id: string) => void;
   updateCategoryDomains: (id: string, domains: string[]) => void;
   setAdultBlockingEnabled: (enabled: boolean) => void;
-  setAdultControlMode: (mode: ControlMode) => void;
-  setAdultSurveillance: (config: SurveillanceConfig) => void;
   setCategoryDomainCount: (id: string, count: number) => void;
 
   // Source actions
@@ -90,14 +80,14 @@ export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
     id: "porn-blocklist",
     name: "Porn Blocklist",
-    url: "https://github.com/M-Umar-Hameed/Freedom/blob/main/assets/blocklistsource/porn-blocklist.txt",
+    url: "https://raw.githubusercontent.com/M-Umar-Hameed/Freedom/main/assets/blocklistsource/porn-blocklist.txt",
     format: "domains",
     enabled: true,
   },
   {
     id: "hentai-blocklist",
     name: "Hentai Blocklist",
-    url: "https://github.com/M-Umar-Hameed/Freedom/blob/main/assets/blocklistsource/hentai-blocklist.txt",
+    url: "https://raw.githubusercontent.com/M-Umar-Hameed/Freedom/main/assets/blocklistsource/hentai-blocklist.txt",
     format: "domains",
     enabled: true,
   },
@@ -109,12 +99,24 @@ export const useBlockingStore = create<BlockingState>()(
       keywords: [],
       includedUrls: [],
       excludedUrls: [],
-      siteControlMode: "flexible",
-      siteSurveillance: { type: "none", value: 0 },
-      categories: [],
+      categories: [
+        {
+          id: "adult",
+          name: "Adult Content",
+          description: "General adult and pornographic websites",
+          domains: [],
+          enabled: true,
+        },
+        {
+          id: "hentai",
+          name: "Hentai",
+          description:
+            "Animated adult content and manga. (Contains some manga sites; whitelist your fav manga/manhwa/manhua if needed)",
+          domains: [],
+          enabled: true,
+        },
+      ],
       adultBlockingEnabled: true,
-      adultControlMode: "flexible",
-      adultSurveillance: { type: "none", value: 0 },
       categoryDomainCounts: {},
       sources: DEFAULT_SOURCES,
       blockedApps: [],
@@ -164,9 +166,6 @@ export const useBlockingStore = create<BlockingState>()(
           excludedUrls: state.excludedUrls.filter((u) => u !== url),
         })),
 
-      setSiteControlMode: (mode) => set({ siteControlMode: mode }),
-      setSiteSurveillance: (config) => set({ siteSurveillance: config }),
-
       toggleCategory: (id) =>
         set((state) => ({
           categories: state.categories.map((cat) =>
@@ -196,9 +195,6 @@ export const useBlockingStore = create<BlockingState>()(
 
       setAdultBlockingEnabled: (enabled) =>
         set({ adultBlockingEnabled: enabled }),
-
-      setAdultControlMode: (mode) => set({ adultControlMode: mode }),
-      setAdultSurveillance: (config) => set({ adultSurveillance: config }),
 
       setCategoryDomainCount: (id, count) =>
         set((state) => ({
@@ -265,6 +261,7 @@ export const useBlockingStore = create<BlockingState>()(
           keywords: data.keywords || state.keywords,
           includedUrls: data.includedUrls || state.includedUrls,
           excludedUrls: data.excludedUrls || state.excludedUrls,
+          categories: data.categories || state.categories,
           adultBlockingEnabled:
             data.adultBlockingEnabled ?? state.adultBlockingEnabled,
           sources: data.sources || state.sources,
@@ -277,8 +274,30 @@ export const useBlockingStore = create<BlockingState>()(
       onRehydrateStorage: () => (state) => {
         if (state) {
           // Force-reset sources to exactly DEFAULT_SOURCES on every launch.
-          // This ensures old/stale sources from previous versions are removed.
           state.importSettings({ sources: [...DEFAULT_SOURCES] });
+
+          // Restore default categories if persisted state has none
+          if (state.categories.length === 0) {
+            state.importSettings({
+              categories: [
+                {
+                  id: "adult",
+                  name: "Adult Content",
+                  description: "General adult and pornographic websites",
+                  domains: [],
+                  enabled: true,
+                },
+                {
+                  id: "hentai",
+                  name: "Hentai",
+                  description:
+                    "Animated adult content and manga. (Contains some manga sites; whitelist your fav manga/manhwa/manhua if needed)",
+                  domains: [],
+                  enabled: true,
+                },
+              ],
+            });
+          }
         }
       },
     },

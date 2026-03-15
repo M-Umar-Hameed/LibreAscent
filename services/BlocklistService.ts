@@ -78,10 +78,10 @@ export const BlocklistService = {
 
     // Sync per-category domains to both Accessibility and VPN in batches
     for (const category of state.categories) {
+      const nativeCount = state.categoryDomainCounts[category.id] ?? 0;
+      const hasDomains = category.domains.length > 0 || nativeCount > 0;
       const isActive =
-        state.adultBlockingEnabled &&
-        category.enabled &&
-        category.domains.length > 0;
+        state.adultBlockingEnabled && category.enabled && hasDomains;
 
       if (!isActive) {
         try {
@@ -92,6 +92,12 @@ export const BlocklistService = {
             e,
           );
         }
+        continue;
+      }
+
+      // If domains are already in native memory (count > 0, JS array empty),
+      // skip re-sending — updateBlocklists already handled it.
+      if (category.domains.length === 0 && nativeCount > 0) {
         continue;
       }
 
@@ -487,6 +493,12 @@ export const BlocklistService = {
       useBlockingStore.getState().setCategoryDomainCount("adult", adultCount);
       useBlockingStore.getState().setCategoryDomainCount("hentai", hentaiCount);
 
+      // Snapshot so syncAllConfigs doesn't re-trigger domain sync
+      // (import is deferred to avoid circular dependency)
+      const { ProtectionService } =
+        await import("@/services/ProtectionService");
+      ProtectionService.snapshotCategoryContent();
+
       // Merge fetched keywords with existing user keywords
       if (fetchedKeywords.length > 0) {
         const currentKeywords = useBlockingStore.getState().keywords;
@@ -497,6 +509,9 @@ export const BlocklistService = {
           `[BlocklistService] Keywords updated: ${currentKeywords.length} -> ${merged.size}`,
         );
       }
+
+      // Enable category flags so ContentMatcher knows to check them
+      await BlocklistService.syncCategoryFlagsToNative();
 
       // Sync URLs and keywords (small lists)
       await BlocklistService.syncKeywordsToNative();

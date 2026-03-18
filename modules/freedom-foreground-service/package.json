@@ -1,0 +1,9 @@
+{
+  "name": "freedom-foreground-service",
+  "version": "1.0.0",
+  "description": "Freedom Foreground Service for persistent protection",
+  "main": "src/index.ts",
+  "expo": {
+    "name": "freedom-foreground-service"
+  }
+}

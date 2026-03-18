@@ -1,0 +1,9 @@
+{
+  "name": "freedom-vpn-service",
+  "version": "1.0.0",
+  "description": "Freedom VPN Service for DNS Blocking",
+  "main": "src/index.ts",
+  "expo": {
+    "name": "freedom-vpn-service"
+  }
+}

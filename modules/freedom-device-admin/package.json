@@ -1,0 +1,9 @@
+{
+  "name": "freedom-device-admin",
+  "version": "1.0.0",
+  "description": "Freedom Device Admin for uninstall protection",
+  "main": "src/index.ts",
+  "expo": {
+    "name": "freedom-device-admin"
+  }
+}

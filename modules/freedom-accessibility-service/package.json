@@ -1,0 +1,9 @@
+{
+  "name": "freedom-accessibility-service",
+  "version": "1.0.0",
+  "description": "Freedom Accessibility Service for URL and Reels Detection",
+  "main": "src/index.ts",
+  "expo": {
+    "name": "freedom-accessibility-service"
+  }
+}

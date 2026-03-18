@@ -1,0 +1,9 @@
+{
+  "name": "freedom-overlay",
+  "version": "1.0.0",
+  "description": "Freedom System Overlay for blocking screens",
+  "main": "src/index.ts",
+  "expo": {
+    "name": "freedom-overlay"
+  }
+}

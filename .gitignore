@@ -42,6 +42,14 @@ app-example
 /ios
 /android
 
+# local expo modules build artifacts
+modules/*/android/build/
+modules/*/android/.gradle/
+modules/*/android/.cxx/
+modules/*/ios/build/
+modules/*/ios/Pods/
+modules/*/ios/*.xcworkspace/
+
 # Freedom specific
 data/domains/custom/*.txt
 data/keywords/custom/*.txt
@@ -51,4 +59,4 @@ CLAUDE.md
 /.agent
 /.claude
 CONTRIBUTING.md
-/modules
+

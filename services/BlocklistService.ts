@@ -517,6 +517,36 @@ export const BlocklistService = {
   },
 
   /**
+   * Push ALL enabled categories from SQLite cache to native on app launch.
+   * Fast path: skips if cache is empty (fresh install — updateBlocklists will fill it).
+   */
+  syncAllCategoriesFromCache: async (): Promise<void> => {
+    const state = useBlockingStore.getState();
+    if (!state.adultBlockingEnabled) return;
+
+    for (const category of state.categories) {
+      if (!category.enabled) continue;
+      const cached = getCachedDomainCount(category.id);
+      if (cached === 0) continue;
+
+      try {
+        await FreedomVpn.removeCategory(category.id);
+      } catch { /* might not exist */ }
+
+      await BlocklistService.syncCategoryFromCache(category.id);
+
+      try {
+        await FreedomAccessibility.finalizeCategorySync(category.id);
+      } catch (e) {
+        console.warn(`[BlocklistService] finalize ${category.id}:`, e);
+      }
+
+      const nativeCount = await FreedomAccessibility.getCategoryDomainCount(category.id);
+      useBlockingStore.getState().setCategoryDomainCount(category.id, nativeCount);
+    }
+  },
+
+  /**
    * Fetch all enabled blocklists, cache in SQLite, and sync to native.
    *
    * Uses HTTP conditional requests (ETag / Last-Modified) + content hashing

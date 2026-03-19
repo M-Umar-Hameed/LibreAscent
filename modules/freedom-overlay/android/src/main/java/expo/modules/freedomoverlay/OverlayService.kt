@@ -5,9 +5,12 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
+import android.net.Uri
+import android.widget.ImageView
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -211,9 +214,43 @@ class OverlayService : Service() {
         val headingStr = theme.optString("heading", "You are on a mission to build a better future!")
         val bodyStr = theme.optString("body", "Giving in to cheap dopamine is not an option. Back away right now, get back to the grind, and crush your goals today!")
 
+        val customImagePath = theme.optString("customImagePath", "")
+
         val container = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor(bgColor))
             isClickable = true
+        }
+
+        // Background image + scrim
+        if (customImagePath.isNotEmpty()) {
+            try {
+                val uri = Uri.parse(customImagePath)
+                val stream = contentResolver.openInputStream(uri)
+                val bitmap = BitmapFactory.decodeStream(stream)
+                stream?.close()
+                if (bitmap != null) {
+                    val bgImage = ImageView(this).apply {
+                        setImageBitmap(bitmap)
+                        scaleType = ImageView.ScaleType.CENTER_CROP
+                        layoutParams = FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT
+                        )
+                    }
+                    container.addView(bgImage)
+                    // 40% dark scrim over the image
+                    val scrim = android.view.View(this).apply {
+                        setBackgroundColor(Color.parseColor("#66000000"))
+                        layoutParams = FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT
+                        )
+                    }
+                    container.addView(scrim)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to load overlay background image: ${e.message}")
+            }
         }
 
         val content = LinearLayout(this).apply {

@@ -3,9 +3,12 @@ package expo.modules.freedomaccessibility
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
+import android.net.Uri
+import android.widget.ImageView
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -201,12 +204,12 @@ class FreedomAccessibilityService : AccessibilityService() {
             val appConfig = contentMatcher.getAppConfig(packageName)
             when {
                 appConfig != null -> {
-                    // Block the entire app
-                    Log.w(TAG, "Blocking app launch: $packageName (Config: ${appConfig.appName})")
-                    
-                    // Show our instant overlay
+                    Log.w(TAG, "Blocking app launch: $packageName (Config: ${appConfig.appName}, surveillance: ${appConfig.surveillanceType})")
                     showInstantOverlay(packageName, "${appConfig.appName} is blocked", appConfig.surveillanceType, appConfig.surveillanceValue)
-                    performGlobalAction(GLOBAL_ACTION_HOME)
+                    // Only go home for hard blocks — timer/click overlays need user interaction
+                    if (appConfig.surveillanceType == "none") {
+                        performGlobalAction(GLOBAL_ACTION_HOME)
+                    }
                 }
                 browserMonitor.isBrowser(packageName) -> {
                     handleBrowserEvent(event, rootNode, packageName)
@@ -528,8 +531,41 @@ class FreedomAccessibilityService : AccessibilityService() {
 
                 val density = resources.displayMetrics.density
 
+                val customImagePath = theme.optString("customImagePath", "")
+
                 val container = FrameLayout(this).apply {
                     setBackgroundColor(Color.parseColor(bgColor))
+                }
+
+                // Background image + scrim
+                if (customImagePath.isNotEmpty()) {
+                    try {
+                        val uri = Uri.parse(customImagePath)
+                        val stream = contentResolver.openInputStream(uri)
+                        val bitmap = BitmapFactory.decodeStream(stream)
+                        stream?.close()
+                        if (bitmap != null) {
+                            val bgImage = ImageView(this).apply {
+                                setImageBitmap(bitmap)
+                                scaleType = ImageView.ScaleType.CENTER_CROP
+                                layoutParams = FrameLayout.LayoutParams(
+                                    FrameLayout.LayoutParams.MATCH_PARENT,
+                                    FrameLayout.LayoutParams.MATCH_PARENT
+                                )
+                            }
+                            container.addView(bgImage)
+                            val scrim = android.view.View(this).apply {
+                                setBackgroundColor(Color.parseColor("#66000000"))
+                                layoutParams = FrameLayout.LayoutParams(
+                                    FrameLayout.LayoutParams.MATCH_PARENT,
+                                    FrameLayout.LayoutParams.MATCH_PARENT
+                                )
+                            }
+                            container.addView(scrim)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to load overlay background: ${e.message}")
+                    }
                 }
 
                 val layout = LinearLayout(this).apply {

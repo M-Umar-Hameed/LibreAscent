@@ -143,17 +143,26 @@ export default function RootLayout(): ReactNode {
     };
   }, [isMounted, navigationState?.key]);
 
-  // Auto-update blocklists if stale (>24h since last update).
-  // The SQLite cache makes this near-instant when nothing changed upstream.
+  // On every launch: push cached domains to native (survives process death).
+  // Then if stale (>24h), fetch fresh lists from network.
+  // Skip during onboarding to avoid freezing the permissions screen.
   useEffect(() => {
-    if (!isMounted) return;
+    if (!isMounted || !isOnboarded) return;
     if (!useBlockingStore.getState().adultBlockingEnabled) return;
-    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-    const lastUpdate = getLastBlocklistUpdate();
-    if (Date.now() - lastUpdate > TWENTY_FOUR_HOURS) {
-      void BlocklistService.updateBlocklists().catch(console.error);
-    }
-  }, [isMounted]);
+
+    void (async () => {
+      try {
+        await BlocklistService.syncAllCategoriesFromCache();
+      } catch (e) {
+        console.warn("[Layout] Cache sync failed:", e);
+      }
+      const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+      const lastUpdate = getLastBlocklistUpdate();
+      if (Date.now() - lastUpdate > TWENTY_FOUR_HOURS) {
+        void BlocklistService.updateBlocklists().catch(console.error);
+      }
+    })();
+  }, [isMounted, isOnboarded]);
 
   const appThemeId = useAppStore((s) => s.appThemeId);
   const customTheme = useAppStore((s) => s.customTheme);

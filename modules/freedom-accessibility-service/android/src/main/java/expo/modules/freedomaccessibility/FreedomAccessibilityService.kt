@@ -48,6 +48,9 @@ class FreedomAccessibilityService : AccessibilityService() {
     private var lastCheckUrl: String = ""
     private var lastSamsungDebugTime: Long = 0
     private var blockCooldownUntil: Long = 0
+    // Remember the last whitelisted domain per browser, so text-only events still get context
+    private var lastWhitelistedDomain: String? = null
+    private var lastWhitelistedPackage: String? = null
 
     companion object {
         private const val TAG = "FreedomA11y"
@@ -290,13 +293,43 @@ class FreedomAccessibilityService : AccessibilityService() {
         var blockedCandidate = ""
         var allowedCandidate = candidates.first()
 
-        // Determine the primary page domain for whitelist context.
-        // If the page domain is whitelisted, keyword blocking is skipped.
-        val primaryDomain = candidates.firstOrNull { it.contains('.') && !it.contains(' ') }
-            ?.lowercase()?.removePrefix("https://")?.removePrefix("http://")?.removePrefix("www.")
-            ?.substringBefore('/')?.substringBefore('?') ?: ""
-        val pageWhitelisted = primaryDomain.isNotEmpty() && contentMatcher.isWhitelisted(primaryDomain)
-        val contextDomain = if (pageWhitelisted) primaryDomain else null
+        // Determine if ANY candidate contains a whitelisted domain.
+        // Check all candidates — URL bar, title, toolbar text — not just the first.
+        // Also check embedded domains in text (e.g. "© 2026 mangaread.org inc.")
+        var pageWhitelisted = false
+        var contextDomain: String? = null
+        for (c in candidates) {
+            val d = c.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.")
+                .substringBefore('/').substringBefore('?').substringBefore(' ')
+            if (d.contains('.') && d.isNotEmpty() && contentMatcher.isWhitelisted(d)) {
+                pageWhitelisted = true
+                contextDomain = d
+                break
+            }
+        }
+        // Fallback: scan all candidate text for embedded whitelisted domains
+        if (!pageWhitelisted) {
+            for (c in candidates) {
+                if (contentMatcher.containsWhitelistedDomainPublic(c)) {
+                    pageWhitelisted = true
+                    contextDomain = "embedded-whitelist"
+                    break
+                }
+            }
+        }
+        // Cache: remember whitelisted domain for this browser so text-only events inherit it.
+        // Clear cache when we see a real URL that is NOT whitelisted (user navigated away).
+        val hasRealUrl = candidates.any { it.contains('.') && !it.contains(' ') }
+        if (pageWhitelisted) {
+            lastWhitelistedDomain = contextDomain
+            lastWhitelistedPackage = packageName
+        } else if (hasRealUrl) {
+            lastWhitelistedDomain = null
+            lastWhitelistedPackage = null
+        } else if (packageName == lastWhitelistedPackage && lastWhitelistedDomain != null) {
+            pageWhitelisted = true
+            contextDomain = lastWhitelistedDomain
+        }
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
             if (Math.random() < 0.1) {

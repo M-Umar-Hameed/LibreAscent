@@ -150,7 +150,7 @@ class ContentMatcher {
      * Scan text for any embedded whitelisted domain (e.g. "manga catalog: www.mangaread.org").
      * Used to skip keyword blocking when the candidate text references a whitelisted site.
      */
-    private val embeddedDomainPattern = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\\.[a-z]{2,}")
+    private val embeddedDomainPattern = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?\\.([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)*[a-z]{2,}")
 
     private fun containsWhitelistedDomain(text: String): Boolean {
         for (match in embeddedDomainPattern.findAll(text.lowercase())) {
@@ -158,6 +158,8 @@ class ContentMatcher {
         }
         return false
     }
+
+    fun containsWhitelistedDomainPublic(text: String): Boolean = containsWhitelistedDomain(text)
 
     private fun isDomainBlocked(domain: String): Boolean {
         val normalizedDomain = domain.removePrefix("www.")

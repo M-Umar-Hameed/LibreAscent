@@ -172,7 +172,7 @@ export default function SettingsScreen(): ReactNode {
         overlayCustomImage,
         overlayTexts,
         exportedAt: new Date().toISOString(),
-        version: "1.5.0",
+        version: "1.6.0",
       };
 
       const docDir = FileSystem.documentDirectory;
@@ -570,7 +570,7 @@ export default function SettingsScreen(): ReactNode {
           <View className="p-4 border-b border-gray-800">
             <Text style={{ color: t.textColor }}>Version</Text>
             <Text className="text-sm" style={{ color: t.mutedTextColor }}>
-              1.5.0 (Touka_Debo)
+              1.6.0 (Touka_Debo)
             </Text>
           </View>
           <Pressable

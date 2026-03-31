@@ -1,7 +1,7 @@
 {
   "name": "libreascent",
   "main": "expo-router/entry",
-  "version": "1.4.0",
+  "version": "1.6.0",
   "author": "Touka_Debo",
   "scripts": {
     "start": "expo start",

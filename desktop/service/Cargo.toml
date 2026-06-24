@@ -8,7 +8,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 chrono = "0.4"
-hickory-proto = "0.24"
+hickory-proto = "0.26"
 libreascent-shared = { path = "../shared" }
 reqwest = { version = "0.12" }
 serde_json = "1"

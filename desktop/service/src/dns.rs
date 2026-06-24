@@ -10,9 +10,14 @@ use tokio::time::{timeout, Duration};
 
 use crate::config_loader;
 
-const UPSTREAM_DNS: &[&str] = &["1.1.1.1:53", "8.8.8.8:53", "1.0.0.1:53"];
+const UPSTREAM_DNS: &[&str] = &["1.1.1.1:53", "1.0.0.1:53"];
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(2);
 const LOCAL_PROXY_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub struct BlockedDnsResponse {
+    pub domain: String,
+    pub response: Vec<u8>,
+}
 
 pub async fn run_local_dns_proxy(config_path: PathBuf, bind_addr: &str) -> Result<()> {
     run_local_dns_proxy_with_ready(config_path, bind_addr, None).await
@@ -68,13 +73,16 @@ pub async fn run_local_dns_proxy_with_ready(
         let blocklist = std::sync::Arc::clone(&blocklist);
 
         match build_block_response_if_needed(&request, &blocklist) {
-
-            Ok(Some(response)) => {
-                crate::dns_manager::log_tamper_event(&format!("Blocked: {request_id:04x}"));
-                let _ = socket.send_to(&response, peer).await;
+            Ok(Some(blocked)) => {
+                crate::dns_manager::log_tamper_event(&format!(
+                    "Blocked DNS: {domain} ({request_id:04x})",
+                    domain = blocked.domain
+                ));
+                let _ = socket.send_to(&blocked.response, peer).await;
 
                 if let Some(ref b_socket) = broadcast_socket {
-                    let _ = b_socket.send_to(b"block:dns", "127.0.0.1:13370").await;
+                    let message = format!("block:dns:{}", blocked.domain);
+                    let _ = b_socket.send_to(message.as_bytes(), "127.0.0.1:13370").await;
                 }
                 continue;
             }
@@ -89,7 +97,6 @@ pub async fn run_local_dns_proxy_with_ready(
 
         match forward_to_upstreams(&request, &upstreams, &mut buffer).await {
             Ok(upstream_size) => {
-                crate::dns_manager::log_tamper_event(&format!("Resolved: {request_id:04x}"));
                 let _ = socket.send_to(&buffer[..upstream_size], peer).await;
             }
             Err(error) => {
@@ -225,7 +232,7 @@ fn dns_probe_query() -> Result<Vec<u8>> {
 pub fn build_block_response_if_needed(
     request: &[u8],
     blocklist: &DomainBlocklist,
-) -> Result<Option<Vec<u8>>> {
+) -> Result<Option<BlockedDnsResponse>> {
     let message = Message::from_bytes(request).context("failed to parse DNS request")?;
     let Some(query) = message.queries().first() else {
         return Ok(None);
@@ -236,7 +243,8 @@ pub fn build_block_response_if_needed(
         return Ok(None);
     }
 
-    build_error_response(request, ResponseCode::NXDomain).map(Some)
+    let response = build_error_response(request, ResponseCode::NXDomain)?;
+    Ok(Some(BlockedDnsResponse { domain, response }))
 }
 
 pub fn build_error_response(request: &[u8], response_code: ResponseCode) -> Result<Vec<u8>> {
@@ -270,11 +278,13 @@ mod tests {
         let request = dns_query("example.com.");
         let blocklist = DomainBlocklist::new(vec!["example.com".to_string()], Vec::<String>::new());
 
-        let response_bytes = build_block_response_if_needed(&request, &blocklist)
+        let blocked = build_block_response_if_needed(&request, &blocklist)
             .expect("request should parse")
             .expect("domain should be blocked");
+        let response_bytes = blocked.response;
         let response = Message::from_bytes(&response_bytes).expect("response should parse");
 
+        assert_eq!(blocked.domain, "example.com.");
         assert_eq!(response.response_code(), ResponseCode::NXDomain);
         assert_eq!(response.queries().len(), 1);
     }

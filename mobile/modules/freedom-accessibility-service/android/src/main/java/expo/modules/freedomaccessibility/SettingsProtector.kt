@@ -44,12 +44,24 @@ class SettingsProtector {
             "disable device admin"
         )
 
+        // Only phrases that appear on LibreAscent's own accessibility detail
+        // page (the toggle screen). Generic "off"/"shortcut" would match the
+        // main Accessibility list, where every service shows an On/Off status,
+        // and block the entire page instead of just LibreAscent's entry.
         private val ACCESSIBILITY_TRIGGERS = listOf(
             "stop libreascent",
             "turn off libreascent",
-            "use libreascent",
-            "shortcut",
-            "off"
+            "use libreascent"
+        )
+
+        private val ACCESSIBILITY_CONTEXT_TRIGGERS = listOf(
+            "accessibility",
+            "installed apps",
+            "downloaded apps",
+            "screen reader",
+            "stop libreascent",
+            "turn off libreascent",
+            "use libreascent"
         )
 
         private val SETTINGS_PKGS = listOf(
@@ -140,12 +152,26 @@ class SettingsProtector {
             return
         }
 
-        // Accessibility settings for Freedom
-        if (containsAny(allText, ACCESSIBILITY_TRIGGERS)) {
+        // Accessibility settings for Freedom. Keep this narrow: network/VPN
+        // settings can show "LibreAscent" and "Off" without being tamper UI.
+        if (shouldBlockAccessibilitySettings(allText)) {
             Log.w(TAG, "Protection: Accessibility settings action for Freedom! Navigating back.")
             service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
             return
         }
+    }
+
+    internal fun shouldBlockSettingsTextsForTest(texts: List<String>): Boolean {
+        return containsFreedom(texts) &&
+            (containsAny(texts, APP_INFO_TRIGGERS) ||
+                containsAny(texts, DEVICE_ADMIN_TRIGGERS) ||
+                shouldBlockAccessibilitySettings(texts))
+    }
+
+    private fun shouldBlockAccessibilitySettings(texts: List<String>): Boolean {
+        return containsFreedom(texts) &&
+            containsAny(texts, ACCESSIBILITY_CONTEXT_TRIGGERS) &&
+            containsAny(texts, ACCESSIBILITY_TRIGGERS)
     }
 
     private fun collectAllText(node: AccessibilityNodeInfo, depth: Int = 0): List<String> {

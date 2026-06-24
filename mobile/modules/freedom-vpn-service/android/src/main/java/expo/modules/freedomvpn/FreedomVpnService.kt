@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -69,6 +70,11 @@ class FreedomVpnService : VpnService() {
         // Action for broadcasting blocked domain events
         const val ACTION_DOMAIN_BLOCKED = "expo.modules.freedomvpn.DOMAIN_BLOCKED"
         const val EXTRA_DOMAIN = "domain"
+
+        internal val DEFAULT_BYPASSED_PACKAGES = listOf(
+            "com.whatsapp",
+            "com.whatsapp.w4b"
+        )
     }
 
     private lateinit var dnsInterceptor: DnsInterceptor
@@ -132,10 +138,11 @@ class FreedomVpnService : VpnService() {
                 // Set our own DNS servers (these trigger DNS through the tunnel)
                 .addDnsServer(DNS_PRIMARY)
                 .addDnsServer(DNS_SECONDARY)
-                // Allow the app itself to bypass VPN (prevents loops)
-                .addDisallowedApplication(packageName)
                 // Block connections without VPN if tunnel goes down
                 .setBlocking(true)
+
+            addBypassedApplication(builder, packageName)
+            DEFAULT_BYPASSED_PACKAGES.forEach { addBypassedApplication(builder, it) }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
@@ -153,6 +160,15 @@ class FreedomVpnService : VpnService() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to establish VPN interface", e)
             false
+        }
+    }
+
+    private fun addBypassedApplication(builder: Builder, packageName: String) {
+        try {
+            builder.addDisallowedApplication(packageName)
+            Log.i(TAG, "Bypassing VPN for package: $packageName")
+        } catch (e: PackageManager.NameNotFoundException) {
+            Log.d(TAG, "Bypass package not installed: $packageName")
         }
     }
 

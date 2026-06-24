@@ -19,7 +19,12 @@ define_windows_service!(ffi_service_main, libre_ascent_service_main);
 
 enum ServiceEvent {
     StopRequested,
+    ShutdownRequested,
     DnsProxyStopped,
+}
+
+fn format_app_block_message(path: &std::path::Path) -> String {
+    format!("block:app:{}", path.display())
 }
 
 pub fn run_service() -> anyhow::Result<()> {
@@ -44,6 +49,10 @@ fn run_service_loop() -> anyhow::Result<()> {
                 let _ = control_tx.blocking_send(ServiceEvent::StopRequested);
                 ServiceControlHandlerResult::NoError
             }
+            ServiceControl::Shutdown => {
+                let _ = control_tx.blocking_send(ServiceEvent::ShutdownRequested);
+                ServiceControlHandlerResult::NoError
+            }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             _ => ServiceControlHandlerResult::NotImplemented,
         }
@@ -54,7 +63,7 @@ fn run_service_loop() -> anyhow::Result<()> {
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Running,
-        controls_accepted: ServiceControlAccept::STOP,
+        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
         wait_hint: Duration::default(),
@@ -114,40 +123,54 @@ fn run_service_loop() -> anyhow::Result<()> {
 
         // Start App blocker
         let blocker_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
             let broadcast_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.ok();
             let mut sys = crate::process_manager::create_system_handle();
             let mut runtime_blocked_paths: Vec<PathBuf> = Vec::new();
             let mut last_firewall_refresh = Instant::now() - Duration::from_secs(60);
+            let mut firewall_enforcement_failed = false;
 
             loop {
                 interval.tick().await;
                 let config_path = libreascent_shared::config::default_config_path();
                 if let Ok(config) = libreascent_shared::config::load_or_create(&config_path) {
                     let blocked_paths = crate::process_manager::check_and_block_apps(&mut sys, &config);
-                    let blocked = !blocked_paths.is_empty();
+                    let mut newly_blocked_paths = Vec::new();
 
                     for path in blocked_paths {
                         if !runtime_blocked_paths.contains(&path) {
+                            newly_blocked_paths.push(path.clone());
                             runtime_blocked_paths.push(path);
                         }
                     }
 
-                    if blocked || last_firewall_refresh.elapsed() >= Duration::from_secs(10) {
+                    if !firewall_enforcement_failed
+                        && (!newly_blocked_paths.is_empty()
+                        || last_firewall_refresh.elapsed() >= Duration::from_secs(60)
+                        )
+                    {
                         if let Err(e) = crate::firewall_manager::ensure_firewall_protection(
                             &config,
                             &runtime_blocked_paths,
                         ) {
                             crate::dns_manager::log_tamper_event(&format!(
-                                "Firewall enforcement failed: {e}"
+                                "Firewall enforcement disabled until service restart after failure: {e}"
                             ));
+                            firewall_enforcement_failed = true;
                         }
                         last_firewall_refresh = Instant::now();
                     }
 
-                    if blocked {
+                    if !newly_blocked_paths.is_empty() {
                         if let Some(ref socket) = broadcast_socket {
-                            let _ = socket.send_to(b"block:app", "127.0.0.1:13370").await;
+                            for path in &newly_blocked_paths {
+                                let message = format_app_block_message(path);
+                                crate::dns_manager::log_tamper_event(&format!(
+                                    "Blocked app: {}",
+                                    path.display()
+                                ));
+                                let _ = socket.send_to(message.as_bytes(), "127.0.0.1:13370").await;
+                            }
                         }
                     }
                 }
@@ -179,6 +202,10 @@ fn run_service_loop() -> anyhow::Result<()> {
             crate::dns_manager::log_tamper_event(
                 "DNS proxy stopped in Hardcore mode. DNS NOT reset.",
             );
+        } else if matches!(event, Some(ServiceEvent::ShutdownRequested)) {
+            crate::dns_manager::log_tamper_event(
+                "Service shutdown requested in Hardcore mode. DNS NOT reset.",
+            );
         } else {
             crate::dns_manager::log_tamper_event(
                 "Service stopped in Hardcore mode. DNS NOT reset.",
@@ -197,6 +224,17 @@ fn run_service_loop() -> anyhow::Result<()> {
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn app_block_message_includes_blocked_path() {
+        let message =
+            super::format_app_block_message(std::path::Path::new(r"C:\Apps\Browser\browser.exe"));
+
+        assert_eq!(message, r"block:app:C:\Apps\Browser\browser.exe");
+    }
 }
 
 pub fn install_service() -> anyhow::Result<()> {

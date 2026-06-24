@@ -215,4 +215,21 @@ mod tests {
 
         assert!(configured_app_rules(&config).is_empty());
     }
+
+    #[test]
+    fn cloudflare_dns_rule_names_are_stable_for_status_checks() {
+        let rules = cloudflare_dns_block_rules();
+        let names = rules
+            .iter()
+            .map(|rule| rule.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "LibreAscent Block Cloudflare DNS UDP",
+                "LibreAscent Block Cloudflare DNS TCP"
+            ]
+        );
+    }
 }

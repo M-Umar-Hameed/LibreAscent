@@ -131,7 +131,7 @@ pub fn is_dns_set_correctly(addr: &str) -> Result<bool> {
 fn get_managed_interfaces() -> Result<Vec<String>> {
     Ok(get_connected_interfaces()?
         .into_iter()
-        .filter(|name| !is_loopback_interface(name))
+        .filter(|name| is_managed_dns_interface(name))
         .collect())
 }
 
@@ -165,6 +165,28 @@ fn parse_connected_interfaces(output: &str) -> Vec<String> {
 
 fn is_loopback_interface(name: &str) -> bool {
     name.to_ascii_lowercase().contains("loopback")
+}
+
+fn is_managed_dns_interface(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    let unmanaged_markers = [
+        "loopback",
+        "cloudflare",
+        "warp",
+        "wireguard",
+        "wintun",
+        "tailscale",
+        "zerotier",
+        "proton",
+        "nordlynx",
+        "openvpn",
+        "tap-windows",
+        "vpn",
+    ];
+
+    !unmanaged_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
 }
 
 fn interface_dns_section_contains(output: &str, interface: &str, addr: &str) -> bool {
@@ -218,5 +240,19 @@ Idx     Met         MTU          State                Name
                 "Loopback Pseudo-Interface 1".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn managed_dns_interfaces_exclude_vpn_and_tunnel_adapters() {
+        assert!(super::is_managed_dns_interface("Ethernet"));
+        assert!(super::is_managed_dns_interface("Wi-Fi"));
+
+        assert!(!super::is_managed_dns_interface("CloudflareWARP"));
+        assert!(!super::is_managed_dns_interface("Cloudflare WARP"));
+        assert!(!super::is_managed_dns_interface("WireGuard Tunnel"));
+        assert!(!super::is_managed_dns_interface("Tailscale"));
+        assert!(!super::is_managed_dns_interface("ProtonVPN"));
+        assert!(!super::is_managed_dns_interface("OpenVPN TAP-Windows6"));
+        assert!(!super::is_managed_dns_interface("Loopback Pseudo-Interface 1"));
     }
 }

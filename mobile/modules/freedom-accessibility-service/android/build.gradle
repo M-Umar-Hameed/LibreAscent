@@ -28,6 +28,7 @@ dependencies {
     implementation project(':expo-modules-core')
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:${safeExtGet('kotlinVersion', '1.9.24')}"
     implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
+    testImplementation "org.jetbrains.kotlin:kotlin-test:${safeExtGet('kotlinVersion', '1.9.24')}"
 }
 
 def safeExtGet(prop, fallback) {

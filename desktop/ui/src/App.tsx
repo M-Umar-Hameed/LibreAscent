@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { FrictionGuard } from "./FrictionGuard";
 import logo from "./assets/logo.png";
 
@@ -37,11 +38,26 @@ type DesktopStatus = {
   serviceRunning: boolean;
   dnsProxyRunning: boolean;
   dnsControlled: boolean;
+  firewallControlled: boolean;
   configPath: string;
   isAdmin: boolean;
 };
 
 type DomainResult = "idle" | "blocked" | "allowed" | "error";
+
+function describeBlockEvent(message: string) {
+  if (message.startsWith("block:app:")) {
+    return `Blocked app: ${message.slice("block:app:".length)}`;
+  }
+
+  if (message.startsWith("block:dns:")) {
+    return `Blocked domain: ${message.slice("block:dns:".length)}`;
+  }
+
+  if (message === "block:app") return "Blocked app";
+  if (message === "block:dns") return "Blocked domain";
+  return "Blocked content";
+}
 
 export function App() {
   const [status, setStatus] = useState<DesktopStatus | null>(null);
@@ -51,6 +67,7 @@ export function App() {
   const [newApp, setNewApp] = useState("");
   const [domainResult, setDomainResult] = useState<DomainResult>("idle");
   const [loading, setLoading] = useState(false);
+  const [lastBlock, setLastBlock] = useState<string | null>(null);
   const [frictionTarget, setFrictionTarget] = useState<{
     cmd: string;
     title: string;
@@ -72,7 +89,25 @@ export function App() {
     refreshStatus();
     loadConfig();
     const interval = setInterval(refreshStatus, 5000);
-    return () => clearInterval(interval);
+    let unlisten: (() => void) | undefined;
+    invoke<string | null>("get_last_block_event")
+      .then((message) => {
+        if (message) {
+          setLastBlock(describeBlockEvent(message));
+        }
+      })
+      .catch(() => {});
+
+    listen<string>("block-event", (event) => {
+      setLastBlock(describeBlockEvent(event.payload));
+    }).then((cleanup) => {
+      unlisten = cleanup;
+    });
+
+    return () => {
+      clearInterval(interval);
+      unlisten?.();
+    };
   }, []);
 
   async function testDomain() {
@@ -220,13 +255,25 @@ export function App() {
             <dt>System DNS</dt>
             <dd>{status?.dnsControlled ? "Managed" : "External"}</dd>
           </div>
+          <div>
+            <dt>Bypass guard</dt>
+            <dd>{status?.firewallControlled ? "Active" : "Missing"}</dd>
+          </div>
         </dl>
 
-        {status && !status.dnsControlled ? (
+        {status && !status.dnsControlled && !status.firewallControlled ? (
           <p className="warning">
-            Browser blocking is not active until System DNS is managed by LibreAscent.
+            Browser blocking is not active until System DNS or the firewall bypass guard is managed by LibreAscent.
           </p>
         ) : null}
+
+        {status && !status.dnsControlled && status.firewallControlled ? (
+          <p className="warning">
+            System DNS is external, but LibreAscent is blocking Cloudflare DNS/WARP bypass routes with Windows Firewall.
+          </p>
+        ) : null}
+
+        {lastBlock ? <p className="warning">Last block: {lastBlock}</p> : null}
 
         <div className="actions-row">
           {!status?.serviceInstalled ? (

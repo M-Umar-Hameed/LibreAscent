@@ -3,9 +3,14 @@
 use is_elevated::is_elevated;
 use libreascent_shared::config::{default_config_path, load_or_create, save, DesktopConfig};
 use serde::Serialize;
+use std::net::UdpSocket as StdUdpSocket;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tauri::{Emitter, Manager};
+use std::sync::Mutex;
+use std::time::Duration;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 use tokio::net::UdpSocket;
 use windows_service::service::{ServiceAccess, ServiceState};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -23,14 +28,21 @@ struct DesktopStatus {
     service_running: bool,
     dns_proxy_running: bool,
     dns_controlled: bool,
+    firewall_controlled: bool,
     config_path: String,
     is_admin: bool,
 }
 
+struct LastBlockEvent(Mutex<Option<String>>);
+
 fn check_dns_control() -> bool {
-    let output = Command::new("netsh")
-        .args(&["interface", "ipv4", "show", "dnsservers"])
-        .output();
+    let mut command = Command::new("netsh");
+    command.args(&["interface", "ipv4", "show", "dnsservers"]);
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output = command.output();
 
     if let Ok(output) = output {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -38,6 +50,83 @@ fn check_dns_control() -> bool {
     } else {
         false
     }
+}
+
+fn check_firewall_control() -> bool {
+    [
+        "LibreAscent Block Cloudflare DNS UDP",
+        "LibreAscent Block Cloudflare DNS TCP",
+    ]
+    .into_iter()
+    .all(|name| firewall_rule_exists(name))
+}
+
+fn is_local_dns_proxy_running() -> bool {
+    let Ok(socket) = StdUdpSocket::bind("127.0.0.1:0") else {
+        return false;
+    };
+    if socket
+        .set_read_timeout(Some(Duration::from_millis(750)))
+        .is_err()
+    {
+        return false;
+    }
+
+    let query = [
+        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',
+        b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00,
+        0x01,
+    ];
+    if socket.send_to(&query, "127.0.0.1:53").is_err() {
+        return false;
+    }
+
+    let mut response = [0_u8; 512];
+    socket.recv_from(&mut response).is_ok()
+}
+
+fn dns_protection_preflight_error(service_running: bool, dns_proxy_running: bool) -> Option<String> {
+    if !service_running {
+        return Some("Start the service before enabling DNS protection.".to_string());
+    }
+
+    if !dns_proxy_running {
+        return Some(
+            "DNS proxy is not responding on 127.0.0.1:53. Restart or repair the service before enabling DNS protection.".to_string(),
+        );
+    }
+
+    None
+}
+
+fn should_show_overlay_for_block_event(message: &str) -> bool {
+    let _ = message;
+    false
+}
+
+fn remember_block_event(state: &LastBlockEvent, message: &str) {
+    if let Ok(mut last_block) = state.0.lock() {
+        *last_block = Some(message.to_string());
+    }
+}
+
+fn firewall_rule_exists(name: &str) -> bool {
+    let mut command = Command::new("netsh");
+    command.args([
+        "advfirewall",
+        "firewall",
+        "show",
+        "rule",
+        &format!("name={name}"),
+    ]);
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    command
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn get_service_path(handle: &tauri::AppHandle) -> PathBuf {
@@ -225,6 +314,41 @@ mod tests {
 
         assert_eq!(path, copied);
     }
+
+    #[test]
+    fn dns_protection_preflight_requires_running_dns_proxy() {
+        assert_eq!(
+            dns_protection_preflight_error(false, false),
+            Some("Start the service before enabling DNS protection.".to_string())
+        );
+        assert_eq!(
+            dns_protection_preflight_error(true, false),
+            Some("DNS proxy is not responding on 127.0.0.1:53. Restart or repair the service before enabling DNS protection.".to_string())
+        );
+        assert_eq!(dns_protection_preflight_error(true, true), None);
+    }
+
+    #[test]
+    fn block_events_do_not_auto_show_overlay() {
+        assert!(!should_show_overlay_for_block_event("block:app"));
+        assert!(!should_show_overlay_for_block_event(
+            "block:app:C:\\Program Files\\Browser\\browser.exe"
+        ));
+        assert!(!should_show_overlay_for_block_event("block:dns"));
+        assert!(!should_show_overlay_for_block_event("block:dns:ads.example.com"));
+    }
+
+    #[test]
+    fn remembers_latest_block_event() {
+        let state = LastBlockEvent(Mutex::new(None));
+
+        remember_block_event(&state, "block:app:C:\\Program Files\\Cloudflare\\warp-svc.exe");
+
+        assert_eq!(
+            state.0.lock().unwrap().clone(),
+            Some("block:app:C:\\Program Files\\Cloudflare\\warp-svc.exe".to_string())
+        );
+    }
 }
 
 fn service_state() -> (bool, bool) {
@@ -289,12 +413,14 @@ fn run_service_command(handle: &tauri::AppHandle, verb: &str) -> Result<(), Stri
 #[tauri::command]
 fn get_status() -> DesktopStatus {
     let (installed, running) = service_state();
+    let dns_proxy_running = is_local_dns_proxy_running();
 
     DesktopStatus {
         service_installed: installed,
         service_running: running,
-        dns_proxy_running: running,
+        dns_proxy_running,
         dns_controlled: check_dns_control(),
+        firewall_controlled: check_firewall_control(),
         config_path: default_config_path().to_string_lossy().to_string(),
         is_admin: is_elevated(),
     }
@@ -333,8 +459,8 @@ fn stop_service(handle: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn enable_dns_protection(handle: tauri::AppHandle) -> Result<(), String> {
     let (_, running) = service_state();
-    if !running {
-        return Err("Start the service before enabling DNS protection.".to_string());
+    if let Some(message) = dns_protection_preflight_error(running, is_local_dns_proxy_running()) {
+        return Err(message);
     }
 
     run_service_command(&handle, "set-dns")
@@ -374,16 +500,57 @@ fn hide_overlay(handle: tauri::AppHandle) {
     }
 }
 
+#[tauri::command]
+fn get_last_block_event(state: tauri::State<'_, LastBlockEvent>) -> Option<String> {
+    state.0.lock().ok().and_then(|last_block| last_block.clone())
+}
+
 fn main() {
     tauri::Builder::default()
+        .manage(LastBlockEvent(Mutex::new(None)))
         .setup(|app| {
+            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app: &tauri::AppHandle, event| match event.id.as_ref() {
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event| {
+                    if let TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
                     .unwrap();
-                
+
                 rt.block_on(async move {
                     let socket_res = UdpSocket::bind("127.0.0.1:13370").await;
                     if let Ok(socket) = socket_res {
@@ -392,11 +559,14 @@ fn main() {
                             if let Ok((size, _)) = socket.recv_from(&mut buffer).await {
                                 let msg = String::from_utf8_lossy(&buffer[..size]);
                                 if msg.starts_with("block:") {
-                                    let _ = handle.emit("block-event", msg);
-                                    if let Some(window) = handle.get_webview_window("overlay") {
-                                        let _ = window.show();
-                                        let _ = window.set_focus();
+                                    remember_block_event(&handle.state::<LastBlockEvent>(), &msg);
+                                    if should_show_overlay_for_block_event(&msg) {
+                                        if let Some(window) = handle.get_webview_window("overlay") {
+                                            let _ = window.show();
+                                            let _ = window.set_focus();
+                                        }
                                     }
+                                    let _ = handle.emit("block-event", msg);
                                 }
                             }
                         }
@@ -404,6 +574,15 @@ fn main() {
                 });
             });
             Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                if window.label() == "main" {
+                    window.hide().unwrap();
+                    api.prevent_close();
+                }
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -418,7 +597,8 @@ fn main() {
             get_config,
             update_config,
             show_overlay,
-            hide_overlay
+            hide_overlay,
+            get_last_block_event
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LibreAscent Desktop");

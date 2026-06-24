@@ -2,17 +2,8 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use libreascent_shared::config::DesktopConfig;
 use std::path::PathBuf;
 
-const DEFAULT_NETWORK_BYPASS_EXECUTABLES: &[&str] = &[
-    "cloudflare warp",
-    "cloudflare warp.exe",
-    "warp-cli",
-    "warp-cli.exe",
-    "warp-svc",
-    "warp-svc.exe",
-];
-
 pub fn check_and_block_apps(sys: &mut System, config: &DesktopConfig) -> Vec<PathBuf> {
-    if config.blocked_apps.is_empty() && DEFAULT_NETWORK_BYPASS_EXECUTABLES.is_empty() {
+    if config.blocked_apps.is_empty() {
         return Vec::new();
     }
 
@@ -45,13 +36,6 @@ fn should_block_process(exe_name: &str, exe_path: Option<&str>, config: &Desktop
     let exe_name = exe_name.to_lowercase();
     let exe_path = exe_path.map(|path| path.to_lowercase());
 
-    if DEFAULT_NETWORK_BYPASS_EXECUTABLES
-        .iter()
-        .any(|rule| executable_matches(&exe_name, exe_path.as_deref(), rule))
-    {
-        return true;
-    }
-
     config.blocked_apps.iter().any(|rule| {
         executable_matches(&exe_name, exe_path.as_deref(), &rule.executable.to_lowercase())
     })
@@ -71,10 +55,10 @@ mod tests {
     use libreascent_shared::config::default_config;
 
     #[test]
-    fn blocks_cloudflare_warp_as_builtin_bypass_tool() {
+    fn allows_cloudflare_warp_unless_user_configured_it() {
         let config = default_config();
 
-        assert!(should_block_process(
+        assert!(!should_block_process(
             "warp-svc.exe",
             Some(r"C:\Program Files\Cloudflare\Cloudflare WARP\warp-svc.exe"),
             &config,

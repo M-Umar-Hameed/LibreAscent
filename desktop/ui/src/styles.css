@@ -180,6 +180,16 @@ button {
   margin: 16px 0;
 }
 
+.block-reason {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #354254;
+  border-radius: 6px;
+  color: #e5edf7;
+  background: #0f141a;
+  word-break: break-word;
+}
+
 .overlay-content .message {
   margin: 24px 0;
   color: #9aa8b7;

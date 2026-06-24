@@ -13,6 +13,6 @@ is_elevated = "0.1"
 libreascent-shared = { path = "../../shared" }
 runas = "1"
 serde = { version = "1", features = ["derive"] }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tokio = { version = "1", features = ["net", "rt-multi-thread"] }
 windows-service = "0.8"

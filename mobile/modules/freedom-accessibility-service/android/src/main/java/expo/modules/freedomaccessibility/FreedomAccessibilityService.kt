@@ -231,11 +231,19 @@ class FreedomAccessibilityService : AccessibilityService() {
             val appConfig = contentMatcher.getAppConfig(packageName)
             when {
                 appConfig != null -> {
-                    Log.w(TAG, "Blocking app launch: $packageName (Config: ${appConfig.appName}, surveillance: ${appConfig.surveillanceType})")
-                    showInstantOverlay(packageName, "${appConfig.appName} is blocked", appConfig.surveillanceType, appConfig.surveillanceValue)
-                    // Only go home for hard blocks - timer/click overlays need user interaction
-                    if (appConfig.surveillanceType == "none") {
-                        performGlobalAction(GLOBAL_ACTION_HOME)
+                    // Block only on actual foreground launch (window-state change).
+                    // System popups that render under a blocked app's package —
+                    // e.g. the Play Protect scan dialog layered over the package
+                    // installer, attributed to com.android.vending — emit only
+                    // content-changed events and must not trip the app block.
+                    if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                        !isSystemServedDialog(classNameStr)) {
+                        Log.w(TAG, "Blocking app launch: $packageName (Config: ${appConfig.appName}, surveillance: ${appConfig.surveillanceType})")
+                        showInstantOverlay(packageName, "${appConfig.appName} is blocked", appConfig.surveillanceType, appConfig.surveillanceValue)
+                        // Only go home for hard blocks - timer/click overlays need user interaction
+                        if (appConfig.surveillanceType == "none") {
+                            performGlobalAction(GLOBAL_ACTION_HOME)
+                        }
                     }
                 }
                 shouldHandleAsBrowser -> {
@@ -260,6 +268,18 @@ class FreedomAccessibilityService : AccessibilityService() {
         } catch (e: Exception) {
             Log.w(TAG, "Error processing accessibility event: ${e.message}")
         }
+    }
+
+    /**
+     * Play Store serves some UIs that aren't the store itself and must not be
+     * blocked when Play Store is a blocked app — notably the in-app review
+     * (rating) card, which is a transparent finsky/Play Core activity overlaid
+     * on the host app. Identify those by activity class so the app block skips
+     * them. classNameStr is already lowercased by the caller.
+     */
+    private fun isSystemServedDialog(classNameStr: String): Boolean {
+        return classNameStr.contains("inappreview") ||
+                classNameStr.contains("playcoredialogwrapper")
     }
 
     /**

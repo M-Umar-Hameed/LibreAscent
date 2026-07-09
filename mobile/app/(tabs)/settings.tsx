@@ -1,5 +1,6 @@
 import { InteractionGuard } from "@/components/InteractionGuard";
 import type { AppTheme } from "@/constants/overlay-themes";
+import { getCachedDomainCount } from "@/db/database";
 import { useAppTheme } from "@/providers/ThemeProvider";
 import { BlocklistService } from "@/services/BlocklistService";
 import { useAppStore } from "@/stores/useAppStore";
@@ -19,6 +20,7 @@ import * as Sharing from "expo-sharing";
 import type { ReactNode } from "react";
 import { useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Modal,
   Pressable,
@@ -56,11 +58,16 @@ export default function SettingsScreen(): ReactNode {
     sources,
     importSettings,
   } = useBlockingStore();
+  const adBlockEnabled = useBlockingStore(
+    (s) => s.categories.find((c) => c.id === "ads")?.enabled ?? false,
+  );
+  const toggleCategory = useBlockingStore((s) => s.toggleCategory);
+  const [adBlockLoading, setAdBlockLoading] = useState(false);
   const router = useRouter();
 
-  const [pendingAction, setPendingAction] = useState<"boot" | "applock" | null>(
-    null,
-  );
+  const [pendingAction, setPendingAction] = useState<
+    "boot" | "applock" | "adblock" | null
+  >(null);
 
   const handleBootToggle = (isEnabling: boolean): void => {
     if (controlMode === "flexible" || isEnabling) {
@@ -74,6 +81,42 @@ export default function SettingsScreen(): ReactNode {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setAutoStart(!autoStartOnBoot);
     setPendingAction(null);
+  };
+
+  const handleAdBlockToggle = (isEnabling: boolean): void => {
+    // Enabling strengthens protection — always free. Disabling in a
+    // non-flexible mode requires friction, matching app convention.
+    if (isEnabling || controlMode === "flexible") {
+      void applyAdBlock(isEnabling);
+    } else {
+      setPendingAction("adblock");
+    }
+  };
+
+  const applyAdBlock = async (enable: boolean): Promise<void> => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    toggleCategory("ads");
+    setPendingAction(null);
+
+    if (enable) {
+      setAdBlockLoading(true);
+      try {
+        if (getCachedDomainCount("ads") === 0) {
+          // First enable: fetch + cache + sync the HaGeZi list.
+          await BlocklistService.updateBlocklists();
+        } else {
+          await BlocklistService.syncVpnCategoryToggle("ads", true);
+          await BlocklistService.syncCategoryFlagsToNative();
+        }
+      } catch (e) {
+        console.error("[Settings] Ad-block enable failed:", e);
+      } finally {
+        setAdBlockLoading(false);
+      }
+    } else {
+      await BlocklistService.syncVpnCategoryToggle("ads", false);
+      await BlocklistService.syncCategoryFlagsToNative();
+    }
   };
 
   // App lock setup modal state
@@ -303,6 +346,25 @@ export default function SettingsScreen(): ReactNode {
               thumbColor={appLockEnabled ? "#fff" : "#999"}
               aria-label="Toggle app lock"
             />
+          </View>
+          <View className="flex-row items-center justify-between p-4 border-t border-gray-800">
+            <View className="flex-1">
+              <Text style={{ color: t.textColor }}>Block Ads & Trackers</Text>
+              <Text className="text-sm" style={{ color: t.mutedTextColor }}>
+                Aggressive network-wide ad/tracker blocking (HaGeZi Ultimate)
+              </Text>
+            </View>
+            {adBlockLoading ? (
+              <ActivityIndicator color={t.accentColor} />
+            ) : (
+              <Switch
+                value={adBlockEnabled}
+                onValueChange={handleAdBlockToggle}
+                trackColor={{ false: "#ccc", true: t.accentColor }}
+                thumbColor={adBlockEnabled ? "#fff" : "#999"}
+                aria-label="Toggle ad and tracker blocking"
+              />
+            )}
           </View>
         </View>
 
@@ -856,11 +918,16 @@ export default function SettingsScreen(): ReactNode {
       <InteractionGuard
         visible={pendingAction !== null}
         actionName={
-          pendingAction === "boot" ? "Disable Auto-start" : "Disable App Lock"
+          pendingAction === "boot"
+            ? "Disable Auto-start"
+            : pendingAction === "applock"
+              ? "Disable App Lock"
+              : "Disable Ad Blocking"
         }
         onSuccess={() => {
           if (pendingAction === "boot") toggleBoot();
           else if (pendingAction === "applock") disableAppLock();
+          else if (pendingAction === "adblock") void applyAdBlock(false);
         }}
         onCancel={() => {
           setPendingAction(null);

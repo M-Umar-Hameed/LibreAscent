@@ -1,5 +1,8 @@
 import { InteractionGuard } from "@/components/InteractionGuard";
-import { BlocklistService } from "@/services/BlocklistService";
+import {
+  BlocklistService,
+  VPN_ONLY_CATEGORIES,
+} from "@/services/BlocklistService";
 import { ProtectionService } from "@/services/ProtectionService";
 import { useAppTheme } from "@/providers/ThemeProvider";
 import { useAppStore } from "@/stores/useAppStore";
@@ -117,6 +120,9 @@ export default function BlockAdultScreen(): ReactNode {
 
     const state = useBlockingStore.getState();
     for (const cat of state.categories) {
+      // The adult master must not touch VPN-only categories (e.g. ads),
+      // which are governed by their own independent toggle.
+      if (VPN_ONLY_CATEGORIES.has(cat.id)) continue;
       void BlocklistService.syncVpnCategoryToggle(
         cat.id,
         newEnabled && cat.enabled,

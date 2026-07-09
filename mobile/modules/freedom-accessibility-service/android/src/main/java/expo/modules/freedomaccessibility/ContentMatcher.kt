@@ -755,7 +755,9 @@ class ContentMatcher {
 
         // Load per-category domain sets — try file-based first, then SharedPreferences
         var foundCategories = false
-        val knownCategories = listOf("adult", "hentai", "ads")
+        // "ads" is intentionally excluded: ad blocking is VPN/DNS-only and its
+        // ~1M domains must not be loaded into this per-event URL matcher.
+        val knownCategories = listOf("adult", "hentai")
 
         for (catId in knownCategories) {
             val fileDomains = loadCategoryFromFile(context, catId)

@@ -16,6 +16,15 @@ import {
 } from "@/stores/useBlockingStore";
 
 /**
+ * Categories enforced by the VPN/DNS layer only. Their domains are NEVER
+ * pushed to the accessibility ContentMatcher. Ad/tracker domains are page
+ * subresources that never appear in a browser URL bar, so scanning them there
+ * blocks nothing while loading ~1M entries into the per-event matcher — the
+ * cause of severe UI lag. VPN DNS blocking handles these categories fully.
+ */
+export const VPN_ONLY_CATEGORIES = new Set<string>(["ads"]);
+
+/**
  * BlocklistService — Manages domain blocklists on the JS side.
  */
 export const BlocklistService = {
@@ -45,12 +54,12 @@ export const BlocklistService = {
     }
 
     for (const category of state.categories) {
-      const masterOn =
-        category.id === "ads" ? true : state.adultBlockingEnabled;
+      // VPN-only categories are not held by the accessibility matcher.
+      if (VPN_ONLY_CATEGORIES.has(category.id)) continue;
       try {
         await FreedomAccessibility.setCategoryEnabled(
           category.id,
-          masterOn && category.enabled,
+          state.adultBlockingEnabled && category.enabled,
         );
       } catch (e) {
         console.warn(
@@ -146,20 +155,25 @@ export const BlocklistService = {
         // ignore — category might not exist yet
       }
 
-      // Batch to both VPN and Accessibility
+      // Batch to VPN, and to Accessibility unless this is a VPN-only category
+      const toAccessibility = !VPN_ONLY_CATEGORIES.has(category.id);
       try {
         await BlocklistService.sendInBatches(
           category.domains,
           async (batch) => {
             await FreedomVpn.addCategory(category.id, batch);
-            await FreedomAccessibility.appendCategoryDomains(
-              category.id,
-              batch,
-            );
+            if (toAccessibility) {
+              await FreedomAccessibility.appendCategoryDomains(
+                category.id,
+                batch,
+              );
+            }
           },
         );
         // Finalize accessibility (persist + rebuild active domains)
-        await FreedomAccessibility.finalizeCategorySync(category.id);
+        if (toAccessibility) {
+          await FreedomAccessibility.finalizeCategorySync(category.id);
+        }
       } catch (e) {
         console.warn(
           `[BlocklistService] Failed to sync category ${category.id}:`,
@@ -580,6 +594,24 @@ export const BlocklistService = {
       if (!masterOn || !category.enabled) continue;
       const cached = getCachedDomainCount(category.id);
       if (cached === 0) continue;
+
+      if (VPN_ONLY_CATEGORIES.has(category.id)) {
+        try {
+          await FreedomVpn.removeCategory(category.id);
+          // Remove any stale accessibility file left by an older build that
+          // pushed this category to the matcher.
+          await FreedomAccessibility.clearCategoryDomains(category.id);
+        } catch {
+          /* might not exist */
+        }
+        await BlocklistService.syncCategoryFromCache(category.id, {
+          syncVpn: true,
+          syncAccessibility: false,
+        });
+        useBlockingStore.getState().setCategoryDomainCount(category.id, cached);
+        continue;
+      }
+
       const existingNativeCount =
         options?.nativeCounts?.[category.id] ??
         (options?.skipMatchingNative
@@ -717,7 +749,9 @@ export const BlocklistService = {
           continue;
         }
 
-        // Clear native category and re-populate from SQLite cache
+        const vpnOnly = VPN_ONLY_CATEGORIES.has(categoryId);
+        // Clear native category and re-populate from SQLite cache. The
+        // accessibility clear also removes any stale file for VPN-only cats.
         try {
           await FreedomVpn.removeCategory(categoryId);
           await FreedomAccessibility.clearCategoryDomains(categoryId);
@@ -725,12 +759,17 @@ export const BlocklistService = {
           /* ignore */
         }
 
-        await BlocklistService.syncCategoryFromCache(categoryId);
+        await BlocklistService.syncCategoryFromCache(categoryId, {
+          syncVpn: true,
+          syncAccessibility: !vpnOnly,
+        });
 
-        try {
-          await FreedomAccessibility.finalizeCategorySync(categoryId);
-        } catch (e) {
-          console.warn("[BlocklistService] finalizeCategorySync warning:", e);
+        if (!vpnOnly) {
+          try {
+            await FreedomAccessibility.finalizeCategorySync(categoryId);
+          } catch (e) {
+            console.warn("[BlocklistService] finalizeCategorySync warning:", e);
+          }
         }
       }
 
@@ -738,11 +777,12 @@ export const BlocklistService = {
       // SQLite DISTINCT count for clean categories (already set above).
       for (const categoryId of categoryIds) {
         if (dirtyCategories.has(categoryId)) {
-          const nativeCount =
-            await FreedomAccessibility.getCategoryDomainCount(categoryId);
-          useBlockingStore
-            .getState()
-            .setCategoryDomainCount(categoryId, nativeCount);
+          // VPN-only categories aren't in the accessibility matcher, so read
+          // their count from the SQLite cache instead.
+          const count = VPN_ONLY_CATEGORIES.has(categoryId)
+            ? getCachedDomainCount(categoryId)
+            : await FreedomAccessibility.getCategoryDomainCount(categoryId);
+          useBlockingStore.getState().setCategoryDomainCount(categoryId, count);
         }
       }
 

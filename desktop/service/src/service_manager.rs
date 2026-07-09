@@ -122,6 +122,7 @@ fn run_service_loop() -> anyhow::Result<()> {
         }
 
         // Start App blocker
+        let dns_proxy_ready_for_firewall = dns_proxy_ready;
         let blocker_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             let broadcast_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.ok();
@@ -149,9 +150,16 @@ fn run_service_loop() -> anyhow::Result<()> {
                         || last_firewall_refresh.elapsed() >= Duration::from_secs(60)
                         )
                     {
+                        // Only seal DNS bypass paths when the proxy is up and the
+                        // system resolver is pinned to it. In Flexible mode DNS is
+                        // not redirected, so sealing :53 would break resolution.
+                        let dns_enforced = dns_proxy_ready_for_firewall
+                            && config.control_mode
+                                != libreascent_shared::config::ControlMode::Flexible;
                         if let Err(e) = crate::firewall_manager::ensure_firewall_protection(
                             &config,
                             &runtime_blocked_paths,
+                            dns_enforced,
                         ) {
                             crate::dns_manager::log_tamper_event(&format!(
                                 "Firewall enforcement disabled until service restart after failure: {e}"

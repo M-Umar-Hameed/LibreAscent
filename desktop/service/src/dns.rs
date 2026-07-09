@@ -1,18 +1,47 @@
 use anyhow::{Context, Result};
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
+use hickory_resolver::error::ResolveErrorKind;
+use hickory_resolver::TokioAsyncResolver;
 use libreascent_shared::blocklist::DomainBlocklist;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
 
 use crate::config_loader;
 
-const UPSTREAM_DNS: &[&str] = &["1.1.1.1:53", "1.0.0.1:53"];
-const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(2);
 const LOCAL_PROXY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upstream resolver. Forwards over DNS-over-TLS to Quad9 (9.9.9.9:853). The
+/// firewall (firewall_manager) seals plaintext :53 and DoH/DoT to every other
+/// resolver but leaves Quad9:853 reachable, so this choice must stay Quad9 to
+/// match that exemption. The pooled connection and response cache keep steady
+/// -state latency close to plain UDP by avoiding a TLS handshake per query.
+fn build_upstream_resolver() -> TokioAsyncResolver {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    // IPv4-only Quad9 DoT endpoints. Talking to the upstream over IPv4 avoids a
+    // hard failure on hosts without an IPv6 route; clients still receive AAAA
+    // records normally. 9.9.9.9 is what the firewall leaves reachable on :853.
+    let quad9 = NameServerConfigGroup::from_ips_tls(
+        &[
+            IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
+            IpAddr::V4(Ipv4Addr::new(149, 112, 112, 112)),
+        ],
+        853,
+        "dns.quad9.net".to_string(),
+        true,
+    );
+    let config = ResolverConfig::from_parts(None, Vec::new(), quad9);
+
+    let mut opts = ResolverOpts::default();
+    opts.cache_size = 1024;
+    TokioAsyncResolver::tokio(config, opts)
+}
 
 pub struct BlockedDnsResponse {
     pub domain: String,
@@ -30,13 +59,6 @@ pub async fn run_local_dns_proxy_with_ready(
 ) -> Result<()> {
     let bind: SocketAddr = bind_addr.parse().context("invalid DNS bind address")?;
 
-    let mut upstreams = Vec::new();
-    for addr in UPSTREAM_DNS {
-        if let Ok(sa) = addr.parse::<SocketAddr>() {
-            upstreams.push(sa);
-        }
-    }
-
     let socket = match UdpSocket::bind(bind)
         .await
         .context("failed to bind DNS proxy")
@@ -45,7 +67,7 @@ pub async fn run_local_dns_proxy_with_ready(
             if let Some(sender) = ready {
                 let _ = sender.send(Ok(()));
             }
-            socket
+            Arc::new(socket)
         }
         Err(error) => {
             if let Some(sender) = ready {
@@ -56,7 +78,8 @@ pub async fn run_local_dns_proxy_with_ready(
     };
     let broadcast_socket = UdpSocket::bind("127.0.0.1:0").await.ok();
     let mut buffer = vec![0_u8; 4096];
-    let blocklist = std::sync::Arc::new(config_loader::load_blocklist(&config_path));
+    let blocklist = Arc::new(config_loader::load_blocklist(&config_path));
+    let resolver = Arc::new(build_upstream_resolver());
     crate::dns_manager::log_tamper_event("DNS proxy started. Blocklist loaded.");
 
     loop {
@@ -70,7 +93,6 @@ pub async fn run_local_dns_proxy_with_ready(
         };
         let request = buffer[..size].to_vec();
         let request_id = get_request_id(&request);
-        let blocklist = std::sync::Arc::clone(&blocklist);
 
         match build_block_response_if_needed(&request, &blocklist) {
             Ok(Some(blocked)) => {
@@ -95,18 +117,63 @@ pub async fn run_local_dns_proxy_with_ready(
             }
         }
 
-        match forward_to_upstreams(&request, &upstreams, &mut buffer).await {
-            Ok(upstream_size) => {
-                let _ = socket.send_to(&buffer[..upstream_size], peer).await;
-            }
-            Err(error) => {
-                if let Ok(response) = build_error_response(&request, ResponseCode::ServFail) {
+        // Resolve concurrently so a single slow upstream query never blocks the
+        // next client packet. The resolver pools its DoT connection and caches
+        // answers, so this stays cheap under load.
+        let socket = Arc::clone(&socket);
+        let resolver = Arc::clone(&resolver);
+        tokio::spawn(async move {
+            match resolve_via_upstream(&resolver, &request).await {
+                Ok(response) => {
                     let _ = socket.send_to(&response, peer).await;
                 }
-                crate::dns_manager::log_tamper_event(&format!("Failed: {request_id:04x} - {error}"));
+                Err(error) => {
+                    if let Ok(response) = build_error_response(&request, ResponseCode::ServFail) {
+                        let _ = socket.send_to(&response, peer).await;
+                    }
+                    crate::dns_manager::log_tamper_event(&format!(
+                        "Upstream failed: {request_id:04x} - {error}"
+                    ));
+                }
+            }
+        });
+    }
+}
+
+async fn resolve_via_upstream(resolver: &TokioAsyncResolver, request: &[u8]) -> Result<Vec<u8>> {
+    let message = Message::from_bytes(request).context("failed to parse DNS request")?;
+    let Some(query) = message.queries().first() else {
+        return build_error_response(request, ResponseCode::FormErr);
+    };
+
+    let mut response = Message::new();
+    response.set_id(message.id());
+    response.set_message_type(MessageType::Response);
+    response.set_op_code(OpCode::Query);
+    response.set_recursion_desired(message.recursion_desired());
+    response.set_recursion_available(true);
+    response.add_query(query.clone());
+
+    match resolver.lookup(query.name().clone(), query.query_type()).await {
+        Ok(lookup) => {
+            response.set_response_code(ResponseCode::NoError);
+            for record in lookup.records() {
+                response.add_answer(record.clone());
             }
         }
+        Err(error) => match error.kind() {
+            ResolveErrorKind::NoRecordsFound { response_code, .. } => {
+                response.set_response_code(*response_code);
+            }
+            _ => {
+                response.set_response_code(ResponseCode::ServFail);
+            }
+        },
     }
+
+    response
+        .to_bytes()
+        .context("failed to encode upstream DNS response")
 }
 
 fn get_request_id(request: &[u8]) -> u16 {
@@ -115,70 +182,6 @@ fn get_request_id(request: &[u8]) -> u16 {
     } else {
         u16::from_be_bytes([request[0], request[1]])
     }
-}
-
-async fn forward_to_upstreams(
-    request: &[u8],
-    upstreams: &[SocketAddr],
-    buffer: &mut [u8],
-) -> Result<usize> {
-    use tokio::sync::mpsc;
-
-    let (tx, mut rx) = mpsc::channel(upstreams.len());
-    let mut handles = Vec::new();
-
-    for upstream in upstreams {
-        let upstream = *upstream;
-        let request = request.to_vec();
-        let tx = tx.clone();
-        
-        let handle = tokio::spawn(async move {
-            let socket = match UdpSocket::bind("0.0.0.0:0").await {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            
-            if let Err(_) = socket.send_to(&request, upstream).await {
-                return;
-            }
-
-            let mut buf = vec![0_u8; 4096];
-            loop {
-                match timeout(UPSTREAM_TIMEOUT, socket.recv_from(&mut buf)).await {
-                    Ok(Ok((size, _))) => {
-                        let _ = tx.send(buf[..size].to_vec()).await;
-                        return;
-                    }
-                    Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => {
-                        continue;
-                    }
-                    _ => return,
-                }
-            }
-        });
-        handles.push(handle);
-    }
-
-    // Wait for the first successful response
-    let result = match rx.recv().await {
-        Some(response) => {
-            let size = response.len();
-            if size <= buffer.len() {
-                buffer[..size].copy_from_slice(&response);
-                Ok(size)
-            } else {
-                Err(anyhow::anyhow!("DNS response too large"))
-            }
-        }
-        None => Err(anyhow::anyhow!("all upstreams failed or timed out")),
-    };
-
-    // Abort all tasks to clean up sockets
-    for handle in handles {
-        handle.abort();
-    }
-
-    result
 }
 
 pub async fn local_dns_proxy_responds() -> Result<bool> {
@@ -272,6 +275,27 @@ mod tests {
     use super::*;
     use hickory_proto::op::Query;
     use hickory_proto::rr::{Name, RecordType};
+
+    // Live check: resolves through the real Quad9 DoT upstream. Ignored so CI
+    // never depends on the network. Run with:
+    //   cargo test -p libreascent-service resolves_via_quad9_dot -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn resolves_via_quad9_dot() {
+        let resolver = build_upstream_resolver();
+        let request = dns_query("example.com.");
+
+        let response_bytes = resolve_via_upstream(&resolver, &request)
+            .await
+            .expect("upstream should resolve");
+        let response = Message::from_bytes(&response_bytes).expect("response should parse");
+
+        assert_eq!(response.response_code(), ResponseCode::NoError);
+        assert!(
+            !response.answers().is_empty(),
+            "expected at least one A record from Quad9 DoT"
+        );
+    }
 
     #[test]
     fn returns_nxdomain_for_blocked_domain() {

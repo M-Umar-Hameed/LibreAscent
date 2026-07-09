@@ -62,7 +62,8 @@ async fn main() -> Result<()> {
             let config = libreascent_shared::config::load_or_create(&default_config_path())?;
             let mut sys = process_manager::create_system_handle();
             process_manager::check_and_block_apps(&mut sys, &config);
-            firewall_manager::ensure_firewall_protection(&config, &[])?;
+            // CLI app-block does not start the DNS proxy, so the bypass seal stays off.
+            firewall_manager::ensure_firewall_protection(&config, &[], false)?;
         }
         Some("service-run") => {
             service_manager::run_service()?;

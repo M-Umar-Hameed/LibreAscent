@@ -10,7 +10,23 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const FIREWALL_GROUP: &str = "LibreAscent";
-const CLOUDFLARE_DNS_IPS: &str = "1.1.1.1,1.0.0.1,2606:4700:4700::1111,2606:4700:4700::1001";
+
+// Public resolver IPs users commonly point apps/browsers at to bypass the local
+// proxy. Quad9 is our own DoT upstream (see dns.rs), so it is kept reachable on
+// :853 but still sealed on plaintext :53 and DoH :443.
+const CLOUDFLARE_IPS: &str = "1.1.1.1,1.0.0.1,2606:4700:4700::1111,2606:4700:4700::1001";
+const GOOGLE_IPS: &str = "8.8.8.8,8.8.4.4,2001:4860:4860::8888,2001:4860:4860::8844";
+const QUAD9_IPS: &str = "9.9.9.9,149.112.112.112,2620:fe::fe,2620:fe::9";
+const OPENDNS_IPS: &str = "208.67.222.222,208.67.220.220,2620:119:35::35,2620:119:53::53";
+const ADGUARD_IPS: &str = "94.140.14.14,94.140.15.15,2a10:50c0::ad1:ff,2a10:50c0::ad2:ff";
+
+const DNS_BYPASS_RULE_NAMES: [&str; 5] = [
+    "LibreAscent Block Plaintext DNS UDP",
+    "LibreAscent Block Plaintext DNS TCP",
+    "LibreAscent Block DoH",
+    "LibreAscent Block DoT",
+    "LibreAscent Block DoQ",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FirewallRuleSpec {
@@ -18,10 +34,25 @@ struct FirewallRuleSpec {
     args: Vec<String>,
 }
 
-pub fn ensure_firewall_protection(config: &DesktopConfig, runtime_app_paths: &[PathBuf]) -> Result<()> {
-    let mut specs = cloudflare_dns_block_rules();
-    specs.extend(configured_app_rules(config));
+/// `dns_enforced` must be true only when the local DNS proxy is up and the
+/// system resolver is pinned to it (non-Flexible mode). When false, the DNS
+/// bypass rules are removed so normal resolution keeps working through the
+/// machine's real resolver.
+pub fn ensure_firewall_protection(
+    config: &DesktopConfig,
+    runtime_app_paths: &[PathBuf],
+    dns_enforced: bool,
+) -> Result<()> {
+    let mut specs = configured_app_rules(config);
     specs.extend(runtime_app_paths.iter().map(|path| app_rule_for_path(path)));
+
+    if dns_enforced {
+        specs.extend(dns_bypass_block_rules());
+    } else {
+        for name in DNS_BYPASS_RULE_NAMES {
+            delete_firewall_rule_by_name(name);
+        }
+    }
 
     for spec in dedupe_rules(specs) {
         replace_firewall_rule(&spec)?;
@@ -31,13 +62,16 @@ pub fn ensure_firewall_protection(config: &DesktopConfig, runtime_app_paths: &[P
 }
 
 pub fn reset_firewall_protection() -> Result<()> {
-    let mut command = Command::new("netsh");
+    // netsh `delete rule` has no group= filter, and netsh's group= does not
+    // populate the RuleGroup that `Remove-NetFirewallRule -Group` matches. The
+    // reliable key is the DisplayName (netsh name=), which every rule prefixes
+    // with "LibreAscent ", so match that and remove the whole set at once.
+    let mut command = Command::new("powershell");
     command.args([
-        "advfirewall",
-        "firewall",
-        "delete",
-        "rule",
-        &format!("group={FIREWALL_GROUP}"),
+        "-NoProfile",
+        "-Command",
+        "Get-NetFirewallRule -DisplayName 'LibreAscent*' -ErrorAction SilentlyContinue | \
+         Remove-NetFirewallRule -ErrorAction SilentlyContinue",
     ]);
 
     #[cfg(windows)]
@@ -47,20 +81,24 @@ pub fn reset_firewall_protection() -> Result<()> {
     Ok(())
 }
 
-fn replace_firewall_rule(spec: &FirewallRuleSpec) -> Result<()> {
+fn delete_firewall_rule_by_name(name: &str) {
     let mut delete = Command::new("netsh");
     delete.args([
         "advfirewall",
         "firewall",
         "delete",
         "rule",
-        &format!("name={}", spec.name),
+        &format!("name={name}"),
     ]);
 
     #[cfg(windows)]
     delete.creation_flags(CREATE_NO_WINDOW);
 
     let _ = delete.status();
+}
+
+fn replace_firewall_rule(spec: &FirewallRuleSpec) -> Result<()> {
+    delete_firewall_rule_by_name(&spec.name);
 
     let mut add = Command::new("netsh");
     add.args(&spec.args);
@@ -121,34 +159,62 @@ fn app_rule_for_path(path: &Path) -> FirewallRuleSpec {
     }
 }
 
-fn cloudflare_dns_block_rules() -> Vec<FirewallRuleSpec> {
-    [
-        ("UDP", "53,853,443"),
-        ("TCP", "53,853,443"),
+fn dns_block_rule(
+    name: &str,
+    protocol: &str,
+    remoteip: Option<String>,
+    remoteport: &str,
+) -> FirewallRuleSpec {
+    let mut args = vec![
+        "advfirewall".to_string(),
+        "firewall".to_string(),
+        "add".to_string(),
+        "rule".to_string(),
+        format!("name={name}"),
+        format!("group={FIREWALL_GROUP}"),
+        "dir=out".to_string(),
+        "action=block".to_string(),
+        "profile=any".to_string(),
+        "enable=yes".to_string(),
+        format!("protocol={protocol}"),
+        format!("remoteport={remoteport}"),
+    ];
+    if let Some(ip) = remoteip {
+        args.push(format!("remoteip={ip}"));
+    }
+    FirewallRuleSpec {
+        name: name.to_string(),
+        args,
+    }
+}
+
+// Seals every DNS bypass path around the local proxy. Loopback traffic
+// (client -> 127.0.0.1:53) is exempt from Windows Firewall, so blocking
+// plaintext :53 to all remotes does not touch the proxy itself. The proxy's
+// upstream leg is Quad9 DoT (:853), which is deliberately left reachable.
+fn dns_bypass_block_rules() -> Vec<FirewallRuleSpec> {
+    let all_resolvers =
+        format!("{CLOUDFLARE_IPS},{GOOGLE_IPS},{QUAD9_IPS},{OPENDNS_IPS},{ADGUARD_IPS}");
+    // Quad9 excluded: our proxy forwards to it over DoT/:853.
+    let bypass_resolvers = format!("{CLOUDFLARE_IPS},{GOOGLE_IPS},{OPENDNS_IPS},{ADGUARD_IPS}");
+
+    vec![
+        dns_block_rule("LibreAscent Block Plaintext DNS UDP", "UDP", None, "53"),
+        dns_block_rule("LibreAscent Block Plaintext DNS TCP", "TCP", None, "53"),
+        dns_block_rule(
+            "LibreAscent Block DoH",
+            "TCP",
+            Some(all_resolvers),
+            "443",
+        ),
+        dns_block_rule(
+            "LibreAscent Block DoT",
+            "TCP",
+            Some(bypass_resolvers.clone()),
+            "853",
+        ),
+        dns_block_rule("LibreAscent Block DoQ", "UDP", Some(bypass_resolvers), "853"),
     ]
-    .into_iter()
-    .map(|(protocol, ports)| {
-        let name = format!("LibreAscent Block Cloudflare DNS {protocol}");
-        FirewallRuleSpec {
-            name: name.clone(),
-            args: vec![
-                "advfirewall".to_string(),
-                "firewall".to_string(),
-                "add".to_string(),
-                "rule".to_string(),
-                format!("name={name}"),
-                format!("group={FIREWALL_GROUP}"),
-                "dir=out".to_string(),
-                "action=block".to_string(),
-                "profile=any".to_string(),
-                "enable=yes".to_string(),
-                format!("protocol={protocol}"),
-                format!("remoteip={CLOUDFLARE_DNS_IPS}"),
-                format!("remoteport={ports}"),
-            ],
-        }
-    })
-    .collect()
 }
 
 fn dedupe_rules(specs: Vec<FirewallRuleSpec>) -> Vec<FirewallRuleSpec> {
@@ -171,20 +237,48 @@ mod tests {
     use super::*;
     use libreascent_shared::config::{default_config, BlockedAppRule};
 
-    #[test]
-    fn cloudflare_dns_rules_block_udp_and_tcp_escape_paths() {
-        let rules = cloudflare_dns_block_rules();
+    fn remoteip_of<'a>(rules: &'a [FirewallRuleSpec], name: &str) -> Option<&'a String> {
+        rules
+            .iter()
+            .find(|rule| rule.name == name)
+            .and_then(|rule| rule.args.iter().find(|arg| arg.starts_with("remoteip=")))
+    }
 
-        assert!(rules.iter().any(|rule| {
-            rule.name == "LibreAscent Block Cloudflare DNS UDP"
-                && rule.args.contains(&"protocol=UDP".to_string())
-                && rule.args.contains(&"remoteport=53,853,443".to_string())
-                && rule.args.contains(&format!("remoteip={CLOUDFLARE_DNS_IPS}"))
-        }));
-        assert!(rules.iter().any(|rule| {
-            rule.name == "LibreAscent Block Cloudflare DNS TCP"
-                && rule.args.contains(&"protocol=TCP".to_string())
-        }));
+    #[test]
+    fn plaintext_dns_block_applies_to_all_remotes() {
+        let rules = dns_bypass_block_rules();
+
+        for name in [
+            "LibreAscent Block Plaintext DNS UDP",
+            "LibreAscent Block Plaintext DNS TCP",
+        ] {
+            let rule = rules.iter().find(|r| r.name == name).expect("rule exists");
+            // No remoteip scope: a blanket :53 seal so no resolver is reachable in the clear.
+            assert!(remoteip_of(&rules, name).is_none());
+            assert!(rule.args.contains(&"remoteport=53".to_string()));
+            assert!(rule.args.contains(&"action=block".to_string()));
+        }
+    }
+
+    #[test]
+    fn dot_block_leaves_quad9_reachable_but_doh_block_seals_it() {
+        let rules = dns_bypass_block_rules();
+
+        // Proxy upstream is Quad9 DoT; it must survive the :853 seal.
+        let dot = remoteip_of(&rules, "LibreAscent Block DoT").expect("DoT rule exists");
+        assert!(!dot.contains("9.9.9.9"), "Quad9 DoT must stay reachable: {dot}");
+        assert!(dot.contains("1.1.1.1"), "Cloudflare DoT must be blocked: {dot}");
+
+        // But Quad9 DoH (:443) is a bypass path and must be blocked.
+        let doh = remoteip_of(&rules, "LibreAscent Block DoH").expect("DoH rule exists");
+        assert!(doh.contains("9.9.9.9"), "Quad9 DoH must be blocked: {doh}");
+    }
+
+    #[test]
+    fn dns_bypass_rule_names_match_deletion_list() {
+        let rules = dns_bypass_block_rules();
+        let names: Vec<&str> = rules.iter().map(|rule| rule.name.as_str()).collect();
+        assert_eq!(names, super::DNS_BYPASS_RULE_NAMES.to_vec());
     }
 
     #[test]
@@ -216,20 +310,4 @@ mod tests {
         assert!(configured_app_rules(&config).is_empty());
     }
 
-    #[test]
-    fn cloudflare_dns_rule_names_are_stable_for_status_checks() {
-        let rules = cloudflare_dns_block_rules();
-        let names = rules
-            .iter()
-            .map(|rule| rule.name.as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            names,
-            vec![
-                "LibreAscent Block Cloudflare DNS UDP",
-                "LibreAscent Block Cloudflare DNS TCP"
-            ]
-        );
-    }
 }

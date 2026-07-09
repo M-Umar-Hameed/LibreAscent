@@ -14,7 +14,8 @@
       {
         "title": "LibreAscent Desktop",
         "width": 980,
-        "height": 720
+        "height": 720,
+        "visible": false
       },
       {
         "label": "overlay",

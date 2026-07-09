@@ -11,6 +11,7 @@ use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, WindowEvent};
+use tauri_plugin_autostart::MacosLauncher;
 use tokio::net::UdpSocket;
 use windows_service::service::{ServiceAccess, ServiceState};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -508,7 +509,30 @@ fn get_last_block_event(state: tauri::State<'_, LastBlockEvent>) -> Option<Strin
 fn main() {
     tauri::Builder::default()
         .manage(LastBlockEvent(Mutex::new(None)))
+        // Autostart runs the app with --minimized so it comes up hidden in the tray.
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
         .setup(|app| {
+            // Register the app to launch on login. Release only, so `tauri dev`
+            // runs do not register the dev executable.
+            #[cfg(not(debug_assertions))]
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                let _ = app.autolaunch().enable();
+            }
+
+            // Manual launches show the window; autostart (--minimized) stays in
+            // the tray. The main window is created hidden (visible=false in config).
+            let launched_minimized = std::env::args().any(|arg| arg == "--minimized");
+            if !launched_minimized {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &quit_i])?;

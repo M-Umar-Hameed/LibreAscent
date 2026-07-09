@@ -14,5 +14,6 @@ libreascent-shared = { path = "../../shared" }
 runas = "1"
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
 tokio = { version = "1", features = ["net", "rt-multi-thread"] }
 windows-service = "0.8"

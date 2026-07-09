@@ -108,8 +108,20 @@ export default function SettingsScreen(): ReactNode {
           await BlocklistService.syncVpnCategoryToggle("ads", true);
           await BlocklistService.syncCategoryFlagsToNative();
         }
+        // updateBlocklists swallows per-source fetch errors and resolves
+        // true, so verify domains actually landed rather than trusting the
+        // call. Empty cache means the fetch failed — the toggle must not
+        // claim protection it isn't providing.
+        if (getCachedDomainCount("ads") === 0) {
+          throw new Error("No ad domains synced");
+        }
       } catch (e) {
         console.error("[Settings] Ad-block enable failed:", e);
+        toggleCategory("ads"); // revert the optimistic flip
+        Alert.alert(
+          "Couldn't enable ad blocking",
+          "Check your connection and try again.",
+        );
       } finally {
         setAdBlockLoading(false);
       }

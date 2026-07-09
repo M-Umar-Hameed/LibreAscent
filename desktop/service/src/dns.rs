@@ -279,7 +279,7 @@ mod tests {
     // Live check: resolves through the real Quad9 DoT upstream. Ignored so CI
     // never depends on the network. Run with:
     //   cargo test -p libreascent-service resolves_via_quad9_dot -- --ignored --nocapture
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore]
     async fn resolves_via_quad9_dot() {
         let resolver = build_upstream_resolver();

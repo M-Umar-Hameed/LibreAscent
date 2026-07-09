@@ -755,7 +755,7 @@ class ContentMatcher {
 
         // Load per-category domain sets — try file-based first, then SharedPreferences
         var foundCategories = false
-        val knownCategories = listOf("adult", "hentai")
+        val knownCategories = listOf("adult", "hentai", "ads")
 
         for (catId in knownCategories) {
             val fileDomains = loadCategoryFromFile(context, catId)

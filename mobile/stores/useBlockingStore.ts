@@ -104,6 +104,42 @@ export const DEFAULT_SOURCES: BlocklistSource[] = [
     format: "domains",
     enabled: true,
   },
+  {
+    id: "hagezi-ultimate",
+    name: "HaGeZi Ultimate (Ads/Trackers)",
+    url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/ultimate.txt",
+    format: "domains",
+    enabled: true,
+    category: "ads",
+  },
+];
+
+export const ADS_CATEGORY: BlockingCategory = {
+  id: "ads",
+  name: "Ads & Trackers",
+  description:
+    "Blocks ad, tracker, and telemetry domains network-wide via DNS. Aggressive — whitelist sites that break.",
+  domains: [],
+  enabled: false,
+};
+
+export const DEFAULT_CATEGORIES: BlockingCategory[] = [
+  {
+    id: "adult",
+    name: "Adult Content",
+    description: "General adult and pornographic websites",
+    domains: [],
+    enabled: true,
+  },
+  {
+    id: "hentai",
+    name: "Hentai",
+    description:
+      "Animated adult content and manga. (Contains some manga sites; whitelist your fav manga/manhwa/manhua if needed)",
+    domains: [],
+    enabled: true,
+  },
+  ADS_CATEGORY,
 ];
 
 export const useBlockingStore = create<BlockingState>()(
@@ -114,23 +150,7 @@ export const useBlockingStore = create<BlockingState>()(
       excludedUrls: [],
       siteControlMode: "flexible",
       siteSurveillance: { type: "none", value: 0 },
-      categories: [
-        {
-          id: "adult",
-          name: "Adult Content",
-          description: "General adult and pornographic websites",
-          domains: [],
-          enabled: true,
-        },
-        {
-          id: "hentai",
-          name: "Hentai",
-          description:
-            "Animated adult content and manga. (Contains some manga sites; whitelist your fav manga/manhwa/manhua if needed)",
-          domains: [],
-          enabled: true,
-        },
-      ],
+      categories: [...DEFAULT_CATEGORIES],
       adultBlockingEnabled: true,
       adultControlMode: "flexible",
       adultSurveillance: { type: "none", value: 0 },
@@ -351,24 +371,11 @@ export const useBlockingStore = create<BlockingState>()(
 
           // Restore default categories if persisted state has none
           if (state.categories.length === 0) {
+            state.importSettings({ categories: [...DEFAULT_CATEGORIES] });
+          } else if (!state.categories.some((c) => c.id === "ads")) {
+            // Existing user predating the ads category — inject it (disabled)
             state.importSettings({
-              categories: [
-                {
-                  id: "adult",
-                  name: "Adult Content",
-                  description: "General adult and pornographic websites",
-                  domains: [],
-                  enabled: true,
-                },
-                {
-                  id: "hentai",
-                  name: "Hentai",
-                  description:
-                    "Animated adult content and manga. (Contains some manga sites; whitelist your fav manga/manhwa/manhua if needed)",
-                  domains: [],
-                  enabled: true,
-                },
-              ],
+              categories: [...state.categories, ADS_CATEGORY],
             });
           }
 

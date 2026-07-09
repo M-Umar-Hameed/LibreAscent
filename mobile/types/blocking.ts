@@ -12,6 +12,7 @@ export interface BlocklistSource {
   name: string;
   enabled: boolean;
   format: "domains" | "hosts" | "keywords";
+  category?: "adult" | "hentai" | "ads";
   lastFetchedAt?: string;
 }
 

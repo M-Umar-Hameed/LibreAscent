@@ -41,6 +41,16 @@ class FreedomVpnService : VpnService() {
     private var vpnThread: Thread? = null
     private val running = AtomicBoolean(false)
 
+    // TUN output is written from multiple DNS worker threads; serialize writes
+    // so packets are never interleaved.
+    @Volatile private var tunOutput: FileOutputStream? = null
+    private val tunWriteLock = Any()
+
+    // DNS is forwarded upstream OFF the packet-reader thread. Blocking the
+    // reader on each query's round-trip serialized all device DNS and was the
+    // cause of severe slowdowns / apps failing to load.
+    private var dnsExecutor: java.util.concurrent.ExecutorService? = null
+
     companion object {
         private const val TAG = "FreedomVPN"
         private const val CHANNEL_ID = "freedom_vpn"
@@ -51,7 +61,9 @@ class FreedomVpnService : VpnService() {
         // Cloudflare Family DNS — blocks malware AND adult content
         private const val DNS_PRIMARY = "1.1.1.1"
         private const val DNS_SECONDARY = "1.0.0.1"
-        private const val DNS_TIMEOUT_MS = 5000
+        // Kept short so a dead upstream frees its worker quickly instead of
+        // holding it (and its socket) for seconds.
+        private const val DNS_TIMEOUT_MS = 2000
 
         @Volatile
         var isRunning: Boolean = false
@@ -183,6 +195,8 @@ class FreedomVpnService : VpnService() {
 
         val inputStream = FileInputStream(vpnFd.fileDescriptor)
         val outputStream = FileOutputStream(vpnFd.fileDescriptor)
+        tunOutput = outputStream
+        dnsExecutor = java.util.concurrent.Executors.newFixedThreadPool(16)
         val packet = ByteBuffer.allocate(MAX_PACKET_SIZE)
 
         Log.i(TAG, "Packet processing started")
@@ -200,8 +214,9 @@ class FreedomVpnService : VpnService() {
 
                 packet.limit(length)
 
-                // Process the IP packet
-                processIpPacket(packet, length, outputStream)
+                // Process the IP packet (DNS forwarding is dispatched to the
+                // worker pool, so this returns without blocking on the network).
+                processIpPacket(packet, length)
 
             } catch (e: InterruptedException) {
                 Log.i(TAG, "Packet processing interrupted")
@@ -232,8 +247,7 @@ class FreedomVpnService : VpnService() {
      */
     private fun processIpPacket(
         packet: ByteBuffer,
-        length: Int,
-        outputStream: FileOutputStream
+        length: Int
     ) {
         if (length < 20) return // Minimum IP header size
 
@@ -285,9 +299,10 @@ class FreedomVpnService : VpnService() {
         val result = dnsInterceptor.processQuery(dnsPayload, dnsLength)
 
         if (result == null) {
-            // Malformed or unsupported — forward to upstream
-            forwardDnsQuery(rawData, length, dnsPayload, dnsLength,
-                srcIp, dstIp, srcPort, outputStream)
+            // Malformed or unsupported — forward to upstream off-thread
+            dnsExecutor?.execute {
+                forwardDnsQuery(dnsPayload, dnsLength, srcIp, dstIp, srcPort)
+            }
             return
         }
 
@@ -304,12 +319,31 @@ class FreedomVpnService : VpnService() {
                 dstPort, // Swap: DNS port -> source port
                 srcPort  // Swap: original source port -> destination port
             )
-            outputStream.write(responsePacket)
-            outputStream.flush()
+            writeToTun(responsePacket)
         } else {
-            // NOT BLOCKED — forward to real DNS
-            forwardDnsQuery(rawData, length, dnsPayload, dnsLength,
-                srcIp, dstIp, srcPort, outputStream)
+            // NOT BLOCKED — forward to real DNS off-thread so the reader loop
+            // keeps pumping while this query's upstream round-trip is in flight.
+            dnsExecutor?.execute {
+                forwardDnsQuery(dnsPayload, dnsLength, srcIp, dstIp, srcPort)
+            }
+        }
+    }
+
+    /**
+     * Serialize writes to the TUN interface across the reader thread and all
+     * DNS worker threads. Concurrent unsynchronized writes would interleave
+     * bytes from different packets.
+     */
+    private fun writeToTun(packet: ByteArray) {
+        synchronized(tunWriteLock) {
+            try {
+                tunOutput?.let {
+                    it.write(packet)
+                    it.flush()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "TUN write failed: ${e.message}")
+            }
         }
     }
 
@@ -318,14 +352,11 @@ class FreedomVpnService : VpnService() {
      * the response back to the TUN interface.
      */
     private fun forwardDnsQuery(
-        originalPacket: ByteArray,
-        originalLength: Int,
         dnsPayload: ByteArray,
         dnsLength: Int,
         srcIp: ByteArray,
         dstIp: ByteArray,
-        srcPort: Int,
-        outputStream: FileOutputStream
+        srcPort: Int
     ) {
         val dnsServers = listOf(DNS_PRIMARY, DNS_SECONDARY)
 
@@ -361,8 +392,7 @@ class FreedomVpnService : VpnService() {
                     DnsInterceptor.DNS_PORT, // DNS port -> source port
                     srcPort  // Original source port -> destination port
                 )
-                outputStream.write(responseIpPacket)
-                outputStream.flush()
+                writeToTun(responseIpPacket)
                 return // Success — no need to try secondary
 
             } catch (e: Exception) {
@@ -514,6 +544,11 @@ class FreedomVpnService : VpnService() {
         vpnThread?.interrupt()
         vpnThread = null
 
+        // Stop DNS workers before closing the TUN they write to
+        dnsExecutor?.shutdownNow()
+        dnsExecutor = null
+        tunOutput = null
+
         // Close the TUN interface
         vpnInterface?.close()
         vpnInterface = null
@@ -529,6 +564,10 @@ class FreedomVpnService : VpnService() {
 
         vpnThread?.interrupt()
         vpnThread = null
+
+        dnsExecutor?.shutdownNow()
+        dnsExecutor = null
+        tunOutput = null
 
         vpnInterface?.close()
         vpnInterface = null

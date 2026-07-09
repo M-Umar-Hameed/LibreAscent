@@ -45,10 +45,12 @@ export const BlocklistService = {
     }
 
     for (const category of state.categories) {
+      const masterOn =
+        category.id === "ads" ? true : state.adultBlockingEnabled;
       try {
         await FreedomAccessibility.setCategoryEnabled(
           category.id,
-          state.adultBlockingEnabled && category.enabled,
+          masterOn && category.enabled,
         );
       } catch (e) {
         console.warn(
@@ -115,8 +117,9 @@ export const BlocklistService = {
     for (const category of state.categories) {
       const nativeCount = state.categoryDomainCounts[category.id] ?? 0;
       const hasDomains = category.domains.length > 0 || nativeCount > 0;
-      const isActive =
-        state.adultBlockingEnabled && category.enabled && hasDomains;
+      const masterOn =
+        category.id === "ads" ? true : state.adultBlockingEnabled;
+      const isActive = masterOn && category.enabled && hasDomains;
 
       if (!isActive) {
         try {
@@ -198,8 +201,9 @@ export const BlocklistService = {
     const category = state.categories.find((c) => c.id === categoryId);
     if (!category) return;
 
+    const masterOn = categoryId === "ads" ? true : state.adultBlockingEnabled;
     try {
-      if (enabled && state.adultBlockingEnabled) {
+      if (enabled && masterOn) {
         await FreedomVpn.removeCategory(categoryId);
         if (category.domains.length > 0) {
           await FreedomVpn.addCategory(categoryId, category.domains);
@@ -451,7 +455,12 @@ export const BlocklistService = {
   /**
    * Determine which category a source belongs to.
    */
-  getCategoryForSource: (source: { id: string; name: string }): string => {
+  getCategoryForSource: (source: {
+    id: string;
+    name: string;
+    category?: string;
+  }): string => {
+    if (source.category) return source.category;
     const isHentai =
       source.id === "hentai-refined" ||
       source.id === "hentai-blocklist" ||
@@ -564,10 +573,11 @@ export const BlocklistService = {
     nativeCounts?: Record<string, number>;
   }): Promise<void> => {
     const state = useBlockingStore.getState();
-    if (!state.adultBlockingEnabled) return;
 
     for (const category of state.categories) {
-      if (!category.enabled) continue;
+      const masterOn =
+        category.id === "ads" ? true : state.adultBlockingEnabled;
+      if (!masterOn || !category.enabled) continue;
       const cached = getCachedDomainCount(category.id);
       if (cached === 0) continue;
       const existingNativeCount =
@@ -581,7 +591,9 @@ export const BlocklistService = {
 
       try {
         await FreedomVpn.removeCategory(category.id);
-      } catch { /* might not exist */ }
+      } catch {
+        /* might not exist */
+      }
 
       await BlocklistService.syncCategoryFromCache(category.id, {
         syncVpn: true,
@@ -605,8 +617,12 @@ export const BlocklistService = {
         console.warn(`[BlocklistService] finalize ${category.id}:`, e);
       }
 
-      const nativeCount = await FreedomAccessibility.getCategoryDomainCount(category.id);
-      useBlockingStore.getState().setCategoryDomainCount(category.id, nativeCount);
+      const nativeCount = await FreedomAccessibility.getCategoryDomainCount(
+        category.id,
+      );
+      useBlockingStore
+        .getState()
+        .setCategoryDomainCount(category.id, nativeCount);
     }
   },
 
@@ -684,7 +700,11 @@ export const BlocklistService = {
       onProgress?.(total, total, "Syncing to native...");
       await new Promise((r) => setTimeout(r, 0));
 
-      for (const categoryId of ["adult", "hentai"]) {
+      const categoryIds = useBlockingStore
+        .getState()
+        .categories.map((c) => c.id);
+
+      for (const categoryId of categoryIds) {
         if (!dirtyCategories.has(categoryId)) {
           // Nothing changed — native already has correct data from its own
           // persistence files. Just update the UI count from SQLite DISTINCT.
@@ -716,7 +736,7 @@ export const BlocklistService = {
 
       // Update counts: use native count for dirty categories (just re-synced),
       // SQLite DISTINCT count for clean categories (already set above).
-      for (const categoryId of ["adult", "hentai"]) {
+      for (const categoryId of categoryIds) {
         if (dirtyCategories.has(categoryId)) {
           const nativeCount =
             await FreedomAccessibility.getCategoryDomainCount(categoryId);

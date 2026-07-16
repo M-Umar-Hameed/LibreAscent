@@ -60,6 +60,11 @@ interface FreedomAccessibilityModuleInterface {
   getInstalledApps(): Promise<
     { name: string; packageName: string; icon?: string }[]
   >;
+  hasWriteSecureSettings(): Promise<boolean>;
+  getBankingState(): Promise<{ active: boolean; remainingMs: number }>;
+  startBankingMode(): Promise<void>;
+  endBankingMode(): Promise<void>;
+  enforceBankingExpiry(): Promise<void>;
   updateOverlayTheme(themeJson: string): Promise<void>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;
@@ -246,6 +251,34 @@ export async function getInstalledApps(): Promise<
 > {
   if (!FreedomAccessibilityNative) return [];
   return FreedomAccessibilityNative.getInstalledApps();
+}
+
+export async function hasWriteSecureSettings(): Promise<boolean> {
+  if (!FreedomAccessibilityNative) return false;
+  return FreedomAccessibilityNative.hasWriteSecureSettings();
+}
+
+export async function getBankingState(): Promise<{
+  active: boolean;
+  remainingMs: number;
+}> {
+  if (!FreedomAccessibilityNative) return { active: false, remainingMs: 0 };
+  return FreedomAccessibilityNative.getBankingState();
+}
+
+export async function startBankingMode(): Promise<void> {
+  if (!FreedomAccessibilityNative) return;
+  return FreedomAccessibilityNative.startBankingMode();
+}
+
+export async function endBankingMode(): Promise<void> {
+  if (!FreedomAccessibilityNative) return;
+  return FreedomAccessibilityNative.endBankingMode();
+}
+
+export async function enforceBankingExpiry(): Promise<void> {
+  if (!FreedomAccessibilityNative) return;
+  return FreedomAccessibilityNative.enforceBankingExpiry();
 }
 
 export async function updateOverlayTheme(themeJson: string): Promise<void> {

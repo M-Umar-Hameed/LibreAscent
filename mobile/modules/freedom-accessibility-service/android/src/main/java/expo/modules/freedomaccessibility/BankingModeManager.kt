@@ -70,8 +70,12 @@ object BankingModeManager {
     }
 
     fun restore(context: Context) {
-        val resolver = context.contentResolver
         val saved = prefs(context).getString(KEY_SAVED, null)
+        val until = prefs(context).getLong(KEY_UNTIL, 0L)
+        // Nothing to restore — avoid rewriting the a11y service list (which would
+        // drop the user's other accessibility services) on a spurious/duplicate call.
+        if (until == 0L && saved == null) return
+        val resolver = context.contentResolver
         val component = serviceComponent(context)
         val target = when {
             saved.isNullOrBlank() -> component

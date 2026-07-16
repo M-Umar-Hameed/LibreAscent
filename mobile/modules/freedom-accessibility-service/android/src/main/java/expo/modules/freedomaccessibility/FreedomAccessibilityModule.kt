@@ -451,6 +451,7 @@ class FreedomAccessibilityModule : Module() {
                 promise.resolve(mapOf("active" to false, "remainingMs" to 0.0))
                 return@AsyncFunction
             }
+            BankingModeManager.enforceExpiry(context)
             promise.resolve(
                 mapOf(
                     "active" to BankingModeManager.isActive(context),

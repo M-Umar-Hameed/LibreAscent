@@ -20,7 +20,7 @@
         <receiver
             android:name="expo.modules.freedomaccessibility.BankingRestoreReceiver"
             android:enabled="true"
-            android:exported="true">
+            android:exported="false">
             <intent-filter>
                 <action android:name="expo.modules.freedomaccessibility.BANKING_RESTORE" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

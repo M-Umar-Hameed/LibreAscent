@@ -1,6 +1,7 @@
 import { AppLockScreen } from "@/components/AppLockScreen";
 import { APP_THEMES } from "@/constants/overlay-themes";
 import { AppThemeProvider } from "@/providers/ThemeProvider";
+import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import { LaunchRecoveryService } from "@/services/LaunchRecoveryService";
 import { ProtectionService } from "@/services/ProtectionService";
 import { useAppStore } from "@/stores/useAppStore";
@@ -224,6 +225,12 @@ export default function RootLayout(): ReactNode {
         setLaunchRecoveryComplete(true);
       });
   }, [isMounted, storesHydrated, isOnboarded, launchRecoveryComplete]);
+
+  useEffect(() => {
+    void FreedomAccessibility.enforceBankingExpiry().catch(() => {
+      /* ignore */
+    });
+  }, []);
 
   const appThemeId = useAppStore((s) => s.appThemeId);
   const customTheme = useAppStore((s) => s.customTheme);

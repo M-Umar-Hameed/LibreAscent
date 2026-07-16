@@ -8,6 +8,7 @@ import {
   useBlockingStore,
   type BlockingState,
 } from "@/stores/useBlockingStore";
+import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import { Ionicons } from "@expo/vector-icons";
 import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
@@ -18,7 +19,7 @@ import * as LocalAuthentication from "expo-local-authentication";
 import { useRouter } from "expo-router";
 import * as Sharing from "expo-sharing";
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -68,6 +69,61 @@ export default function SettingsScreen(): ReactNode {
   const [pendingAction, setPendingAction] = useState<
     "boot" | "applock" | "adblock" | null
   >(null);
+
+  const [bankingActive, setBankingActive] = useState(false);
+  const [bankingRemainingMs, setBankingRemainingMs] = useState(0);
+  const [bankingHasPermission, setBankingHasPermission] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    const poll = async (): Promise<void> => {
+      try {
+        const [state, perm] = await Promise.all([
+          FreedomAccessibility.getBankingState(),
+          FreedomAccessibility.hasWriteSecureSettings(),
+        ]);
+        if (!mounted) return;
+        setBankingActive(state.active);
+        setBankingRemainingMs(state.remainingMs);
+        setBankingHasPermission(perm);
+      } catch {
+        /* ignore */
+      }
+    };
+    void poll();
+    const interval = setInterval(() => void poll(), 1000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const handleBankingToggle = async (enable: boolean): Promise<void> => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    try {
+      if (enable) {
+        await FreedomAccessibility.startBankingMode();
+      } else {
+        await FreedomAccessibility.endBankingMode();
+      }
+      const state = await FreedomAccessibility.getBankingState();
+      setBankingActive(state.active);
+      setBankingRemainingMs(state.remainingMs);
+    } catch (e) {
+      console.error("[Settings] Banking mode toggle failed:", e);
+      Alert.alert(
+        "Banking mode unavailable",
+        "Grant the one-time permission with adb, then try again.",
+      );
+    }
+  };
+
+  const bankingCountdown = (): string => {
+    const total = Math.max(0, Math.ceil(bankingRemainingMs / 1000));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  };
 
   const handleBootToggle = (isEnabling: boolean): void => {
     if (controlMode === "flexible" || isEnabling) {
@@ -376,6 +432,49 @@ export default function SettingsScreen(): ReactNode {
                 thumbColor={adBlockEnabled ? "#fff" : "#999"}
                 aria-label="Toggle ad and tracker blocking"
               />
+            )}
+          </View>
+          <View className="p-4 border-t border-gray-800">
+            <View className="flex-row items-center justify-between">
+              <View className="flex-1 pr-3">
+                <Text style={{ color: t.textColor }}>Banking Mode</Text>
+                <Text className="text-sm" style={{ color: t.mutedTextColor }}>
+                  {!bankingHasPermission
+                    ? "One-time setup required (see below)"
+                    : bankingActive
+                      ? `Accessibility paused - ${bankingCountdown()} left`
+                      : "Pause accessibility 5 min to use banking apps"}
+                </Text>
+              </View>
+              <Switch
+                value={bankingActive}
+                disabled={!bankingHasPermission}
+                onValueChange={(v) => void handleBankingToggle(v)}
+                trackColor={{ false: "#ccc", true: t.accentColor }}
+                thumbColor={bankingActive ? "#fff" : "#999"}
+                aria-label="Toggle banking mode"
+              />
+            </View>
+            {!bankingHasPermission && (
+              <View
+                className="mt-3 p-3 rounded-lg"
+                style={{ backgroundColor: t.bgColor }}
+              >
+                <Text
+                  className="text-xs mb-2"
+                  style={{ color: t.mutedTextColor }}
+                >
+                  Run once from a PC with USB debugging on:
+                </Text>
+                <Text
+                  selectable
+                  className="text-xs"
+                  style={{ color: t.accentColor, fontFamily: "monospace" }}
+                >
+                  adb shell pm grant com.libreascent.app
+                  android.permission.WRITE_SECURE_SETTINGS
+                </Text>
+              </View>
             )}
           </View>
         </View>

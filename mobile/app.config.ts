@@ -30,6 +30,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       "BIND_ACCESSIBILITY_SERVICE",
       "BIND_DEVICE_ADMIN",
       "BIND_VPN_SERVICE",
+      "WRITE_SECURE_SETTINGS",
     ],
   },
   web: {

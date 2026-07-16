@@ -60,7 +60,7 @@ object BankingModeManager {
         prefs(context).edit()
             .putString(KEY_SAVED, current)
             .putLong(KEY_UNTIL, until)
-            .apply()
+            .commit()
 
         Settings.Secure.putString(
             resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, filtered

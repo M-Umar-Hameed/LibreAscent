@@ -20,7 +20,7 @@ object BankingModeManager {
     private const val KEY_SAVED = "banking_saved_services"
     private const val ALARM_REQUEST_CODE = 24603
 
-    const val BANKING_DURATION_MS = 300_000L
+    const val BANKING_DURATION_MS = 120_000L
     const val ACTION_RESTORE = "expo.modules.freedomaccessibility.BANKING_RESTORE"
 
     private fun prefs(context: Context) =

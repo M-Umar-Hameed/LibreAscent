@@ -443,7 +443,7 @@ export default function SettingsScreen(): ReactNode {
                     ? "One-time setup required (see below)"
                     : bankingActive
                       ? `Accessibility paused - ${bankingCountdown()} left`
-                      : "Pause accessibility 5 min to use banking apps"}
+                      : "Pause accessibility 2 min to use banking apps"}
                 </Text>
               </View>
               <Switch

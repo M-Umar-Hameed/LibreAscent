@@ -3,6 +3,7 @@ package expo.modules.freedomaccessibility
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -45,6 +46,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     private var isInstantOverlayShowing = false
     private var reelsOverlayPackage: String? = null
     private val handler = Handler(Looper.getMainLooper())
+    private var packageAddedReceiver: PackageAddedReceiver? = null
     private var lastUrlCheckTime: Long = 0
     private var consecutiveBlockCount = 0
     private var lastCheckUrl: String = ""
@@ -145,6 +147,19 @@ class FreedomAccessibilityService : AccessibilityService() {
         serviceInfo = info
 
         Log.i(TAG, "Freedom Accessibility Service connected, data loaded: ${browserMonitor.getLoadedBrowserCount()} browsers")
+
+        // Insta-stop on resume: reconnect may follow a banking window ending
+        // while a blocked app is foreground. rootInActiveWindow can be null at
+        // the instant of connect, so probe shortly after.
+        handler.postDelayed({ enforceForegroundIfBlocked() }, 300)
+
+        // PACKAGE_ADDED is not on the implicit-broadcast exception list, so a
+        // manifest receiver never fires on API 26+; register at runtime for the
+        // service's lifetime instead.
+        if (packageAddedReceiver == null) {
+            val filter = IntentFilter(Intent.ACTION_PACKAGE_ADDED).apply { addDataScheme("package") }
+            packageAddedReceiver = PackageAddedReceiver().also { registerReceiver(it, filter) }
+        }
     }
 
     /**
@@ -981,6 +996,23 @@ class FreedomAccessibilityService : AccessibilityService() {
             putExtra(EXTRA_IS_IN_REELS, result.isInReels)
         }
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+    }
+
+    /**
+     * On (re)connect — e.g. when the banking window ends and the service is
+     * re-enabled — redirect home immediately if a blocked app is foregrounded,
+     * instead of waiting for the next window-state change.
+     */
+    private fun enforceForegroundIfBlocked() {
+        val root = rootInActiveWindow ?: return
+        val pkg = root.packageName?.toString()
+        root.recycle()
+        if (pkg.isNullOrEmpty() || pkg == applicationContext.packageName) return
+        val config = contentMatcher.getAppConfig(pkg) ?: return
+        if (config.surveillanceType == "none") {
+            Log.w(TAG, "Insta-stop on resume: $pkg blocked, GLOBAL_ACTION_HOME")
+            performGlobalAction(GLOBAL_ACTION_HOME)
+        }
     }
 
     override fun onInterrupt() {

@@ -38,11 +38,5 @@
         <data android:scheme="exp+libreascent"/>
       </intent-filter>
     </activity>
-    <receiver android:name="expo.modules.freedomaccessibility.PackageAddedReceiver" android:exported="false">
-      <intent-filter>
-        <action android:name="android.intent.action.PACKAGE_ADDED"/>
-        <data android:scheme="package"/>
-      </intent-filter>
-    </receiver>
   </application>
 </manifest>

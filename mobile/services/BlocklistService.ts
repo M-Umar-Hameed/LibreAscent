@@ -1,3 +1,4 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   contentFingerprint,
   getCachedDomainCount,
@@ -7,8 +8,11 @@ import {
   saveSourceDomains,
   setLastBlocklistUpdate,
 } from "@/db/database";
+import * as DeviceAdmin from "@/modules/freedom-device-admin/src";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import * as FreedomVpn from "@/modules/freedom-vpn-service/src";
+
+const SUSPENDED_PKGS_KEY = "libreascent.suspendedPkgs";
 import {
   getActiveExcludedUrls,
   getActiveIncludedUrls,
@@ -274,6 +278,31 @@ export const BlocklistService = {
           return config;
         });
       await FreedomAccessibility.updateBlockedApps(configs);
+
+      // Tier A: Device Owner users get true per-app suspension. Suspend is
+      // independent of the accessibility toggle, so blocked apps stay blocked
+      // during the banking window. Persist the last-suspended set so removed /
+      // disabled apps get unsuspended on the next sync.
+      try {
+        if (await DeviceAdmin.isDeviceOwner()) {
+          const current = configs.map((c) => c.packageName);
+          const prevRaw = await AsyncStorage.getItem(SUSPENDED_PKGS_KEY);
+          const prev: string[] = prevRaw ? JSON.parse(prevRaw) : [];
+          const toUnsuspend = prev.filter((p) => !current.includes(p));
+          if (toUnsuspend.length > 0) {
+            await DeviceAdmin.setPackagesSuspended(toUnsuspend, false);
+          }
+          if (current.length > 0) {
+            await DeviceAdmin.setPackagesSuspended(current, true);
+          }
+          await AsyncStorage.setItem(
+            SUSPENDED_PKGS_KEY,
+            JSON.stringify(current),
+          );
+        }
+      } catch (e) {
+        console.warn("[BlocklistService] Device Owner suspend sync failed:", e);
+      }
     } catch (e) {
       console.warn(
         "[BlocklistService] Failed to sync apps to Accessibility:",

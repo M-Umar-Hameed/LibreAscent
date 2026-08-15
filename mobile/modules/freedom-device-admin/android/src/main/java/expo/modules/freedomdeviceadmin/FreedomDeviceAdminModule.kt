@@ -53,6 +53,42 @@ class FreedomDeviceAdminModule : Module() {
                 promise.reject("ERR_DEVICE_ADMIN", e.message, e)
             }
         }
+
+        AsyncFunction("isDeviceOwner") { promise: Promise ->
+            try {
+                val context = appContext.reactContext
+                    ?: run {
+                        promise.resolve(false)
+                        return@AsyncFunction
+                    }
+                val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                promise.resolve(dpm.isDeviceOwnerApp(context.packageName))
+            } catch (e: Exception) {
+                promise.resolve(false)
+            }
+        }
+
+        AsyncFunction("setPackagesSuspended") { packages: List<String>, suspended: Boolean, promise: Promise ->
+            try {
+                val context = appContext.reactContext
+                    ?: run {
+                        promise.reject("ERR_NO_CONTEXT", "No context", null)
+                        return@AsyncFunction
+                    }
+                val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                if (!dpm.isDeviceOwnerApp(context.packageName)) {
+                    promise.reject("ERR_NOT_DEVICE_OWNER", "Not device owner", null)
+                    return@AsyncFunction
+                }
+                val componentName = ComponentName(context, FreedomDeviceAdminReceiver::class.java)
+                val failed = dpm.setPackagesSuspended(
+                    componentName, packages.toTypedArray(), suspended
+                )
+                promise.resolve(failed.toList())
+            } catch (e: Exception) {
+                promise.reject("ERR_SUSPEND", e.message, e)
+            }
+        }
     }
 
     companion object {

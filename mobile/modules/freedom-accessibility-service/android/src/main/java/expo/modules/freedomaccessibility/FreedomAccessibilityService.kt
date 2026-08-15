@@ -145,6 +145,11 @@ class FreedomAccessibilityService : AccessibilityService() {
         serviceInfo = info
 
         Log.i(TAG, "Freedom Accessibility Service connected, data loaded: ${browserMonitor.getLoadedBrowserCount()} browsers")
+
+        // Insta-stop on resume: reconnect may follow a banking window ending
+        // while a blocked app is foreground. rootInActiveWindow can be null at
+        // the instant of connect, so probe shortly after.
+        handler.postDelayed({ enforceForegroundIfBlocked() }, 300)
     }
 
     /**
@@ -981,6 +986,23 @@ class FreedomAccessibilityService : AccessibilityService() {
             putExtra(EXTRA_IS_IN_REELS, result.isInReels)
         }
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
+    }
+
+    /**
+     * On (re)connect — e.g. when the banking window ends and the service is
+     * re-enabled — redirect home immediately if a blocked app is foregrounded,
+     * instead of waiting for the next window-state change.
+     */
+    private fun enforceForegroundIfBlocked() {
+        val root = rootInActiveWindow ?: return
+        val pkg = root.packageName?.toString()
+        root.recycle()
+        if (pkg.isNullOrEmpty() || pkg == applicationContext.packageName) return
+        val config = contentMatcher.getAppConfig(pkg) ?: return
+        if (config.surveillanceType == "none") {
+            Log.w(TAG, "Insta-stop on resume: $pkg blocked, GLOBAL_ACTION_HOME")
+            performGlobalAction(GLOBAL_ACTION_HOME)
+        }
     }
 
     override fun onInterrupt() {

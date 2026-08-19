@@ -19,7 +19,7 @@ import android.view.accessibility.AccessibilityNodeInfo
  */
 class SettingsProtector {
 
-    private var isHardcoreModeEnabled = false
+    @Volatile private var isHardcoreModeEnabled = false
     private var myPackageName: String = ""
 
     // Track when we're on a device admin page so we can re-check on
@@ -112,10 +112,10 @@ class SettingsProtector {
         return false
     }
 
-    fun checkSettingsScreen(service: AccessibilityService, event: AccessibilityEvent, rootNode: AccessibilityNodeInfo?) {
+    fun checkSettingsScreen(service: AccessibilityService, packageName: String, rootNode: AccessibilityNodeInfo?) {
         if (!isHardcoreModeEnabled || rootNode == null) return
 
-        val pkg = event.packageName?.toString()?.lowercase() ?: ""
+        val pkg = packageName.lowercase()
 
         // --- Handle package installer apps (uninstall confirmation dialogs) ---
         if (pkg.contains("packageinstaller") || pkg.contains("installer")) {

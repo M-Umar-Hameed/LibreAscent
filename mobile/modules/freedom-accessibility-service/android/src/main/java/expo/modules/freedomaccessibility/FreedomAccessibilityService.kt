@@ -57,33 +57,41 @@ class FreedomAccessibilityService : AccessibilityService() {
     // True while the expensive event/flag set is subscribed. Guards setServiceInfo
     // so it runs on scope transitions only, never per event.
     private var deepInspectionEnabled = false
+    private var scopeDowngradePending = false
+    // App that was seen hosting an in-app/detached WebView. Such packages cannot
+    // be known in advance, so the WebView's own events are the only signal.
+    private var webviewHostPackage: String? = null
 
     companion object {
         private const val TAG = "FreedomA11y"
         private const val OVERLAY_DURATION_MS = 5000L
         private val OVERLAY_DISMISS_TOKEN = Any()
         private val SCOPE_TOKEN = Any()
+        private val REPROBE_TOKEN = Any()
 
-        // Window/state events are cheap and are how we learn which app is
-        // foreground, so they stay subscribed for every package. The content,
-        // text and window-retrieval subscriptions tax every other process on
-        // the device and are enabled only while a monitored app is foreground.
+        // Content-changed stays subscribed for every package: an in-app WebView
+        // lives in a package we cannot enumerate, and its events are the only
+        // way to discover it. The device-wide tax this task targets is the two
+        // node/window flags, so those plus text and focus events are the part
+        // that is scoped to the foreground app.
         private val IDLE_EVENT_TYPES = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                AccessibilityEvent.TYPE_WINDOWS_CHANGED
+                AccessibilityEvent.TYPE_WINDOWS_CHANGED or
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
         private val DEEP_EVENT_TYPES = IDLE_EVENT_TYPES or
-                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
                 AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or
                 AccessibilityEvent.TYPE_VIEW_FOCUSED
         private val IDLE_FLAGS = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
         private val DEEP_FLAGS = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                 AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
                 AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-        private const val IDLE_NOTIFICATION_TIMEOUT_MS = 50L
-        private const val DEEP_NOTIFICATION_TIMEOUT_MS = 100L
-        // Transient windows (IME, dialogs, toasts) report their own package for a
-        // moment while a monitored app stays foreground. Delay the downgrade so
-        // they cannot drop the deep subscription mid-session.
+        private const val NOTIFICATION_TIMEOUT_MS = 100L
+        // Transient windows (IME, shade, recents, edge panels) report their own
+        // package while a monitored app stays foreground. Re-resolve the real
+        // foreground window this long after such an event instead of trusting it.
         private const val SCOPE_DOWNGRADE_DELAY_MS = 1000L
+        // Flags take effect asynchronously, so the event that triggered an
+        // upgrade is handled without them. Re-run the tamper check once they land.
+        private const val SCOPE_REPROBE_DELAY_MS = 400L
 
         // Built-in keywords for NSFW app scanning (Reddit, Twitter labels)
         private val NSFW_BUILTIN_KEYWORDS = listOf(
@@ -213,18 +221,39 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Switch the subscription scope. Upgrades apply immediately; downgrades are
-     * delayed so a transient window cannot cut monitoring short.
+     * Switch the subscription scope. Upgrades apply immediately. A request to
+     * downgrade is never trusted on its own: it schedules a re-resolution of the
+     * real foreground window, because transient windows report their own package
+     * while a monitored app is still in front.
      */
     private fun updateEventScope(deep: Boolean) {
-        handler.removeCallbacksAndMessages(SCOPE_TOKEN)
         if (deep) {
+            if (deepInspectionEnabled && !scopeDowngradePending) return
+            handler.removeCallbacksAndMessages(SCOPE_TOKEN)
+            scopeDowngradePending = false
             applyServiceScope(true)
             return
         }
-        if (!deepInspectionEnabled) return
-        handler.postAtTime({ applyServiceScope(false) }, SCOPE_TOKEN,
-            android.os.SystemClock.uptimeMillis() + SCOPE_DOWNGRADE_DELAY_MS)
+        if (!deepInspectionEnabled || scopeDowngradePending) return
+        scopeDowngradePending = true
+        handler.postAtTime({
+            scopeDowngradePending = false
+            applyServiceScope(resolveForegroundScope())
+        }, SCOPE_TOKEN, android.os.SystemClock.uptimeMillis() + SCOPE_DOWNGRADE_DELAY_MS)
+    }
+
+    /**
+     * Resolve the scope the currently focused window actually requires. Anything
+     * unresolvable — no root, or our own overlay in front — keeps the current
+     * scope rather than dropping coverage on a guess.
+     */
+    private fun resolveForegroundScope(): Boolean {
+        val root = rootInActiveWindow ?: return deepInspectionEnabled
+        val pkg = root.packageName?.toString()
+        root.recycle()
+        if (pkg.isNullOrEmpty() || pkg == applicationContext.packageName) return deepInspectionEnabled
+        if (pkg == webviewHostPackage) return true
+        return needsDeepInspection(pkg)
     }
 
     private fun applyServiceScope(deep: Boolean, force: Boolean = false) {
@@ -232,11 +261,31 @@ class FreedomAccessibilityService : AccessibilityService() {
         val info = serviceInfo ?: AccessibilityServiceInfo()
         info.eventTypes = if (deep) DEEP_EVENT_TYPES else IDLE_EVENT_TYPES
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-        info.notificationTimeout =
-            if (deep) DEEP_NOTIFICATION_TIMEOUT_MS else IDLE_NOTIFICATION_TIMEOUT_MS
+        info.notificationTimeout = NOTIFICATION_TIMEOUT_MS
         info.flags = if (deep) DEEP_FLAGS else IDLE_FLAGS
         serviceInfo = info
         deepInspectionEnabled = deep
+        if (deep) {
+            handler.removeCallbacksAndMessages(REPROBE_TOKEN)
+            handler.postAtTime({ reprobeSettingsProtection() }, REPROBE_TOKEN,
+                android.os.SystemClock.uptimeMillis() + SCOPE_REPROBE_DELAY_MS)
+        }
+    }
+
+    /**
+     * A confirmation dialog can be fully rendered before the deep flags land and
+     * emit nothing afterwards to retry on, so re-run the tamper check once they
+     * have. Only the settings/installer path needs this; the other consumers get
+     * a steady stream of content-changed events to retry on.
+     */
+    private fun reprobeSettingsProtection() {
+        if (!settingsProtector.isHardcoreEnabled()) return
+        val root = rootInActiveWindow ?: return
+        val pkg = root.packageName?.toString()
+        if (!pkg.isNullOrEmpty() && isSettingsPackage(pkg)) {
+            settingsProtector.checkSettingsScreen(this, pkg, root)
+        }
+        root.recycle()
     }
 
     /**
@@ -244,11 +293,7 @@ class FreedomAccessibilityService : AccessibilityService() {
      * service (re)connects while a monitored app is already foreground.
      */
     private fun syncScopeToForegroundWindow() {
-        val root = rootInActiveWindow ?: return
-        val pkg = root.packageName?.toString()
-        root.recycle()
-        if (pkg.isNullOrEmpty() || pkg == applicationContext.packageName) return
-        updateEventScope(needsDeepInspection(pkg))
+        applyServiceScope(resolveForegroundScope())
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -286,6 +331,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 }
                 reelsDetector.resetState(packageName)
                 currentPackage = packageName
+                webviewHostPackage = null
                 lastCheckUrl = ""
                 lastUrlCheckTime = 0
                 consecutiveBlockCount = 0
@@ -301,6 +347,14 @@ class FreedomAccessibilityService : AccessibilityService() {
         val isNsfwMonitored = contentMatcher.isNsfwMonitoredApp(packageName)
         val shouldHandleAsBrowser =
             browserMonitor.isBrowser(packageName) || isDetachedWebview
+
+        if (isDetachedWebview) {
+            // An in-app WebView in an otherwise unmonitored app is only ever
+            // announced by its own events, so upgrade on sight and hold the scope
+            // for as long as the hosting app stays foreground.
+            webviewHostPackage = if (currentPackage.isNotEmpty()) currentPackage else packageName
+            updateEventScope(true)
+        }
 
         if (!shouldHandleAsBrowser && !isBlockedApp && !isSettingsApp && !reelsDetector.isReelsApp(packageName) && !isNsfwMonitored) {
             if (classNameStr.contains("browser") || classNameStr.contains("web")) {
@@ -349,7 +403,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                     handleNsfwScan(rootNode, packageName)
                 }
                 isSettingsApp -> {
-                    settingsProtector.checkSettingsScreen(this, event, rootNode)
+                    settingsProtector.checkSettingsScreen(this, packageName, rootNode)
                 }
             }
 

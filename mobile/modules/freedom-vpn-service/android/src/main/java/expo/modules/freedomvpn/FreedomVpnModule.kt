@@ -6,6 +6,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -15,6 +17,25 @@ class FreedomVpnModule : Module() {
 
     private var domainBlockedReceiver: BroadcastReceiver? = null
     private var vpnStatusReceiver: BroadcastReceiver? = null
+
+    // Blocked-domain events are buffered and flushed on a fixed interval so an
+    // ad-heavy page wakes the JS thread once instead of once per blocked
+    // request. Touched only from the main thread (LocalBroadcastManager
+    // delivery and the flush handler both run there).
+    private val flushHandler = Handler(Looper.getMainLooper())
+    private val pendingBlocked = mutableListOf<Map<String, Any?>>()
+    private var flushScheduled = false
+
+    private val flushRunnable = Runnable {
+        flushScheduled = false
+        val batch = pendingBlocked.toList()
+        pendingBlocked.clear()
+        for (payload in batch) {
+            try {
+                sendEvent("onDomainBlocked", payload)
+            } catch (_: Exception) {}
+        }
+    }
 
     override fun definition() = ModuleDefinition {
         Name("FreedomVpnModule")
@@ -155,13 +176,13 @@ class FreedomVpnModule : Module() {
         domainBlockedReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val domain = intent?.getStringExtra(FreedomVpnService.EXTRA_DOMAIN) ?: return
-                try {
-                    sendEvent("onDomainBlocked", mapOf(
-                        "domain" to domain,
-                        "timestamp" to System.currentTimeMillis()
-                    ))
-                } catch (_: Exception) {
-                    // Event might fail if no JS listeners
+                pendingBlocked.add(mapOf(
+                    "domain" to domain,
+                    "timestamp" to System.currentTimeMillis()
+                ))
+                if (!flushScheduled) {
+                    flushScheduled = true
+                    flushHandler.postDelayed(flushRunnable, FLUSH_INTERVAL_MS)
                 }
             }
         }
@@ -199,11 +220,16 @@ class FreedomVpnModule : Module() {
         domainBlockedReceiver?.let { lbm.unregisterReceiver(it) }
         vpnStatusReceiver?.let { lbm.unregisterReceiver(it) }
 
+        flushHandler.removeCallbacks(flushRunnable)
+        flushScheduled = false
+        pendingBlocked.clear()
+
         domainBlockedReceiver = null
         vpnStatusReceiver = null
     }
 
     companion object {
         const val VPN_REQUEST_CODE = 24601
+        private const val FLUSH_INTERVAL_MS = 1000L
     }
 }

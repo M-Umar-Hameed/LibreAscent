@@ -6,6 +6,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Monitors browser URL bars via the accessibility node tree.
@@ -27,7 +28,8 @@ class BrowserUrlMonitor {
         val urlBarId: String
     )
 
-    private val browsers = mutableMapOf<String, BrowserConfig>()
+    // Written from the JS thread via updateConfigs, read from the accessibility thread.
+    private val browsers = ConcurrentHashMap<String, BrowserConfig>()
     private var lastDetectedUrl: String = ""
 
     // Shared compiled patterns for URL text scanning below.
@@ -38,7 +40,8 @@ class BrowserUrlMonitor {
      * Update the list of monitored browsers and persist to SharedPreferences.
      */
     fun updateConfigs(configs: List<BrowserConfig>, context: Context? = null) {
-        browsers.clear()
+        // Drop-then-add would leave a window where a reader sees no browsers at all.
+        browsers.keys.retainAll(configs.map { it.packageName }.toSet())
         configs.forEach { config ->
             browsers[config.packageName] = config
         }

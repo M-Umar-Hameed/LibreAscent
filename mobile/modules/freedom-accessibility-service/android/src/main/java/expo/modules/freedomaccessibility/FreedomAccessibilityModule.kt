@@ -4,6 +4,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.text.TextUtils
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
@@ -11,11 +13,13 @@ import android.util.Log
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
+import java.util.concurrent.Executors
 
 class FreedomAccessibilityModule : Module() {
 
     companion object {
-        var cachedInstalledApps: List<Map<String, String>>? = null
+        private const val EVENT_FLUSH_INTERVAL_MS = 1000L
+        private val appsExecutor = Executors.newSingleThreadExecutor()
     }
 
     // Shared fallback matcher used when the Accessibility Service is not running.
@@ -35,6 +39,33 @@ class FreedomAccessibilityModule : Module() {
     private var urlBlockedReceiver: BroadcastReceiver? = null
     private var reelsDetectedReceiver: BroadcastReceiver? = null
 
+    // Blocked-URL and reels events are buffered and flushed on a fixed interval
+    // so a burst of blocks wakes the JS thread once instead of once per event.
+    // Touched only from the main thread (LocalBroadcastManager delivery and the
+    // flush handler both run there), so no synchronisation is needed.
+    private val flushHandler = Handler(Looper.getMainLooper())
+    private val pendingEvents = mutableListOf<Pair<String, Map<String, Any?>>>()
+    private var flushScheduled = false
+
+    private val flushRunnable = Runnable {
+        flushScheduled = false
+        val batch = pendingEvents.toList()
+        pendingEvents.clear()
+        for ((name, payload) in batch) {
+            try {
+                sendEvent(name, payload)
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun queueEvent(name: String, payload: Map<String, Any?>) {
+        pendingEvents.add(name to payload)
+        if (!flushScheduled) {
+            flushScheduled = true
+            flushHandler.postDelayed(flushRunnable, EVENT_FLUSH_INTERVAL_MS)
+        }
+    }
+
     override fun definition() = ModuleDefinition {
         Name("FreedomAccessibilityModule")
 
@@ -43,9 +74,10 @@ class FreedomAccessibilityModule : Module() {
         OnCreate {
             registerReceivers()
             // Prefetch installed apps silently in the background so it's ready for the UX
-            java.lang.Thread {
-                prefetchInstalledApps(appContext.reactContext)
-            }.start()
+            val context = appContext.reactContext
+            appsExecutor.execute {
+                InstalledAppsCache.get { prefetchInstalledApps(context) }
+            }
         }
 
         OnDestroy {
@@ -429,15 +461,13 @@ class FreedomAccessibilityModule : Module() {
                 return@AsyncFunction
             }
 
-            java.lang.Thread {
+            appsExecutor.execute {
                 try {
-                    // Always re-query so newly installed apps appear
-                    val apps = prefetchInstalledApps(context)
-                    promise.resolve(apps)
+                    promise.resolve(InstalledAppsCache.get { prefetchInstalledApps(context) })
                 } catch (e: Exception) {
                     promise.reject("ERR_GET_APPS", e.message, e)
                 }
-            }.start()
+            }
         }
 
         AsyncFunction("hasWriteSecureSettings") { promise: Promise ->
@@ -544,12 +574,9 @@ class FreedomAccessibilityModule : Module() {
         }
         
         // Deduplicate and sort alphabetically
-        val uniqueSorted = result
+        return result
             .distinctBy { it["packageName"] }
             .sortedBy { it["name"]?.lowercase() }
-            
-        cachedInstalledApps = uniqueSorted
-        return uniqueSorted
     }
 
     private fun isServiceEnabled(context: Context): Boolean {
@@ -581,15 +608,13 @@ class FreedomAccessibilityModule : Module() {
         urlBlockedReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val url = intent?.getStringExtra(FreedomAccessibilityService.EXTRA_URL) ?: return
-                try {
-                    sendEvent("onUrlBlocked", mapOf(
-                        "url" to url,
-                        "domain" to (intent.getStringExtra(FreedomAccessibilityService.EXTRA_DOMAIN) ?: ""),
-                        "matchType" to (intent.getStringExtra(FreedomAccessibilityService.EXTRA_MATCH_TYPE) ?: ""),
-                        "matchedValue" to (intent.getStringExtra(FreedomAccessibilityService.EXTRA_MATCHED_VALUE) ?: ""),
-                        "timestamp" to System.currentTimeMillis()
-                    ))
-                } catch (_: Exception) {}
+                queueEvent("onUrlBlocked", mapOf(
+                    "url" to url,
+                    "domain" to (intent.getStringExtra(FreedomAccessibilityService.EXTRA_DOMAIN) ?: ""),
+                    "matchType" to (intent.getStringExtra(FreedomAccessibilityService.EXTRA_MATCH_TYPE) ?: ""),
+                    "matchedValue" to (intent.getStringExtra(FreedomAccessibilityService.EXTRA_MATCHED_VALUE) ?: ""),
+                    "timestamp" to System.currentTimeMillis()
+                ))
             }
         }
         lbm.registerReceiver(
@@ -601,14 +626,12 @@ class FreedomAccessibilityModule : Module() {
         reelsDetectedReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val packageName = intent?.getStringExtra(FreedomAccessibilityService.EXTRA_PACKAGE_NAME) ?: return
-                try {
-                    sendEvent("onReelsDetected", mapOf(
-                        "appName" to (intent.getStringExtra(FreedomAccessibilityService.EXTRA_APP_NAME) ?: ""),
-                        "packageName" to packageName,
-                        "isInReels" to intent.getBooleanExtra(FreedomAccessibilityService.EXTRA_IS_IN_REELS, false),
-                        "timestamp" to System.currentTimeMillis()
-                    ))
-                } catch (_: Exception) {}
+                queueEvent("onReelsDetected", mapOf(
+                    "appName" to (intent.getStringExtra(FreedomAccessibilityService.EXTRA_APP_NAME) ?: ""),
+                    "packageName" to packageName,
+                    "isInReels" to intent.getBooleanExtra(FreedomAccessibilityService.EXTRA_IS_IN_REELS, false),
+                    "timestamp" to System.currentTimeMillis()
+                ))
             }
         }
         lbm.registerReceiver(
@@ -623,6 +646,10 @@ class FreedomAccessibilityModule : Module() {
 
         urlBlockedReceiver?.let { lbm.unregisterReceiver(it) }
         reelsDetectedReceiver?.let { lbm.unregisterReceiver(it) }
+
+        flushHandler.removeCallbacks(flushRunnable)
+        flushScheduled = false
+        pendingEvents.clear()
 
         urlBlockedReceiver = null
         reelsDetectedReceiver = null

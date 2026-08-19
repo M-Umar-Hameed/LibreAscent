@@ -3,6 +3,7 @@ package expo.modules.freedomaccessibility
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Detects when users enter reels/shorts sections of social media apps.
@@ -22,14 +23,16 @@ class ReelsDetector {
         val detectionNodes: List<String>
     )
 
-    private val reelsApps = mutableMapOf<String, ReelsAppConfig>()
-    private var lastDetectionState = mutableMapOf<String, Boolean>()
+    // Written from the JS thread via updateConfigs, read from the accessibility thread.
+    private val reelsApps = ConcurrentHashMap<String, ReelsAppConfig>()
+    private val lastDetectionState = ConcurrentHashMap<String, Boolean>()
 
     /**
      * Update the list of monitored reels apps.
      */
     fun updateConfigs(configs: List<ReelsAppConfig>) {
-        reelsApps.clear()
+        // Drop-then-add would leave a window where a reader sees no reels apps at all.
+        reelsApps.keys.retainAll(configs.map { it.packageName }.toSet())
         configs.forEach { config ->
             reelsApps[config.packageName] = config
         }

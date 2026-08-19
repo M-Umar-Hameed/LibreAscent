@@ -210,11 +210,14 @@ class FreedomAccessibilityService : AccessibilityService() {
             syncScopeToForegroundWindow()
         }, 300)
 
-        // PACKAGE_ADDED is not on the implicit-broadcast exception list, so a
-        // manifest receiver never fires on API 26+; register at runtime for the
-        // service's lifetime instead.
+        // PACKAGE_ADDED/PACKAGE_REMOVED are not on the implicit-broadcast
+        // exception list, so a manifest receiver never fires on API 26+;
+        // register at runtime for the service's lifetime instead.
         if (packageAddedReceiver == null) {
-            val filter = IntentFilter(Intent.ACTION_PACKAGE_ADDED).apply { addDataScheme("package") }
+            val filter = IntentFilter(Intent.ACTION_PACKAGE_ADDED).apply {
+                addAction(Intent.ACTION_PACKAGE_REMOVED)
+                addDataScheme("package")
+            }
             packageAddedReceiver = PackageAddedReceiver().also { registerReceiver(it, filter) }
         }
     }

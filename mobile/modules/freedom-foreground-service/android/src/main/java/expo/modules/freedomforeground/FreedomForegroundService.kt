@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
@@ -29,9 +30,12 @@ class FreedomForegroundService : Service() {
 
     private var blockedDomainReceiver: BroadcastReceiver? = null
     private var blockedCount: Int = 0
+    private var cachedOpenAppIntent: PendingIntent? = null
+    private var lastBlockedNotifyAt: Long = 0
 
     companion object {
         private const val TAG = "FreedomForeground"
+        private const val BLOCKED_NOTIFY_INTERVAL_MS = 30_000L
         const val CHANNEL_ID = "freedom_protection"
         const val NOTIFICATION_ID = 1001
         const val ACTION_UPDATE_NOTIFICATION = "expo.modules.freedomforeground.UPDATE"
@@ -100,6 +104,8 @@ class FreedomForegroundService : Service() {
      * Create a PendingIntent that opens the app when notification is tapped.
      */
     private fun createOpenAppIntent(): PendingIntent {
+        cachedOpenAppIntent?.let { return it }
+
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
             ?: Intent()
         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -111,6 +117,7 @@ class FreedomForegroundService : Service() {
         }
 
         return PendingIntent.getActivity(this, 0, launchIntent, flags)
+            .also { cachedOpenAppIntent = it }
     }
 
     private fun createNotificationChannel() {
@@ -135,8 +142,10 @@ class FreedomForegroundService : Service() {
         blockedDomainReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 blockedCount++
-                // Update notification every 5 blocks to avoid excessive updates
-                if (blockedCount % 5 == 0) {
+                // Rate-limit rebuilds; a burst of blocks is one notification update
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastBlockedNotifyAt >= BLOCKED_NOTIFY_INTERVAL_MS) {
+                    lastBlockedNotifyAt = now
                     updateNotification(null, "Content blocking active • $blockedCount blocked today")
                 }
             }

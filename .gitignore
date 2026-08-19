@@ -14,6 +14,7 @@ mobile/node_modules/
 mobile/.expo/
 mobile/dist/
 mobile/web-build/
+/mobile/android
 desktop/ui/node_modules/
 desktop/ui/dist/
 desktop/target/
@@ -70,4 +71,3 @@ CLAUDE.md
 /.worktrees
 CONTRIBUTING.md
 
-/mobile/android

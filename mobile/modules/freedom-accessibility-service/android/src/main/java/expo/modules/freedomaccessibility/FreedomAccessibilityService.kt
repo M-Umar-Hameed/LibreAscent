@@ -54,11 +54,36 @@ class FreedomAccessibilityService : AccessibilityService() {
     // Remember the last whitelisted domain per browser, so text-only events still get context
     private var lastWhitelistedDomain: String? = null
     private var lastWhitelistedPackage: String? = null
+    // True while the expensive event/flag set is subscribed. Guards setServiceInfo
+    // so it runs on scope transitions only, never per event.
+    private var deepInspectionEnabled = false
 
     companion object {
         private const val TAG = "FreedomA11y"
         private const val OVERLAY_DURATION_MS = 5000L
         private val OVERLAY_DISMISS_TOKEN = Any()
+        private val SCOPE_TOKEN = Any()
+
+        // Window/state events are cheap and are how we learn which app is
+        // foreground, so they stay subscribed for every package. The content,
+        // text and window-retrieval subscriptions tax every other process on
+        // the device and are enabled only while a monitored app is foreground.
+        private val IDLE_EVENT_TYPES = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        private val DEEP_EVENT_TYPES = IDLE_EVENT_TYPES or
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED or
+                AccessibilityEvent.TYPE_VIEW_FOCUSED
+        private val IDLE_FLAGS = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+        private val DEEP_FLAGS = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+        private const val IDLE_NOTIFICATION_TIMEOUT_MS = 50L
+        private const val DEEP_NOTIFICATION_TIMEOUT_MS = 100L
+        // Transient windows (IME, dialogs, toasts) report their own package for a
+        // moment while a monitored app stays foreground. Delay the downgrade so
+        // they cannot drop the deep subscription mid-session.
+        private const val SCOPE_DOWNGRADE_DELAY_MS = 1000L
 
         // Built-in keywords for NSFW app scanning (Reddit, Twitter labels)
         private val NSFW_BUILTIN_KEYWORDS = listOf(
@@ -131,26 +156,20 @@ class FreedomAccessibilityService : AccessibilityService() {
         settingsProtector.updateConfig(hardcoreEnabled, appPkg)
         Log.i(TAG, "SettingsProtector initialized: hardcore=$hardcoreEnabled, pkg=$appPkg")
 
-        // Configure the service programmatically for finer control
-        val info = serviceInfo ?: AccessibilityServiceInfo()
-        info.eventTypes = AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
-                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                AccessibilityEvent.TYPE_WINDOWS_CHANGED or
-                AccessibilityEvent.TYPE_VIEW_FOCUSED or
-                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
-        info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-        info.notificationTimeout = 100
-        info.flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
-                AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
-                AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-        serviceInfo = info
+        // Start in the idle scope; deep inspection is turned on only while a
+        // monitored app is foreground.
+        applyServiceScope(deep = false, force = true)
 
         Log.i(TAG, "Freedom Accessibility Service connected, data loaded: ${browserMonitor.getLoadedBrowserCount()} browsers")
 
         // Insta-stop on resume: reconnect may follow a banking window ending
         // while a blocked app is foreground. rootInActiveWindow can be null at
-        // the instant of connect, so probe shortly after.
-        handler.postDelayed({ enforceForegroundIfBlocked() }, 300)
+        // the instant of connect, so probe shortly after. The same probe seeds
+        // the scope, since no window-state change may follow a reconnect.
+        handler.postDelayed({
+            enforceForegroundIfBlocked()
+            syncScopeToForegroundWindow()
+        }, 300)
 
         // PACKAGE_ADDED is not on the implicit-broadcast exception list, so a
         // manifest receiver never fires on API 26+; register at runtime for the
@@ -172,6 +191,66 @@ class FreedomAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Packages that need the expensive event/flag set while they are foreground.
+     * Derived from live config, so it follows browser, blocked-app, reels, NSFW
+     * and hardcore-mode changes without a separate list.
+     */
+    private fun needsDeepInspection(packageName: String): Boolean {
+        return browserMonitor.isBrowser(packageName) ||
+                reelsDetector.isReelsApp(packageName) ||
+                contentMatcher.isNsfwMonitoredApp(packageName) ||
+                contentMatcher.getAppConfig(packageName) != null ||
+                (settingsProtector.isHardcoreEnabled() && isSettingsPackage(packageName))
+    }
+
+    private fun isSettingsPackage(packageName: String): Boolean {
+        return packageName == "com.android.settings" ||
+                packageName == "com.google.android.settings" ||
+                packageName.contains("packageinstaller") ||
+                packageName.contains("settings") ||
+                packageName.contains("manageapp")
+    }
+
+    /**
+     * Switch the subscription scope. Upgrades apply immediately; downgrades are
+     * delayed so a transient window cannot cut monitoring short.
+     */
+    private fun updateEventScope(deep: Boolean) {
+        handler.removeCallbacksAndMessages(SCOPE_TOKEN)
+        if (deep) {
+            applyServiceScope(true)
+            return
+        }
+        if (!deepInspectionEnabled) return
+        handler.postAtTime({ applyServiceScope(false) }, SCOPE_TOKEN,
+            android.os.SystemClock.uptimeMillis() + SCOPE_DOWNGRADE_DELAY_MS)
+    }
+
+    private fun applyServiceScope(deep: Boolean, force: Boolean = false) {
+        if (!force && deep == deepInspectionEnabled) return
+        val info = serviceInfo ?: AccessibilityServiceInfo()
+        info.eventTypes = if (deep) DEEP_EVENT_TYPES else IDLE_EVENT_TYPES
+        info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+        info.notificationTimeout =
+            if (deep) DEEP_NOTIFICATION_TIMEOUT_MS else IDLE_NOTIFICATION_TIMEOUT_MS
+        info.flags = if (deep) DEEP_FLAGS else IDLE_FLAGS
+        serviceInfo = info
+        deepInspectionEnabled = deep
+    }
+
+    /**
+     * Seed the scope from the currently focused window, for the case where the
+     * service (re)connects while a monitored app is already foreground.
+     */
+    private fun syncScopeToForegroundWindow() {
+        val root = rootInActiveWindow ?: return
+        val pkg = root.packageName?.toString()
+        root.recycle()
+        if (pkg.isNullOrEmpty() || pkg == applicationContext.packageName) return
+        updateEventScope(needsDeepInspection(pkg))
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
 
@@ -190,14 +269,14 @@ class FreedomAccessibilityService : AccessibilityService() {
         }
 
         val isBlockedApp = contentMatcher.getAppConfig(packageName) != null
-        val isSettingsApp = packageName == "com.android.settings" ||
-                packageName == "com.google.android.settings" ||
-                packageName.contains("packageinstaller") ||
-                packageName.contains("settings") ||
-                packageName.contains("manageapp")
+        val isSettingsApp = isSettingsPackage(packageName)
 
         // Track current foreground app
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            // ponytail: scope follows the foreground package only. A config change
+            // made while its own app is already foreground takes effect on the next
+            // window-state change; push an update from the module if that ever matters.
+            updateEventScope(isDetachedWebview || needsDeepInspection(packageName))
             if (packageName != currentPackage) {
                 // User switched apps - reset reels state for both old and new app
                 // so detection fires fresh when (re-)entering a reels app.
@@ -269,11 +348,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 isNsfwMonitored -> {
                     handleNsfwScan(rootNode, packageName)
                 }
-                packageName == "com.android.settings" ||
-                packageName == "com.google.android.settings" ||
-                packageName.contains("packageinstaller") ||
-                packageName.contains("settings") ||
-                packageName.contains("manageapp") -> {
+                isSettingsApp -> {
                     settingsProtector.checkSettingsScreen(this, event, rootNode)
                 }
             }

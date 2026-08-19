@@ -75,6 +75,8 @@ class SettingsProtector {
         Log.d(TAG, "Config updated: enabled=$enabled, pkg=$packageName")
     }
 
+    fun isHardcoreEnabled(): Boolean = isHardcoreModeEnabled
+
     /**
      * Check for sensitive activity by class name.
      * Called on TYPE_WINDOW_STATE_CHANGED.

@@ -687,6 +687,8 @@ class FreedomAccessibilityService : AccessibilityService() {
         // Combine built-in NSFW labels with user keywords
         val allKeywords = NSFW_BUILTIN_KEYWORDS + contentMatcher.getKeywords()
 
+        // ponytail: one IPC per keyword; a single tree walk would mean
+        // reimplementing Android's own text-match semantics
         for (keyword in allKeywords) {
             try {
                 val matches = rootNode.findAccessibilityNodeInfosByText(keyword)

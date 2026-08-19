@@ -51,11 +51,11 @@ class ContentMatcher {
     @Volatile private var nsfwMonitoredApps = ConcurrentHashMap.newKeySet<String>()
 
     private val searchEngineDomains = setOf(
-        "google.com", "bing.com", "duckduckgo.com", "yahoo.com",
+        "google.com", "bing.com", "duckduckgo.com", "yahoo.com", 
         "baidu.com", "yandex.com", "ecosia.org", "startpage.com"
     )
 
-    // Precompiled patterns reused across events instead of allocating per call.
+    // Shared compiled patterns for URL/keyword matching below.
     private val candidateSplitPattern = Regex("\\s*[|·»]\\s*|\\s+[-:]\\s+")
     private val invisibleCharsPattern = Regex("[\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]")
     private val embeddedCandidateDomainPattern = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\\.[a-z0-9]{2,}")
@@ -289,16 +289,16 @@ class ContentMatcher {
 
     private fun findMatchingKeyword(url: String): String? {
         val lowerUrl = url.lowercase()
-        // Look for surrounding context (alphanumeric block). Split once and
-        // reuse for every keyword instead of re-splitting per keyword.
-        val textBlocks = lowerUrl.split(nonAlphanumericPattern)
+        var textBlocks: List<String>? = null
 
         for (keyword in blockedKeywords) {
             val lowerKeyword = keyword.lowercase()
 
             if (lowerUrl.contains(lowerKeyword)) {
                 var hasValidBlock = false
-                for (block in textBlocks) {
+                // Surrounding context (alphanumeric block)
+                val blocks = textBlocks ?: lowerUrl.split(nonAlphanumericPattern).also { textBlocks = it }
+                for (block in blocks) {
                     if (block.contains(lowerKeyword)) {
                         // Heuristic 1: If the block is extremely long (>15 chars), it's probably a base64 token or hash.
                         if (lowerKeyword.length <= 4 && block.length > 15) {

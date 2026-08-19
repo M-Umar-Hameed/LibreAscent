@@ -5,9 +5,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 /**
- * Verifies findMatchingKeyword's behaviour is unchanged after hoisting the
- * per-keyword text-block split (Regex("[^a-z0-9]")) out of the loop so it
- * runs once instead of once per keyword.
+ * Covers ContentMatcher's private findMatchingKeyword: exact/substring/token
+ * matching, case handling, false-positive heuristics, and empty input.
  */
 class ContentMatcherKeywordTest {
 
@@ -29,13 +28,23 @@ class ContentMatcherKeywordTest {
     }
 
     @Test
-    fun keywordAsSubstringInsideLongerWordDoesNotMatch() {
+    fun shortKeywordAsSubstringInsideLongerWordDoesNotMatch() {
         val matcher = ContentMatcher()
         // "sex" inside "unisex" is not an exact block match and "unisex" is not
         // in the false-positive list either, so heuristic 3 rejects it.
         matcher.setKeywordsForTest(listOf("sex"))
 
         assertNull(matcher.findMatchingKeywordForTest("example.com/unisex/1"))
+    }
+
+    @Test
+    fun keywordLongerThanThreeMatchesInsideLongerToken() {
+        val matcher = ContentMatcher()
+        // "porn" (4 chars) has no false-positive entry, so heuristic 3's exact-token
+        // requirement (only for <=3 char keywords) does not apply here.
+        matcher.setKeywordsForTest(listOf("porn"))
+
+        assertEquals("porn", matcher.findMatchingKeywordForTest("pornhub.com"))
     }
 
     @Test
@@ -47,8 +56,11 @@ class ContentMatcherKeywordTest {
     }
 
     @Test
-    fun multipleKeywordsWhereALaterOneMatches() {
+    fun matchFoundAmongMultipleConfiguredKeywords() {
         val matcher = ContentMatcher()
+        // blockedKeywords is a hash set, so iteration order is unspecified;
+        // this only asserts the matching keyword is found despite non-matches
+        // also being present in the set.
         matcher.setKeywordsForTest(listOf("nomatch1", "nomatch2", "video"))
 
         assertEquals("video", matcher.findMatchingKeywordForTest("example.com/video/1"))

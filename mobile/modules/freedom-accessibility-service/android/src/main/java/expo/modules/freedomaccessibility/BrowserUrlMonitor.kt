@@ -30,7 +30,7 @@ class BrowserUrlMonitor {
     private val browsers = mutableMapOf<String, BrowserConfig>()
     private var lastDetectedUrl: String = ""
 
-    // Precompiled patterns reused across nodes/events instead of allocating per call.
+    // Shared compiled patterns for URL text scanning below.
     private val invisibleCharsPattern = Regex("[\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]")
     private val whitespacePattern = Regex("\\s+")
 
@@ -584,7 +584,7 @@ class BrowserUrlMonitor {
             if (looksLikeUrl(contentDesc)) return contentDesc
             val extracted = extractUrlFromDescription(contentDesc)
             if (extracted != null) return extracted
-
+            
             val words = contentDesc.split(whitespacePattern)
             if (words.size > 1) {
                 for (word in words) {
@@ -600,7 +600,7 @@ class BrowserUrlMonitor {
             event.text?.reversed()?.forEach { text ->
                 val str = text?.toString() ?: return@forEach
                 if (looksLikeUrl(str)) return str
-
+                
                 val words = str.split(whitespacePattern)
                 if (words.size > 1) {
                     for (word in words) {

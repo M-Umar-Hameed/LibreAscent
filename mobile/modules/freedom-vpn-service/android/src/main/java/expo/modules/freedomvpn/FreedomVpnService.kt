@@ -51,6 +51,9 @@ class FreedomVpnService : VpnService() {
     // cause of severe slowdowns / apps failing to load.
     private var dnsExecutor: java.util.concurrent.ExecutorService? = null
 
+    // One buffer per forwarding-pool thread instead of one per query.
+    private val dnsResponseBuffer: ThreadLocal<ByteArray> = ThreadLocal.withInitial { ByteArray(MAX_PACKET_SIZE) }
+
     companion object {
         private const val TAG = "FreedomVPN"
         private const val CHANNEL_ID = "freedom_vpn"
@@ -362,37 +365,36 @@ class FreedomVpnService : VpnService() {
 
         for (server in dnsServers) {
             try {
-                val socket = DatagramSocket()
-                protect(socket) // Prevent VPN loop
+                DatagramSocket().use { socket ->
+                    protect(socket) // Prevent VPN loop
 
-                socket.soTimeout = DNS_TIMEOUT_MS
+                    socket.soTimeout = DNS_TIMEOUT_MS
 
-                // Send to upstream DNS
-                val dnsServer = InetAddress.getByName(server)
-                val sendPacket = DatagramPacket(dnsPayload, dnsLength,
-                    InetSocketAddress(dnsServer, DnsInterceptor.DNS_PORT))
-                socket.send(sendPacket)
+                    // Send to upstream DNS
+                    val dnsServer = InetAddress.getByName(server)
+                    val sendPacket = DatagramPacket(dnsPayload, dnsLength,
+                        InetSocketAddress(dnsServer, DnsInterceptor.DNS_PORT))
+                    socket.send(sendPacket)
 
-                // Receive response
-                val responseBuffer = ByteArray(MAX_PACKET_SIZE)
-                val receivePacket = DatagramPacket(responseBuffer, responseBuffer.size)
-                socket.receive(receivePacket)
+                    // Receive response
+                    val responseBuffer = dnsResponseBuffer.get()!!
+                    val receivePacket = DatagramPacket(responseBuffer, responseBuffer.size)
+                    socket.receive(receivePacket)
 
-                socket.close()
+                    // Build IP packet with the DNS response and write to TUN
+                    val dnsResponse = ByteArray(receivePacket.length)
+                    System.arraycopy(receivePacket.data, receivePacket.offset,
+                        dnsResponse, 0, receivePacket.length)
 
-                // Build IP packet with the DNS response and write to TUN
-                val dnsResponse = ByteArray(receivePacket.length)
-                System.arraycopy(receivePacket.data, receivePacket.offset,
-                    dnsResponse, 0, receivePacket.length)
-
-                val responseIpPacket = buildResponseIpPacket(
-                    dnsResponse,
-                    dstIp,   // DNS server -> source
-                    srcIp,   // Device -> destination
-                    DnsInterceptor.DNS_PORT, // DNS port -> source port
-                    srcPort  // Original source port -> destination port
-                )
-                writeToTun(responseIpPacket)
+                    val responseIpPacket = buildResponseIpPacket(
+                        dnsResponse,
+                        dstIp,   // DNS server -> source
+                        srcIp,   // Device -> destination
+                        DnsInterceptor.DNS_PORT, // DNS port -> source port
+                        srcPort  // Original source port -> destination port
+                    )
+                    writeToTun(responseIpPacket)
+                }
                 return // Success — no need to try secondary
 
             } catch (e: Exception) {

@@ -1023,6 +1023,14 @@ class FreedomAccessibilityService : AccessibilityService() {
         isRunning = false
         hideInstantOverlay()
         handler.removeCallbacksAndMessages(null)
+        packageAddedReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (e: IllegalArgumentException) {
+                // Not registered — nothing to do.
+            }
+        }
+        packageAddedReceiver = null
         sharedBrowserMonitor = null
         sharedReelsDetector = null
         sharedContentMatcher = null

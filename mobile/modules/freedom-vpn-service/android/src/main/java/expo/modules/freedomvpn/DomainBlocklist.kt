@@ -35,6 +35,12 @@ class DomainBlocklist {
      * Suffix matching: "sub.example.com" is blocked if "example.com" is in the list.
      */
     fun isBlocked(domain: String): Boolean {
+        // ponytail: probes the per-category sets rather than one flat union. The
+        // union would save ~20 cached-hash lookups per query but costs ~37 MB per
+        // million domains and would have to be rebuilt on every removeCategory,
+        // holding two full-size sets at once. Affordable once the module gains a
+        // native end-of-sync signal (a finalizeCategorySync equivalent) so the
+        // union can be built once per sync instead of once per batch.
         val normalized = normalize(domain)
         if (normalized.isEmpty()) return false
 

@@ -34,37 +34,71 @@ class DomainBlocklistTest {
     fun matchingAgreesWithReferenceImplementation() {
         val blocked = setOf("example.com")
         val adult = setOf("bad.org", "deep.nested.tracker.net")
-        val whitelisted = setOf("ok.example.com")
+        val whitelisted = setOf("ok.example.com", "safe.bad.org")
 
         val list = DomainBlocklist()
         list.setDomains(blocked)
         list.addCategory("adult", adult, replace = true)
         list.setWhitelist(whitelisted)
 
+        // (query as the caller passes it, same query as normalize() renders it).
+        // normalize() is untouched by this change, so the oracle only has to model
+        // the matching half; the pairs differ only where normalization does work.
         val probes = listOf(
-            "example.com",              // exact
-            "sub.example.com",          // subdomain
-            "a.b.c.example.com",        // deep subdomain
-            "notexample.com",           // suffix string, not a subdomain
-            "myexample.com",
-            "example.com.evil.net",     // blocked string as a prefix label
-            "ok.example.com",           // whitelisted exactly
-            "deeper.ok.example.com",    // whitelisted parent wins over blocklist
-            "bad.org",                  // category exact
-            "x.bad.org",                // category subdomain
-            "notbad.org",
-            "deep.nested.tracker.net",
-            "tracker.net",              // parent of a category entry, not blocked
-            "unrelated.io"
+            "example.com" to "example.com",                   // exact
+            "sub.example.com" to "sub.example.com",           // subdomain
+            "a.b.c.example.com" to "a.b.c.example.com",       // deep subdomain
+            "notexample.com" to "notexample.com",             // suffix string, not a subdomain
+            "myexample.com" to "myexample.com",
+            "example.com.evil.net" to "example.com.evil.net", // blocked string as a prefix label
+            "ok.example.com" to "ok.example.com",             // whitelisted exactly
+            "deeper.ok.example.com" to "deeper.ok.example.com", // whitelisted parent beats blocklist
+            "safe.bad.org" to "safe.bad.org",                 // whitelist beats a category entry
+            "under.safe.bad.org" to "under.safe.bad.org",     // whitelisted parent beats a category
+            "bad.org" to "bad.org",                           // category exact
+            "x.bad.org" to "x.bad.org",                       // category subdomain
+            "notbad.org" to "notbad.org",
+            "deep.nested.tracker.net" to "deep.nested.tracker.net",
+            "tracker.net" to "tracker.net",                   // parent of a category entry, not blocked
+            "unrelated.io" to "unrelated.io",
+            "" to "",                                         // empty query
+            "   " to "",                                      // blank query
+            ".example.com" to ".example.com",                 // leading dot
+            "SUB.EXAMPLE.COM" to "sub.example.com",           // query-side case folding
+            "WWW.Example.COM." to "example.com",              // www + trailing dot + case
+            "sub.example.com:443" to "sub.example.com",       // port
+            "https://x.bad.org/path" to "x.bad.org"           // scheme + path
         )
 
-        for (probe in probes) {
+        for ((query, normalized) in probes) {
             assertEquals(
-                referenceBlocked(probe, blocked, listOf(adult), whitelisted),
-                list.isBlocked(probe),
-                "mismatch for $probe"
+                referenceBlocked(normalized, blocked, listOf(adult), whitelisted),
+                list.isBlocked(query),
+                "mismatch for '$query'"
             )
         }
+    }
+
+    @Test
+    fun bareTldEntriesCannotEnterAnyList() {
+        // normalize() drops anything without a dot, so a bare TLD can never be
+        // stored and the top-level probe in the parent chain can never match.
+        val list = DomainBlocklist()
+        list.setDomains(listOf("com"))
+        list.addCategory("adult", listOf("org"), replace = true)
+
+        assertEquals(0, list.size())
+        assertFalse(list.isBlocked("anything.com"))
+        assertFalse(list.isBlocked("anything.org"))
+    }
+
+    @Test
+    fun appendingToAnUnknownCategoryCreatesIt() {
+        val list = DomainBlocklist()
+        list.addCategory("adult", listOf("late.com"), replace = false)
+
+        assertTrue(list.isBlocked("sub.late.com"))
+        assertEquals(1, list.size())
     }
 
     @Test

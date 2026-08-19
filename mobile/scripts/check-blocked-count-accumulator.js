@@ -3,21 +3,15 @@
 const assert = require("node:assert");
 const {
   incrementPending,
-  drainPending,
+  flushPending,
 } = require("../db/blockedCountAccumulator.ts");
-
-// Mirrors flushBlockedStats()'s "skip the write if nothing pending" branch.
-function flush(write) {
-  const count = drainPending();
-  if (count > 0) write(count);
-}
 
 const N = 7;
 for (let i = 0; i < N; i++) {
   incrementPending();
 }
 let writes = [];
-flush((count) => writes.push(count));
+flushPending((count) => writes.push(count));
 assert.deepStrictEqual(
   writes,
   [N],
@@ -25,7 +19,7 @@ assert.deepStrictEqual(
 );
 
 writes = [];
-flush((count) => writes.push(count));
+flushPending((count) => writes.push(count));
 assert.deepStrictEqual(
   writes,
   [],

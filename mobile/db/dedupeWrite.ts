@@ -1,10 +1,11 @@
-// Pure in-memory "did this value change" gate. No native deps, so this
-// stays testable independent of the SQLite-backed store below.
+// Tracks the last successfully written value to skip redundant writes.
 let last: string | null = null;
 
-/** Returns true (and records the value) if it differs from the last write. */
-export function shouldWrite(value: string): boolean {
-  if (value === last) return false;
+export function isUnchanged(value: string): boolean {
+  return value === last;
+}
+
+/** Call only after a write of `value` has actually succeeded. */
+export function recordWritten(value: string): void {
   last = value;
-  return true;
 }

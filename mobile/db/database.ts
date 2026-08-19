@@ -1,6 +1,6 @@
 import * as SQLite from "expo-sqlite";
-import { drainPending } from "./blockedCountAccumulator";
-import { shouldWrite } from "./dedupeWrite";
+import { flushPending, incrementPending } from "./blockedCountAccumulator";
+import { isUnchanged, recordWritten } from "./dedupeWrite";
 
 // Create or open the database.
 // To use synchronous database calls (which are often easier for simple React Native state),
@@ -21,7 +21,7 @@ export function initDB(): void {
       blocked_count INTEGER DEFAULT 0
     );
 
-    -- Dead weight from the old per-URL history table; reclaim existing installs.
+    -- Reclaim rows from the removed blocked_urls table.
     DROP TABLE IF EXISTS blocked_urls;
 
     -- Table for simple key-value persistence (e.g. Zustand stores)
@@ -79,7 +79,7 @@ export const sqliteStorage = {
       return null;
     }
   },
-  setItem: (name: string, value: string): void => {
+  setItem: (name: string, value: string): boolean => {
     // console.log(`[sqliteStorage] setItem called for ${name}. Value length: ${value.length}`);
     try {
       db.runSync(
@@ -88,53 +88,58 @@ export const sqliteStorage = {
         value,
       );
       // console.log(`[sqliteStorage] setItem SUCCESS for ${name}`);
+      return true;
     } catch (err) {
       console.error(`[sqliteStorage] setItem ERROR for ${name}:`, err);
+      return false;
     }
   },
-  removeItem: (name: string): void => {
+  removeItem: (name: string): boolean => {
     try {
       db.runSync(`DELETE FROM kv_store WHERE key = ?;`, [name]);
+      return true;
     } catch (err) {
       console.error("[sqliteStorage] Failed to remove", name, err);
+      return false;
     }
   },
 };
 
-/**
- * Storage adapter for useAppStore's persist middleware. Writes go straight
- * through to sqliteStorage (no deferral — settings must hit disk promptly),
- * except a write whose serialized value is unchanged from the last one is
- * skipped. useAppStore's partialize keeps the per-event blocked-count fields
- * out of the persisted blob, so a blocked event's set() call reaches here
- * with a byte-identical value and is a no-op — no queue or timer needed.
- */
+/** Storage adapter for useAppStore: skips a write unchanged since the last confirmed one. */
 export const dedupingAppStoreStorage = {
   getItem: sqliteStorage.getItem,
   setItem: (name: string, value: string): void => {
-    if (shouldWrite(value)) sqliteStorage.setItem(name, value);
+    if (isUnchanged(value)) return;
+    if (sqliteStorage.setItem(name, value)) recordWritten(value);
   },
   removeItem: sqliteStorage.removeItem,
 };
 
-export { incrementPending as accumulateBlockedCount } from "./blockedCountAccumulator";
-
 /**
  * Commits the pending blocked count to the stats table. Call on the flush
- * interval and on AppState background.
+ * interval and on AppState background/inactive.
  */
 export function flushBlockedStats(): void {
-  const count = drainPending();
-  if (count === 0) return;
+  flushPending((count) => {
+    const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+    db.runSync(
+      `INSERT INTO stats (date, blocked_count) VALUES (?, ?)
+       ON CONFLICT(date) DO UPDATE SET blocked_count = blocked_count + ?;`,
+      today,
+      count,
+      count,
+    );
+  });
+}
 
-  const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
-  db.runSync(
-    `INSERT INTO stats (date, blocked_count) VALUES (?, ?)
-     ON CONFLICT(date) DO UPDATE SET blocked_count = blocked_count + ?;`,
-    today,
-    count,
-    count,
-  );
+// Force-flushes so a long backgrounded session (where the interval below
+// doesn't run — RN's Android timer pauses on host pause) can't lose more
+// than this many counts if the process is reclaimed before the next
+// AppState transition.
+const FLUSH_THRESHOLD = 20;
+
+export function accumulateBlockedCount(): void {
+  if (incrementPending() >= FLUSH_THRESHOLD) flushBlockedStats();
 }
 
 /**

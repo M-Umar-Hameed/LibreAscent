@@ -197,12 +197,12 @@ export default function RootLayout(): ReactNode {
   }, [isMounted, navigationState?.key]);
 
   useEffect(() => {
-    if (!isMounted || !storesHydrated || !isOnboarded) return;
+    if (!isMounted || !navigationState?.key) return;
 
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         void ProtectionService.refreshProtectionStatus().catch(console.warn);
-      } else if (nextState === "background") {
+      } else if (nextState === "background" || nextState === "inactive") {
         flushBlockedStats();
         checkpointWal();
       }
@@ -215,7 +215,7 @@ export default function RootLayout(): ReactNode {
       subscription.remove();
       clearInterval(flushInterval);
     };
-  }, [isMounted, storesHydrated, isOnboarded]);
+  }, [isMounted, navigationState?.key]);
 
   // On every launch: recover protection after normal process death or manual
   // relaunch following force-stop. Android blocks all app work while the

@@ -3,6 +3,8 @@ import {
   contentFingerprint,
   getCachedDomainCount,
   getSourceCache,
+  hasCachedDomains,
+  hasSourceDomains,
   pruneDisabledSources,
   readCachedDomainsBatch,
   saveSourceDomains,
@@ -227,7 +229,7 @@ export const BlocklistService = {
         await FreedomVpn.removeCategory(categoryId);
         if (category.domains.length > 0) {
           await FreedomVpn.addCategory(categoryId, category.domains);
-        } else if (getCachedDomainCount(categoryId) > 0) {
+        } else if (hasCachedDomains(categoryId)) {
           await BlocklistService.syncCategoryFromCache(categoryId, {
             syncVpn: true,
             syncAccessibility: false,
@@ -531,12 +533,17 @@ export const BlocklistService = {
   }> => {
     const cached = getSourceCache(sourceId);
 
+    // A cached ETag/hash only means "unchanged" if the rows it was recorded
+    // for still exist. Without this the server keeps answering 304 against an
+    // empty cache and the category can never repopulate.
+    const cacheUsable = cached !== null && hasSourceDomains(sourceId);
+
     // For complex URLs (comma-separated, Bon-Appetit), skip conditional request
     // and use content hash comparison instead.
     const isSimpleUrl = !url.includes(",") && !url.endsWith("meta.json");
 
     const headers: Record<string, string> = {};
-    if (cached && isSimpleUrl) {
+    if (cacheUsable && cached && isSimpleUrl) {
       if (cached.etag) headers["If-None-Match"] = cached.etag;
       if (cached.lastModified)
         headers["If-Modified-Since"] = cached.lastModified;
@@ -566,14 +573,14 @@ export const BlocklistService = {
       const list = await BlocklistService.fetchRemoteList(url, format);
       // Can't get raw content for hash, use list length + sample as proxy
       const hash = contentFingerprint(list.join("\n"));
-      if (cached?.contentHash === hash) {
+      if (cacheUsable && cached?.contentHash === hash) {
         return { changed: false, list: [], etag: "", lastModified: "", hash };
       }
       return { changed: true, list, etag: "", lastModified: "", hash };
     }
 
     const hash = contentFingerprint(content);
-    if (cached?.contentHash === hash) {
+    if (cacheUsable && cached?.contentHash === hash) {
       return { changed: false, list: [], etag, lastModified, hash };
     }
 
@@ -596,16 +603,23 @@ export const BlocklistService = {
     const syncVpn = options?.syncVpn ?? true;
     const syncAccessibility = options?.syncAccessibility ?? true;
     const PAGE = 10000;
-    const totalCached = getCachedDomainCount(categoryId);
-    for (let offset = 0; offset < totalCached; offset += PAGE) {
-      const batch = readCachedDomainsBatch(categoryId, PAGE, offset);
+    // Keyset paging: each page resumes after the previous page's last domain,
+    // which is strictly greater every time (DISTINCT + ORDER BY domain), so the
+    // loop covers every domain exactly once and ends on the first empty page.
+    let after = "";
+    let isFirstPage = true;
+    for (;;) {
+      const batch = readCachedDomainsBatch(categoryId, PAGE, after);
       if (batch.length === 0) break;
       if (syncVpn) {
-        await FreedomVpn.addCategory(categoryId, batch, offset === 0);
+        await FreedomVpn.addCategory(categoryId, batch, isFirstPage);
       }
       if (syncAccessibility) {
         await FreedomAccessibility.appendCategoryDomains(categoryId, batch);
       }
+      after = batch[batch.length - 1];
+      isFirstPage = false;
+      await new Promise((r) => setTimeout(r, 0));
     }
   },
 

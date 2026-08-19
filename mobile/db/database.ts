@@ -47,10 +47,11 @@ export function initDB(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_cached_domains_source
       ON cached_domains(source_id);
-    CREATE INDEX IF NOT EXISTS idx_cached_domains_category
-      ON cached_domains(category_id);
     CREATE INDEX IF NOT EXISTS idx_cached_domains_cat_domain
       ON cached_domains(category_id, domain);
+    -- Strict prefix of idx_cached_domains_cat_domain: serves no query the
+    -- composite cannot, and costs a write on every cached domain.
+    DROP INDEX IF EXISTS idx_cached_domains_category;
   `);
 }
 
@@ -225,6 +226,10 @@ export function contentFingerprint(content: string): string {
   return h.toString(36);
 }
 
+// ponytail: parse + insert still run on the JS thread, so a ~1M-domain source
+// stalls it for the whole transaction. Upgrade path is fetching, parsing and
+// inserting natively; a yield here would hold the transaction open across
+// unrelated writes.
 /**
  * Replace cached domains for a source and update its HTTP cache headers.
  * Uses batch INSERT for speed (~300 rows per statement to stay under
@@ -277,19 +282,20 @@ export function saveSourceDomains(
 }
 
 /**
- * Read a batch of unique cached domains for a category (paginated).
+ * Read a batch of unique cached domains for a category, in domain order,
+ * starting after `afterDomain` (pass "" for the first page).
  * DISTINCT deduplicates domains that appear in multiple sources.
  */
 export function readCachedDomainsBatch(
   categoryId: string,
   limit: number,
-  offset: number,
+  afterDomain: string,
 ): string[] {
   const rows = db.getAllSync<{ domain: string }>(
-    "SELECT DISTINCT domain FROM cached_domains WHERE category_id = ? LIMIT ? OFFSET ?",
+    "SELECT DISTINCT domain FROM cached_domains WHERE category_id = ? AND domain > ? ORDER BY domain LIMIT ?",
     categoryId,
+    afterDomain,
     limit,
-    offset,
   );
   return rows.map((r) => r.domain);
 }
@@ -303,6 +309,24 @@ export function getCachedDomainCount(categoryId: string): number {
     categoryId,
   );
   return row?.c ?? 0;
+}
+
+/** Whether a category has any cached domain. O(1); no full scan. */
+export function hasCachedDomains(categoryId: string): boolean {
+  const row = db.getFirstSync<{ e: number }>(
+    "SELECT EXISTS(SELECT 1 FROM cached_domains WHERE category_id = ? LIMIT 1) as e",
+    categoryId,
+  );
+  return row?.e === 1;
+}
+
+/** Whether a source still holds the rows its cached ETag was recorded for. */
+export function hasSourceDomains(sourceId: string): boolean {
+  const row = db.getFirstSync<{ e: number }>(
+    "SELECT EXISTS(SELECT 1 FROM cached_domains WHERE source_id = ? LIMIT 1) as e",
+    sourceId,
+  );
+  return row?.e === 1;
 }
 
 /**

@@ -1,6 +1,6 @@
 import { InteractionGuard } from "@/components/InteractionGuard";
 import type { AppTheme } from "@/constants/overlay-themes";
-import { getCachedDomainCount } from "@/db/database";
+import { hasCachedDomains } from "@/db/database";
 import { useAppTheme } from "@/providers/ThemeProvider";
 import { BlocklistService } from "@/services/BlocklistService";
 import { useAppStore } from "@/stores/useAppStore";
@@ -170,7 +170,7 @@ export default function SettingsScreen(): ReactNode {
     if (enable) {
       setAdBlockLoading(true);
       try {
-        if (getCachedDomainCount("ads") === 0) {
+        if (!hasCachedDomains("ads")) {
           // First enable: fetch + cache + sync the HaGeZi list.
           await BlocklistService.updateBlocklists();
         } else {
@@ -181,7 +181,7 @@ export default function SettingsScreen(): ReactNode {
         // true, so verify domains actually landed rather than trusting the
         // call. Empty cache means the fetch failed — the toggle must not
         // claim protection it isn't providing.
-        if (getCachedDomainCount("ads") === 0) {
+        if (!hasCachedDomains("ads")) {
           throw new Error("No ad domains synced");
         }
       } catch (e) {

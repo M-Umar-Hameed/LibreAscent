@@ -448,14 +448,21 @@ class FreedomAccessibilityModule : Module() {
         AsyncFunction("getBankingState") { promise: Promise ->
             val context = appContext.reactContext
             if (context == null) {
-                promise.resolve(mapOf("active" to false, "remainingMs" to 0.0))
+                promise.resolve(mapOf(
+                    "active" to false,
+                    "remainingMs" to 0.0,
+                    "cooldownRemainingMs" to 0.0,
+                    "attemptsRemaining" to BankingModeManager.ATTEMPT_LIMIT
+                ))
                 return@AsyncFunction
             }
             BankingModeManager.enforceExpiry(context)
             promise.resolve(
                 mapOf(
                     "active" to BankingModeManager.isActive(context),
-                    "remainingMs" to BankingModeManager.remainingMs(context).toDouble()
+                    "remainingMs" to BankingModeManager.remainingMs(context).toDouble(),
+                    "cooldownRemainingMs" to BankingModeManager.cooldownRemainingMs(context).toDouble(),
+                    "attemptsRemaining" to BankingModeManager.attemptsRemaining(context)
                 )
             )
         }
@@ -477,6 +484,8 @@ class FreedomAccessibilityModule : Module() {
             try {
                 BankingModeManager.start(context)
                 promise.resolve(null)
+            } catch (e: IllegalStateException) {
+                promise.reject("ERR_BANKING_COOLDOWN", e.message, e)
             } catch (e: Exception) {
                 promise.reject("ERR_BANKING_START", e.message, e)
             }

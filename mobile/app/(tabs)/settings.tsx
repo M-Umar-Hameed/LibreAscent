@@ -73,6 +73,8 @@ export default function SettingsScreen(): ReactNode {
   const [bankingActive, setBankingActive] = useState(false);
   const [bankingRemainingMs, setBankingRemainingMs] = useState(0);
   const [bankingHasPermission, setBankingHasPermission] = useState(true);
+  const [bankingCooldownMs, setBankingCooldownMs] = useState(0);
+  const [bankingAttemptsRemaining, setBankingAttemptsRemaining] = useState(3);
 
   useEffect(() => {
     let mounted = true;
@@ -85,6 +87,8 @@ export default function SettingsScreen(): ReactNode {
         if (!mounted) return;
         setBankingActive(state.active);
         setBankingRemainingMs(state.remainingMs);
+        setBankingCooldownMs(state.cooldownRemainingMs);
+        setBankingAttemptsRemaining(state.attemptsRemaining);
         setBankingHasPermission(perm);
       } catch {
         /* ignore */
@@ -100,6 +104,13 @@ export default function SettingsScreen(): ReactNode {
 
   const handleBankingToggle = async (enable: boolean): Promise<void> => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    if (enable && bankingCooldownMs > 0) {
+      Alert.alert(
+        "Banking limit reached",
+        `You've used all 3 sessions. Try again in ${bankingCountdown(bankingCooldownMs)}.`,
+      );
+      return;
+    }
     try {
       if (enable) {
         await FreedomAccessibility.startBankingMode();
@@ -109,6 +120,8 @@ export default function SettingsScreen(): ReactNode {
       const state = await FreedomAccessibility.getBankingState();
       setBankingActive(state.active);
       setBankingRemainingMs(state.remainingMs);
+      setBankingCooldownMs(state.cooldownRemainingMs);
+      setBankingAttemptsRemaining(state.attemptsRemaining);
     } catch (e) {
       console.error("[Settings] Banking mode toggle failed:", e);
       Alert.alert(
@@ -118,8 +131,8 @@ export default function SettingsScreen(): ReactNode {
     }
   };
 
-  const bankingCountdown = (): string => {
-    const total = Math.max(0, Math.ceil(bankingRemainingMs / 1000));
+  const bankingCountdown = (ms: number = bankingRemainingMs): string => {
+    const total = Math.max(0, Math.ceil(ms / 1000));
     const m = Math.floor(total / 60);
     const s = total % 60;
     return `${m}:${s.toString().padStart(2, "0")}`;
@@ -443,12 +456,14 @@ export default function SettingsScreen(): ReactNode {
                     ? "One-time setup required (see below)"
                     : bankingActive
                       ? `Accessibility paused - ${bankingCountdown()} left`
-                      : "Pause accessibility 2 min to use banking apps"}
+                      : bankingCooldownMs > 0
+                        ? `Limit reached - retry in ${bankingCountdown(bankingCooldownMs)}`
+                        : `Pause accessibility 2 min to use banking apps (${bankingAttemptsRemaining} left)`}
                 </Text>
               </View>
               <Switch
                 value={bankingActive}
-                disabled={!bankingHasPermission}
+                disabled={!bankingHasPermission || (!bankingActive && bankingCooldownMs > 0)}
                 onValueChange={(v) => void handleBankingToggle(v)}
                 trackColor={{ false: "#ccc", true: t.accentColor }}
                 thumbColor={bankingActive ? "#fff" : "#999"}

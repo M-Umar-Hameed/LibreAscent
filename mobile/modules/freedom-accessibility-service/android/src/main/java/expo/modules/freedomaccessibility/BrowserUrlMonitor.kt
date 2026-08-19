@@ -233,19 +233,26 @@ class BrowserUrlMonitor {
 
         val candidates = mutableSetOf<String>()
 
-        findUrlByResourceId(rootNode, packageName, config.urlBarId)?.let { candidates.add(it) }
-        tryFallbackUrlBarIds(rootNode, packageName, config.urlBarId)?.let { candidates.add(it) }
+        val primaryId = findUrlByResourceId(rootNode, packageName, config.urlBarId)
+        primaryId?.let { candidates.add(it) }
+        val mozillaId = tryFallbackUrlBarIds(rootNode, packageName, config.urlBarId)
+        mozillaId?.let { candidates.add(it) }
         findUrlFromEventText(event)?.let { candidates.add(it) }
         extractUrlFromToolbarDescription(rootNode, packageName)?.let { candidates.add(it) }
-        
-        tryUniversalFallbackIdsAll(rootNode, packageName).forEach { candidates.add(it) }
-        
+
+        // The universal ids stand in for a configured id that has drifted across
+        // browser versions, so they only run once the browser's own id has failed.
+        if (primaryId == null && mozillaId == null) {
+            tryUniversalFallbackId(rootNode, packageName)?.let { candidates.add(it) }
+        }
+
         // Explicit Samsung Toolbar Search (bypasses event.packageName mismatch)
         if (packageName == "com.sec.android.app.sbrowser") {
             findUrlByResourceId(rootNode, "com.sec.android.app.sbrowser", "location_bar_edit_text")?.let { candidates.add(it) }
         }
-        
-        // Final fallback: Comprehensive Web/Indicators search
+
+        // Local tree scan. The per-indicator IPC searches this can also run are
+        // held back until everything above has come up empty.
         searchWebViewForUrls(rootNode).forEach { candidates.add(it) }
 
         // Samsung Specific: Aggressive layered toolbar scan
@@ -255,6 +262,10 @@ class BrowserUrlMonitor {
 
         findUrlFromWindowEvent(event)?.let { candidates.add(it) }
 
+        val resolved = finalizeCandidates(candidates)
+        if (resolved != null) return resolved
+
+        searchWebViewForUrls(rootNode, deep = true).forEach { candidates.add(it) }
         return finalizeCandidates(candidates)
     }
 
@@ -265,7 +276,16 @@ class BrowserUrlMonitor {
             "com.sec.android.app.sbrowser:id/location_bar",
             "com.sec.android.app.sbrowser:id/location_bar_edit_text",
             "com.sec.android.app.sbrowser:id/url_bar_parent",
-            "com.sec.android.app.sbrowser:id/url_bar_container"
+            "com.sec.android.app.sbrowser:id/url_bar_container",
+            // AMP/redirect indicator bar. Previously reached through the universal
+            // id sweep, which no longer runs once the configured id resolves.
+            "com.sec.android.app.sbrowser:id/pagehead_url",
+            "com.sec.android.app.sbrowser:id/amp_url",
+            "com.sec.android.app.sbrowser:id/original_url",
+            "com.sec.android.app.sbrowser:id/site_url",
+            "com.sec.android.app.sbrowser:id/page_url",
+            "com.sec.android.app.sbrowser:id/security_url",
+            "com.sec.android.app.sbrowser:id/url_info"
         )
         for (id in toolbarIds) {
             try {
@@ -323,14 +343,19 @@ class BrowserUrlMonitor {
     ): Set<String>? {
         val candidates = mutableSetOf<String>()
         
-        // 1. Try standard extraction on active root provided by the service
+        // 1. Try standard extraction on active root provided by the service.
+        // This is the window that holds the URL bar, and it contains the event
+        // source whenever the event came from the foreground window.
         extractUrlCandidates(event, activeRoot, targetPackageName)?.forEach { candidates.add(it) }
 
-        // 2. Try standard extraction on event source (often narrower but highly relevant)
-        val eventRoot = event.source
-        if (eventRoot != null && eventRoot != activeRoot) {
-            extractUrlCandidates(event, eventRoot, targetPackageName)?.forEach { candidates.add(it) }
-            eventRoot.recycle()
+        // 2. Only if that found nothing, retry on the event source, which is the
+        // narrower detached-toolbar / separate-window case.
+        if (candidates.isEmpty()) {
+            val eventRoot = event.source
+            if (eventRoot != null && eventRoot != activeRoot) {
+                extractUrlCandidates(event, eventRoot, targetPackageName)?.forEach { candidates.add(it) }
+                eventRoot.recycle()
+            }
         }
 
         // 2. If empty, scavenge ALL windows
@@ -342,7 +367,7 @@ class BrowserUrlMonitor {
                     
                     // Focus on windows belonging to the browser, or system/null windows that might host its UI
                     if (winPkg == targetPackageName || winPkg.isEmpty() || winPkg == "android") {
-                        searchWebViewForUrls(root).forEach { candidates.add(it) }
+                        searchWebViewForUrls(root, deep = true).forEach { candidates.add(it) }
                         
                         // Try direct resource ID on this root too
                         val config = browsers[targetPackageName]
@@ -389,7 +414,8 @@ class BrowserUrlMonitor {
      */
     fun searchWebViewForUrls(
         rootNode: AccessibilityNodeInfo?,
-        keywords: Set<String> = emptySet()
+        keywords: Set<String> = emptySet(),
+        deep: Boolean = false
     ): Set<String> {
         val found = mutableSetOf<String>()
         if (rootNode == null) return found
@@ -433,6 +459,10 @@ class BrowserUrlMonitor {
         
         // 2. Targeted IPC search (forces Samsung WebViews/Toolbars to reveal opaque text nodes)
         // This is critical because Samsung Internet does not populate child views until explicitly searched!
+        // Each indicator walks the whole remote hierarchy in the target app's
+        // process, so callers opt in only where nothing cheaper has worked.
+        if (!deep) return found
+
         val searchIndicators = ADULT_TLDS + listOf(
             "http", "www", ".com", ".net", ".org", ".co", ".io", ".me", ".cc", ".info", ".ly", ".gl", "://"
         ) + keywords.toList() // Search for custom keywords directly via IPC
@@ -502,19 +532,17 @@ class BrowserUrlMonitor {
     }
 
     /**
-     * Try common URL bar IDs that work across many Chromium-based browsers, returning all found.
+     * Try common URL bar IDs that work across many Chromium-based browsers,
+     * stopping at the first that yields usable text.
      */
-    private fun tryUniversalFallbackIdsAll(
+    private fun tryUniversalFallbackId(
         rootNode: AccessibilityNodeInfo?,
         packageName: String
-    ): List<String> {
-        val results = mutableListOf<String>()
-        if (rootNode == null) return results
-        for (id in UNIVERSAL_URL_BAR_FALLBACKS) {
-            val result = findUrlByResourceId(rootNode, packageName, id)
-            if (result != null) results.add(result)
+    ): String? {
+        if (rootNode == null) return null
+        return firstUrlBarMatch(UNIVERSAL_URL_BAR_FALLBACKS) { id ->
+            findUrlByResourceId(rootNode, packageName, id)
         }
-        return results
     }
 
     /**
@@ -817,7 +845,24 @@ class BrowserUrlMonitor {
         private const val TAG = "BrowserUrlMonitor"
         private const val PREFS_NAME = "freedom_browser_configs"
         private const val PREFS_KEY_BROWSERS = "browsers"
-        private const val MAX_SCAN_DEPTH = 150
+        // Matches the ceiling extractAllText already uses to capture every string
+        // on screen, WebView content included. Nothing in this file traverses
+        // deeper than that ceiling to find text it acts on.
+        private const val MAX_SCAN_DEPTH = 60
+
+        /**
+         * First id in [ids] whose [lookup] yields text. An id that is present but
+         * carries no usable text resolves to null in the lookup, so it does not
+         * stop the scan: a blank or focused-empty URL bar must not suppress the
+         * remaining fallbacks.
+         */
+        internal fun firstUrlBarMatch(ids: List<String>, lookup: (String) -> String?): String? {
+            for (id in ids) {
+                val text = lookup(id)
+                if (text != null) return text
+            }
+            return null
+        }
 
         // Firefox has changed URL bar IDs across versions
         private val FIREFOX_URL_BAR_FALLBACKS = listOf(
@@ -832,20 +877,28 @@ class BrowserUrlMonitor {
             ".xxx", ".porn", ".sex", ".adult", ".sexy"
         )
 
+        // The scan stops at the first id that yields text, so order matters.
+        // Leading entries are the ids real browser configs use (see
+        // mobile/constants/browsers.ts, counts in comments); then other explicitly
+        // URL-named ids; then generic container, search and edit ids last, since
+        // those can resolve to a view that holds something other than the URL.
         private val UNIVERSAL_URL_BAR_FALLBACKS = listOf(
-            "url_bar", "url_edit", "url_field", "url",
-            "address_bar", "location_bar_edit_text", "url_bar_text",
-            "omnibarTextInput", "url_bar_title", "url_text",
-            "address_bar_text", "search_entry", "url_view",
-            "search_box", "search_edit_text", "tv_url",
-            "search_edit", "search_button", "search_view",
-            "location_bar", "urlBar", "addressBar", "search_area",
-            "search_input", "url_input", "edit_text", "text_view",
-            "url_container", "address_container", "search_container",
-            "custom_tab_url", "privacy_bar", "url_anchor",
+            "url_bar", // 15 configured browsers
+            "location_bar_edit_text", // Samsung Internet
+            "url_field", // Opera, Opera Mini
+            "omnibarTextInput", // DuckDuckGo
+            "address_bar", // Puffin
+            "url_bar_title", // known Firefox URL bar id
+            "url_bar_text", "url_edit", "url_view", "url_text", "url_input",
+            "address_bar_text", "urlBar", "addressBar", "location_bar", "url",
+            "custom_tab_url", "tv_url", "url_anchor", "privacy_bar",
             // Samsung Internet AMP/redirect indicator bar IDs
             "pagehead_url", "amp_url", "original_url", "site_url",
-            "header_text", "page_url", "security_url", "url_info"
+            "page_url", "security_url", "url_info", "header_text",
+            "url_container", "address_container", "search_container",
+            "search_entry", "search_box", "search_edit_text", "search_edit",
+            "search_view", "search_area", "search_input", "search_button",
+            "edit_text", "text_view"
         )
     }
 }

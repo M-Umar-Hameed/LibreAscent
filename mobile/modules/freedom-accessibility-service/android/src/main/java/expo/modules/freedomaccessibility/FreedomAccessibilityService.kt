@@ -52,6 +52,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     private var consecutiveBlockCount = 0
     private var lastCheckUrl: String = ""
     private var blockCooldownUntil: Long = 0
+    private var lastFullScanAt: Long = 0
     // Remember the last whitelisted domain per browser, so text-only events still get context
     private var lastWhitelistedDomain: String? = null
     private var lastWhitelistedPackage: String? = null
@@ -100,6 +101,12 @@ class FreedomAccessibilityService : AccessibilityService() {
         // safe because content-changed events are never unsubscribed, so the next
         // WebView event re-arms the hold before anything can be scanned without it.
         private const val WEBVIEW_HOLD_MS = 5000L
+        // The full-screen text pass reads every node of every browser window and
+        // is the only caller that runs the per-indicator node searches, so it is
+        // rate limited rather than run on each of up to ten events per second.
+        // The ceiling it trades for that is up to this much delay before an
+        // AMP/proxy page is recognised.
+        private const val FULL_SCAN_MIN_INTERVAL_MS = 750L
 
         // Built-in keywords for NSFW app scanning (Reddit, Twitter labels)
         private val NSFW_BUILTIN_KEYWORDS = listOf(
@@ -543,9 +550,17 @@ class FreedomAccessibilityService : AccessibilityService() {
         // Secondary fallback for Chrome/Samsung Internet hidden URLs or AMP masks
         // If current URL bar just says "google.com", we scan the entire visible screen
         // as a large string blob and check for any blocked domains or keywords.
-        if (blockedResult == null && searchWebViews && rootNode != null) {
+        if (blockedResult == null && searchWebViews && rootNode != null &&
+            now - lastFullScanAt >= FULL_SCAN_MIN_INTERVAL_MS) {
+            lastFullScanAt = now
             val sb = StringBuilder()
             sb.append(browserMonitor.extractAllText(rootNode))
+
+            // Samsung Internet leaves WebView children unpopulated until an
+            // explicit node text search forces them, so that search runs here and
+            // nowhere else on the browser path.
+            browserMonitor.searchWebViewForUrls(rootNode, deep = true)
+                .forEach { sb.append(' ').append(it) }
 
             try {
                 for (window in windows) {
@@ -575,8 +590,9 @@ class FreedomAccessibilityService : AccessibilityService() {
 
                 // 2. Regex Scan: Find everything that looks like a domain in the blob
                 if (blockedResult == null) {
+                    val lowerText = fullText.lowercase()
                     // PASS A: Standard matching
-                    var matches = FALLBACK_DOMAIN_PATTERN.findAll(fullText.lowercase())
+                    var matches = FALLBACK_DOMAIN_PATTERN.findAll(lowerText)
                     for (match in matches) {
                         val word = match.value
                         if (word.length > 5) {
@@ -592,7 +608,7 @@ class FreedomAccessibilityService : AccessibilityService() {
 
                     // PASS B: Compact matching (catch "y o u t u b e . c o m")
                     if (blockedResult == null) {
-                        val compactText = fullText.replace(" ", "").lowercase()
+                        val compactText = lowerText.replace(" ", "")
                         matches = FALLBACK_DOMAIN_PATTERN.findAll(compactText)
                         for (match in matches) {
                             val word = match.value

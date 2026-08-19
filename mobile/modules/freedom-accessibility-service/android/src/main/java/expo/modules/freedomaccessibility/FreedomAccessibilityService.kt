@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -113,6 +114,16 @@ class FreedomAccessibilityService : AccessibilityService() {
         @Volatile
         var isRunning: Boolean = false
             private set
+
+        // ponytail: single-entry background cache, process-scoped so it survives
+        // the service being disabled and re-enabled (banking mode). The theme
+        // holds exactly one image; add an LruCache only if that changes.
+        @Volatile
+        private var cachedBackground: Bitmap? = null
+        @Volatile
+        private var cachedBackgroundPath: String = ""
+        @Volatile
+        private var backgroundDecodeInFlight = false
 
         // Shared instances for config updates from the Module
         var sharedBrowserMonitor: BrowserUrlMonitor? = null
@@ -808,33 +819,7 @@ class FreedomAccessibilityService : AccessibilityService() {
 
                 // Background image + scrim
                 if (customImagePath.isNotEmpty()) {
-                    try {
-                        val uri = Uri.parse(customImagePath)
-                        val stream = contentResolver.openInputStream(uri)
-                        val bitmap = BitmapFactory.decodeStream(stream)
-                        stream?.close()
-                        if (bitmap != null) {
-                            val bgImage = ImageView(this).apply {
-                                setImageBitmap(bitmap)
-                                scaleType = ImageView.ScaleType.CENTER_CROP
-                                layoutParams = FrameLayout.LayoutParams(
-                                    FrameLayout.LayoutParams.MATCH_PARENT,
-                                    FrameLayout.LayoutParams.MATCH_PARENT
-                                )
-                            }
-                            container.addView(bgImage)
-                            val scrim = android.view.View(this).apply {
-                                setBackgroundColor(Color.parseColor("#66000000"))
-                                layoutParams = FrameLayout.LayoutParams(
-                                    FrameLayout.LayoutParams.MATCH_PARENT,
-                                    FrameLayout.LayoutParams.MATCH_PARENT
-                                )
-                            }
-                            container.addView(scrim)
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to load overlay background: ${e.message}")
-                    }
+                    addBackgroundImage(container, customImagePath)
                 }
 
                 val layout = LinearLayout(this).apply {
@@ -1069,6 +1054,86 @@ class FreedomAccessibilityService : AccessibilityService() {
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to show instant overlay: ${e.message}")
             }
+        }
+    }
+
+    /**
+     * Attach the theme background image and its scrim. A cached bitmap is
+     * applied immediately; otherwise the decode runs off the main thread and
+     * the views are inserted underneath the message when it lands. The overlay
+     * itself never waits on the image — it is already opaque without it.
+     */
+    private fun addBackgroundImage(container: FrameLayout, path: String) {
+        val bgImage = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        val scrim = android.view.View(this).apply {
+            setBackgroundColor(Color.parseColor("#66000000"))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val cached = if (cachedBackgroundPath == path) cachedBackground else null
+        if (cached != null) {
+            bgImage.setImageBitmap(cached)
+            container.addView(bgImage)
+            container.addView(scrim)
+            return
+        }
+
+        if (backgroundDecodeInFlight) return
+        backgroundDecodeInFlight = true
+
+        val metrics = resources.displayMetrics
+        val reqWidth = metrics.widthPixels
+        val reqHeight = metrics.heightPixels
+
+        Thread {
+            val bitmap = try {
+                decodeSampledBackground(path, reqWidth, reqHeight)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to load overlay background: ${e.message}")
+                null
+            }
+            handler.post {
+                backgroundDecodeInFlight = false
+                if (bitmap == null) return@post
+                cachedBackground = bitmap
+                cachedBackgroundPath = path
+                if (container.parent == null) return@post
+                bgImage.setImageBitmap(bitmap)
+                container.addView(bgImage, 0)
+                container.addView(scrim, 1)
+            }
+        }.start()
+    }
+
+    /**
+     * Decode the background at no more resolution than the screen needs.
+     */
+    private fun decodeSampledBackground(path: String, reqWidth: Int, reqHeight: Int): Bitmap? {
+        val uri = Uri.parse(path)
+
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        var sampleSize = 1
+        while (bounds.outWidth / (sampleSize * 2) >= reqWidth &&
+            bounds.outHeight / (sampleSize * 2) >= reqHeight
+        ) {
+            sampleSize *= 2
+        }
+
+        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        return contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, options)
         }
     }
 

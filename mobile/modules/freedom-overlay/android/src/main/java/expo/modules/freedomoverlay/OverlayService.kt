@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PixelFormat
@@ -42,7 +43,9 @@ class OverlayService : Service() {
     private var isOverlayShowing = false
     private var currentMessage: String = "This content is blocked"
     private var lastShowTime: Long = 0
+    private var lastStartId = 0
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val hideRunnable = Runnable { hideOverlayNow() }
 
     private var urlBlockedReceiver: BroadcastReceiver? = null
     private var reelsDetectedReceiver: BroadcastReceiver? = null
@@ -57,6 +60,16 @@ class OverlayService : Service() {
         @Volatile
         var isShowing: Boolean = false
             private set
+
+        // ponytail: single-entry background cache, process-scoped so it survives
+        // the service stopping between blocks. The theme holds exactly one image,
+        // so an LruCache would be dead weight; add one if themes gain more.
+        @Volatile
+        private var cachedBackground: Bitmap? = null
+        @Volatile
+        private var cachedBackgroundPath: String = ""
+        @Volatile
+        private var backgroundDecodeInFlight = false
     }
 
     override fun onCreate() {
@@ -66,6 +79,7 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
         val action = intent?.action
 
         when (action) {
@@ -90,6 +104,9 @@ class OverlayService : Service() {
      * Show the full-screen overlay.
      */
     private fun showOverlay(message: String?) {
+        // A queued hide from an earlier block must not tear down this one.
+        handler.removeCallbacks(hideRunnable)
+
         if (isOverlayShowing) {
             // Update message if overlay is already showing
             if (message != null) {
@@ -121,12 +138,16 @@ class OverlayService : Service() {
      * isn't immediately dismissed by app-switch events caused by our own blocking.
      */
     private fun hideOverlay() {
-        if (!isOverlayShowing) return
+        if (!isOverlayShowing) {
+            stopSelf(lastStartId)
+            return
+        }
 
         val elapsed = System.currentTimeMillis() - lastShowTime
         if (elapsed < MIN_DISPLAY_MS) {
             // Defer the hide until minimum time has passed
-            handler.postDelayed({ hideOverlayNow() }, MIN_DISPLAY_MS - elapsed)
+            handler.removeCallbacks(hideRunnable)
+            handler.postDelayed(hideRunnable, MIN_DISPLAY_MS - elapsed)
             Log.d(TAG, "Deferring overlay hide for ${MIN_DISPLAY_MS - elapsed}ms")
             return
         }
@@ -136,6 +157,15 @@ class OverlayService : Service() {
 
     private fun hideOverlayNow() {
         if (!isOverlayShowing) return
+        detachOverlayView()
+        // The window is down and the hide runnable is cancelled, so no work is
+        // pending. A start that arrives after this keeps the service alive
+        // because stopSelf only takes effect for the most recent start id.
+        stopSelf(lastStartId)
+    }
+
+    private fun detachOverlayView() {
+        handler.removeCallbacks(hideRunnable)
 
         try {
             overlayView?.let { windowManager?.removeView(it) }
@@ -223,34 +253,7 @@ class OverlayService : Service() {
 
         // Background image + scrim
         if (customImagePath.isNotEmpty()) {
-            try {
-                val uri = Uri.parse(customImagePath)
-                val stream = contentResolver.openInputStream(uri)
-                val bitmap = BitmapFactory.decodeStream(stream)
-                stream?.close()
-                if (bitmap != null) {
-                    val bgImage = ImageView(this).apply {
-                        setImageBitmap(bitmap)
-                        scaleType = ImageView.ScaleType.CENTER_CROP
-                        layoutParams = FrameLayout.LayoutParams(
-                            FrameLayout.LayoutParams.MATCH_PARENT,
-                            FrameLayout.LayoutParams.MATCH_PARENT
-                        )
-                    }
-                    container.addView(bgImage)
-                    // 40% dark scrim over the image
-                    val scrim = android.view.View(this).apply {
-                        setBackgroundColor(Color.parseColor("#66000000"))
-                        layoutParams = FrameLayout.LayoutParams(
-                            FrameLayout.LayoutParams.MATCH_PARENT,
-                            FrameLayout.LayoutParams.MATCH_PARENT
-                        )
-                    }
-                    container.addView(scrim)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to load overlay background image: ${e.message}")
-            }
+            addBackgroundImage(container, customImagePath)
         }
 
         val content = LinearLayout(this).apply {
@@ -395,6 +398,87 @@ class OverlayService : Service() {
     }
 
     /**
+     * Attach the theme background image and its scrim. A cached bitmap is
+     * applied immediately; otherwise the decode runs off the main thread and
+     * the views are inserted underneath the message when it lands. The overlay
+     * itself never waits on the image — it is already opaque without it.
+     */
+    private fun addBackgroundImage(container: FrameLayout, path: String) {
+        val bgImage = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        // 40% dark scrim over the image
+        val scrim = android.view.View(this).apply {
+            setBackgroundColor(Color.parseColor("#66000000"))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val cached = if (cachedBackgroundPath == path) cachedBackground else null
+        if (cached != null) {
+            bgImage.setImageBitmap(cached)
+            container.addView(bgImage)
+            container.addView(scrim)
+            return
+        }
+
+        if (backgroundDecodeInFlight) return
+        backgroundDecodeInFlight = true
+
+        val metrics = resources.displayMetrics
+        val reqWidth = metrics.widthPixels
+        val reqHeight = metrics.heightPixels
+
+        Thread {
+            val bitmap = try {
+                decodeSampledBackground(path, reqWidth, reqHeight)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to load overlay background image: ${e.message}")
+                null
+            }
+            handler.post {
+                backgroundDecodeInFlight = false
+                if (bitmap == null) return@post
+                cachedBackground = bitmap
+                cachedBackgroundPath = path
+                if (container.parent == null) return@post
+                bgImage.setImageBitmap(bitmap)
+                container.addView(bgImage, 0)
+                container.addView(scrim, 1)
+            }
+        }.start()
+    }
+
+    /**
+     * Decode the background at no more resolution than the screen needs.
+     */
+    private fun decodeSampledBackground(path: String, reqWidth: Int, reqHeight: Int): Bitmap? {
+        val uri = Uri.parse(path)
+
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        var sampleSize = 1
+        while (bounds.outWidth / (sampleSize * 2) >= reqWidth &&
+            bounds.outHeight / (sampleSize * 2) >= reqHeight
+        ) {
+            sampleSize *= 2
+        }
+
+        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        return contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, options)
+        }
+    }
+
+    /**
      * Register receivers to auto-show overlay when blocking events arrive.
      */
     private fun registerBlockingReceivers() {
@@ -452,7 +536,10 @@ class OverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        hideOverlay()
+        // Detach directly: a deferred hide here would outlive the service and
+        // strand the window on the WindowManager.
+        handler.removeCallbacks(hideRunnable)
+        if (isOverlayShowing) detachOverlayView()
         unregisterBlockingReceivers()
         super.onDestroy()
     }

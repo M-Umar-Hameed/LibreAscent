@@ -58,9 +58,10 @@ class FreedomAccessibilityService : AccessibilityService() {
     // so it runs on scope transitions only, never per event.
     private var deepInspectionEnabled = false
     private var scopeDowngradePending = false
-    // App that was seen hosting an in-app/detached WebView. Such packages cannot
-    // be known in advance, so the WebView's own events are the only signal.
-    private var webviewHostPackage: String? = null
+    // When an in-app/detached WebView last announced itself. Such packages cannot
+    // be known in advance, so the WebView's own events are the only signal, and a
+    // timestamp cannot be pointed at the wrong package by a transient window.
+    private var webviewSeenAt: Long = 0
 
     companion object {
         private const val TAG = "FreedomA11y"
@@ -92,6 +93,12 @@ class FreedomAccessibilityService : AccessibilityService() {
         // Flags take effect asynchronously, so the event that triggered an
         // upgrade is handled without them. Re-run the tamper check once they land.
         private const val SCOPE_REPROBE_DELAY_MS = 400L
+        // How long a sighting of an in-app WebView holds the deep scope. Long
+        // enough to ride out a keyboard or shade round trip and a reading pause;
+        // short enough that a closed WebView stops costing anything. Expiry is
+        // safe because content-changed events are never unsubscribed, so the next
+        // WebView event re-arms the hold before anything can be scanned without it.
+        private const val WEBVIEW_HOLD_MS = 5000L
 
         // Built-in keywords for NSFW app scanning (Reddit, Twitter labels)
         private val NSFW_BUILTIN_KEYWORDS = listOf(
@@ -248,11 +255,11 @@ class FreedomAccessibilityService : AccessibilityService() {
      * scope rather than dropping coverage on a guess.
      */
     private fun resolveForegroundScope(): Boolean {
+        if (android.os.SystemClock.uptimeMillis() - webviewSeenAt < WEBVIEW_HOLD_MS) return true
         val root = rootInActiveWindow ?: return deepInspectionEnabled
         val pkg = root.packageName?.toString()
         root.recycle()
         if (pkg.isNullOrEmpty() || pkg == applicationContext.packageName) return deepInspectionEnabled
-        if (pkg == webviewHostPackage) return true
         return needsDeepInspection(pkg)
     }
 
@@ -331,7 +338,6 @@ class FreedomAccessibilityService : AccessibilityService() {
                 }
                 reelsDetector.resetState(packageName)
                 currentPackage = packageName
-                webviewHostPackage = null
                 lastCheckUrl = ""
                 lastUrlCheckTime = 0
                 consecutiveBlockCount = 0
@@ -351,8 +357,8 @@ class FreedomAccessibilityService : AccessibilityService() {
         if (isDetachedWebview) {
             // An in-app WebView in an otherwise unmonitored app is only ever
             // announced by its own events, so upgrade on sight and hold the scope
-            // for as long as the hosting app stays foreground.
-            webviewHostPackage = if (currentPackage.isNotEmpty()) currentPackage else packageName
+            // for a while after the last sighting.
+            webviewSeenAt = android.os.SystemClock.uptimeMillis()
             updateEventScope(true)
         }
 

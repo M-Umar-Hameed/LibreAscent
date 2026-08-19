@@ -61,7 +61,12 @@ interface FreedomAccessibilityModuleInterface {
     { name: string; packageName: string; icon?: string }[]
   >;
   hasWriteSecureSettings(): Promise<boolean>;
-  getBankingState(): Promise<{ active: boolean; remainingMs: number }>;
+  getBankingState(): Promise<{
+    active: boolean;
+    remainingMs: number;
+    cooldownRemainingMs: number;
+    attemptsRemaining: number;
+  }>;
   startBankingMode(): Promise<void>;
   endBankingMode(): Promise<void>;
   enforceBankingExpiry(): Promise<void>;
@@ -261,8 +266,16 @@ export async function hasWriteSecureSettings(): Promise<boolean> {
 export async function getBankingState(): Promise<{
   active: boolean;
   remainingMs: number;
+  cooldownRemainingMs: number;
+  attemptsRemaining: number;
 }> {
-  if (!FreedomAccessibilityNative) return { active: false, remainingMs: 0 };
+  if (!FreedomAccessibilityNative)
+    return {
+      active: false,
+      remainingMs: 0,
+      cooldownRemainingMs: 0,
+      attemptsRemaining: 3,
+    };
   return FreedomAccessibilityNative.getBankingState();
 }
 

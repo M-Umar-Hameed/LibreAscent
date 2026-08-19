@@ -364,6 +364,12 @@ export const useBlockingStore = create<BlockingState>()(
     {
       name: "freedom-blocking-store",
       storage: createJSONStorage(() => sqliteStorage),
+      // sources is force-reset to DEFAULT_SOURCES below on every rehydrate —
+      // persisting it would be pure waste.
+      partialize: (state) => {
+        const { sources: _sources, ...persisted } = state;
+        return persisted;
+      },
       onRehydrateStorage: () => (state) => {
         if (state) {
           // Force-reset sources to exactly DEFAULT_SOURCES on every launch.

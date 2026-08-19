@@ -10,6 +10,7 @@ import {
 } from "@/stores/useBlockingStore";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import { Ionicons } from "@expo/vector-icons";
+import { useFocusEffect } from "@react-navigation/native";
 import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
@@ -19,7 +20,7 @@ import * as LocalAuthentication from "expo-local-authentication";
 import { useRouter } from "expo-router";
 import * as Sharing from "expo-sharing";
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -76,31 +77,30 @@ export default function SettingsScreen(): ReactNode {
   const [bankingCooldownMs, setBankingCooldownMs] = useState(0);
   const [bankingAttemptsRemaining, setBankingAttemptsRemaining] = useState(3);
 
-  useEffect(() => {
-    let mounted = true;
-    const poll = async (): Promise<void> => {
-      try {
-        const [state, perm] = await Promise.all([
-          FreedomAccessibility.getBankingState(),
-          FreedomAccessibility.hasWriteSecureSettings(),
-        ]);
-        if (!mounted) return;
-        setBankingActive(state.active);
-        setBankingRemainingMs(state.remainingMs);
-        setBankingCooldownMs(state.cooldownRemainingMs);
-        setBankingAttemptsRemaining(state.attemptsRemaining);
-        setBankingHasPermission(perm);
-      } catch {
-        /* ignore */
-      }
-    };
-    void poll();
-    const interval = setInterval(() => void poll(), 1000);
-    return () => {
-      mounted = false;
-      clearInterval(interval);
-    };
-  }, []);
+  useFocusEffect(
+    useCallback(() => {
+      const poll = async (): Promise<void> => {
+        try {
+          const [state, perm] = await Promise.all([
+            FreedomAccessibility.getBankingState(),
+            FreedomAccessibility.hasWriteSecureSettings(),
+          ]);
+          setBankingActive(state.active);
+          setBankingRemainingMs(state.remainingMs);
+          setBankingCooldownMs(state.cooldownRemainingMs);
+          setBankingAttemptsRemaining(state.attemptsRemaining);
+          setBankingHasPermission(perm);
+        } catch {
+          /* ignore */
+        }
+      };
+      void poll();
+      const interval = setInterval(() => void poll(), 2000);
+      return () => {
+        clearInterval(interval);
+      };
+    }, []),
+  );
 
   const handleBankingToggle = async (enable: boolean): Promise<void> => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -463,7 +463,10 @@ export default function SettingsScreen(): ReactNode {
               </View>
               <Switch
                 value={bankingActive}
-                disabled={!bankingHasPermission || (!bankingActive && bankingCooldownMs > 0)}
+                disabled={
+                  !bankingHasPermission ||
+                  (!bankingActive && bankingCooldownMs > 0)
+                }
                 onValueChange={(v) => void handleBankingToggle(v)}
                 trackColor={{ false: "#ccc", true: t.accentColor }}
                 thumbColor={bankingActive ? "#fff" : "#999"}

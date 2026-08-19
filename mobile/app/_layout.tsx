@@ -1,5 +1,6 @@
 import { AppLockScreen } from "@/components/AppLockScreen";
 import { APP_THEMES } from "@/constants/overlay-themes";
+import { checkpointWal, flushBlockedStats } from "@/db/database";
 import { AppThemeProvider } from "@/providers/ThemeProvider";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import { LaunchRecoveryService } from "@/services/LaunchRecoveryService";
@@ -201,12 +202,18 @@ export default function RootLayout(): ReactNode {
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         void ProtectionService.refreshProtectionStatus().catch(console.warn);
+      } else if (nextState === "background") {
+        flushBlockedStats();
+        checkpointWal();
       }
     });
     void ProtectionService.refreshProtectionStatus().catch(console.warn);
 
+    const flushInterval = setInterval(flushBlockedStats, 30000);
+
     return () => {
       subscription.remove();
+      clearInterval(flushInterval);
     };
   }, [isMounted, storesHydrated, isOnboarded]);
 

@@ -45,6 +45,9 @@ export const InteractionGuard: React.FC<InteractionGuardProps> = ({
           return prev - 1;
         });
       }, 1000);
+      return () => {
+        clearInterval(timer);
+      };
     }
   }, [visible, surveillance]);
 

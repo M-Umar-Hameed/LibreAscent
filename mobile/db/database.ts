@@ -1,4 +1,5 @@
 import * as SQLite from "expo-sqlite";
+import { drainPending } from "./blockedCountAccumulator";
 
 // Create or open the database.
 // To use synchronous database calls (which are often easier for simple React Native state),
@@ -10,9 +11,8 @@ const db = SQLite.openDatabaseSync("freedom.db");
  */
 export function initDB(): void {
   db.execSync(`
-    -- We are removing WAL mode because it can sometimes leave uncheckpointed
-    -- writes in the -wal file if the app is force closed in dev mode.
-    PRAGMA journal_mode = DELETE;
+    -- WAL mode; checkpointed via wal_checkpoint(TRUNCATE) on AppState background.
+    PRAGMA journal_mode = WAL;
 
     -- Table for tracking daily blocking statistics
     CREATE TABLE IF NOT EXISTS stats (
@@ -20,12 +20,8 @@ export function initDB(): void {
       blocked_count INTEGER DEFAULT 0
     );
 
-    -- Table for keeping a history of individually blocked URLs
-    CREATE TABLE IF NOT EXISTS blocked_urls (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      url TEXT NOT NULL,
-      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
+    -- Dead weight from the old per-URL history table; reclaim existing installs.
+    DROP TABLE IF EXISTS blocked_urls;
 
     -- Table for simple key-value persistence (e.g. Zustand stores)
     CREATE TABLE IF NOT EXISTS kv_store (
@@ -51,7 +47,14 @@ export function initDB(): void {
       ON cached_domains(source_id);
     CREATE INDEX IF NOT EXISTS idx_cached_domains_category
       ON cached_domains(category_id);
+    CREATE INDEX IF NOT EXISTS idx_cached_domains_cat_domain
+      ON cached_domains(category_id, domain);
   `);
+}
+
+/** Checkpoints the WAL file back into the main db file. Call on AppState background. */
+export function checkpointWal(): void {
+  db.execSync("PRAGMA wal_checkpoint(TRUNCATE);");
 }
 
 // Ensure the tables are created immediately upon module load
@@ -97,16 +100,56 @@ export const sqliteStorage = {
   },
 };
 
+let pendingAppStoreWrite: { key: string; value: string } | null = null;
+
 /**
- * Increment the blocked count for the current day.
+ * Storage adapter for useAppStore's persist middleware. Queues the write
+ * in memory instead of committing it on every set() — commit happens via
+ * flushBlockedStats() on the flush interval / AppState background.
  */
-export function incrementDailyBlockedCount(): void {
-  const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
-  db.runSync(
-    `INSERT INTO stats (date, blocked_count) VALUES (?, 1)
-     ON CONFLICT(date) DO UPDATE SET blocked_count = blocked_count + 1;`,
-    today,
-  );
+export const batchedAppStoreStorage = {
+  getItem: sqliteStorage.getItem,
+  setItem: (name: string, value: string): void => {
+    pendingAppStoreWrite = { key: name, value };
+  },
+  removeItem: sqliteStorage.removeItem,
+};
+
+export { incrementPending as accumulateBlockedCount } from "./blockedCountAccumulator";
+
+/**
+ * Commits the pending blocked count and any queued app-store write in a
+ * single transaction. Call on the flush interval and on AppState background.
+ */
+export function flushBlockedStats(): void {
+  const count = drainPending();
+  if (count === 0 && !pendingAppStoreWrite) return;
+
+  db.execSync("BEGIN TRANSACTION");
+  try {
+    if (count > 0) {
+      const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+      db.runSync(
+        `INSERT INTO stats (date, blocked_count) VALUES (?, ?)
+         ON CONFLICT(date) DO UPDATE SET blocked_count = blocked_count + ?;`,
+        today,
+        count,
+        count,
+      );
+    }
+    if (pendingAppStoreWrite) {
+      db.runSync(
+        `INSERT INTO kv_store (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;`,
+        pendingAppStoreWrite.key,
+        pendingAppStoreWrite.value,
+      );
+      pendingAppStoreWrite = null;
+    }
+    db.execSync("COMMIT");
+  } catch (e) {
+    db.execSync("ROLLBACK");
+    throw e;
+  }
 }
 
 /**
@@ -129,23 +172,6 @@ export function getTodayBlockedCount(): number {
     today,
   );
   return result?.blocked_count || 0;
-}
-
-/**
- * Record a specifically blocked URL.
- */
-export function logBlockedUrl(url: string, timestamp?: number): void {
-  // If timestamp is provided, convert to ISO string. Otherwise DB uses CURRENT_TIMESTAMP.
-  if (timestamp) {
-    const isoString = new Date(timestamp).toISOString();
-    db.runSync(
-      `INSERT INTO blocked_urls (url, timestamp) VALUES (?, ?);`,
-      url,
-      isoString,
-    );
-  } else {
-    db.runSync(`INSERT INTO blocked_urls (url) VALUES (?);`, url);
-  }
 }
 
 // ---------------------------------------------------------------------------

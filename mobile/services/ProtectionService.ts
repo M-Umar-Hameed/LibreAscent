@@ -2,7 +2,7 @@ import { BROWSERS } from "@/constants/browsers";
 import { NSFW_APPS } from "@/constants/nsfw-apps";
 import { REELS_APPS } from "@/constants/reels";
 import { getResolvedTheme } from "@/constants/overlay-themes";
-import { incrementDailyBlockedCount, logBlockedUrl } from "@/db/database";
+import { accumulateBlockedCount } from "@/db/database";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import * as FreedomForeground from "@/modules/freedom-foreground-service/src";
 import * as FreedomOverlay from "@/modules/freedom-overlay/src";
@@ -118,35 +118,37 @@ export const ProtectionService = {
     return new Promise((resolve) => {
       ProtectionService._pendingResolve = resolve;
       ProtectionService._syncTimeout = setTimeout(() => {
-        ProtectionService._syncChain = ProtectionService._syncChain.then(async () => {
-          try {
-            const state = useBlockingStore.getState();
+        ProtectionService._syncChain = ProtectionService._syncChain.then(
+          async () => {
+            try {
+              const state = useBlockingStore.getState();
 
-            // 1. INSTANT: Sync master flag + per-category enabled flags (no domain transfer)
-            await BlocklistService.syncCategoryFlagsToNative();
+              // 1. INSTANT: Sync master flag + per-category enabled flags (no domain transfer)
+              await BlocklistService.syncCategoryFlagsToNative();
 
-            // 2. Check what changed — avoid resending 100k+ category domains on every URL add
-            const activeIncluded = getActiveIncludedUrls();
-            const activeExcluded = getActiveExcludedUrls();
+              // 2. Check what changed — avoid resending 100k+ category domains on every URL add
+              const activeIncluded = getActiveIncludedUrls();
+              const activeExcluded = getActiveExcludedUrls();
 
-            const currentUrlContent = JSON.stringify({
-              included: activeIncluded,
-              excluded: activeExcluded,
-            });
-            const currentCategoryContent = JSON.stringify(
-              state.categories.map((c: BlockingCategory) => ({
-                id: c.id,
-                domainCount:
-                  state.categoryDomainCounts[c.id] ?? c.domains.length,
-              })),
-            );
+              const currentUrlContent = JSON.stringify({
+                included: activeIncluded,
+                excluded: activeExcluded,
+              });
+              const currentCategoryContent = JSON.stringify(
+                state.categories.map((c: BlockingCategory) => ({
+                  id: c.id,
+                  domainCount:
+                    state.categoryDomainCounts[c.id] ?? c.domains.length,
+                })),
+              );
 
-            const urlsChanged =
-              currentUrlContent !== ProtectionService._lastUrlContent;
-            const categoriesChanged =
-              currentCategoryContent !== ProtectionService._lastCategoryContent;
+              const urlsChanged =
+                currentUrlContent !== ProtectionService._lastUrlContent;
+              const categoriesChanged =
+                currentCategoryContent !==
+                ProtectionService._lastCategoryContent;
 
-            if (categoriesChanged && !options?.skipResync) {
+              if (categoriesChanged && !options?.skipResync) {
                 // Full domain sync — categories changed (after updateBlocklists)
                 await BlocklistService.syncDomainsToNative({
                   skipResync: false,
@@ -162,55 +164,56 @@ export const ProtectionService = {
                 ProtectionService._lastUrlContent = currentUrlContent;
               }
 
-            // 3. Sync other parts in parallel
-            const appState = useAppStore.getState();
-            const activeTheme =
-              appState.appThemeId === "custom" && appState.customTheme
-                ? {
-                    ...appState.customTheme,
-                    customImagePath: appState.overlayCustomImage ?? null,
-                  }
-                : getResolvedTheme(
-                    appState.appThemeId,
-                    appState.overlayCustomImage,
-                  );
-            const themeJson = JSON.stringify({
-              ...activeTheme,
-              ...appState.overlayTexts,
-            });
+              // 3. Sync other parts in parallel
+              const appState = useAppStore.getState();
+              const activeTheme =
+                appState.appThemeId === "custom" && appState.customTheme
+                  ? {
+                      ...appState.customTheme,
+                      customImagePath: appState.overlayCustomImage ?? null,
+                    }
+                  : getResolvedTheme(
+                      appState.appThemeId,
+                      appState.overlayCustomImage,
+                    );
+              const themeJson = JSON.stringify({
+                ...activeTheme,
+                ...appState.overlayTexts,
+              });
 
-            await Promise.all([
-              ProtectionService.syncBrowserConfigs(),
-              ProtectionService.syncReelsConfigs(),
-              ProtectionService.syncNsfwApps(),
-              BlocklistService.syncKeywordsToNative(),
-              BlocklistService.syncAppsToNative(),
-              FreedomAccessibility.updateOverlayTheme(themeJson),
-              FreedomOverlay.updateOverlayTheme(themeJson),
-            ]);
+              await Promise.all([
+                ProtectionService.syncBrowserConfigs(),
+                ProtectionService.syncReelsConfigs(),
+                ProtectionService.syncNsfwApps(),
+                BlocklistService.syncKeywordsToNative(),
+                BlocklistService.syncAppsToNative(),
+                FreedomAccessibility.updateOverlayTheme(themeJson),
+                FreedomOverlay.updateOverlayTheme(themeJson),
+              ]);
 
-            const controlMode = appState.controlMode;
-            await FreedomAccessibility.updateHardcoreMode(
-              controlMode === "hardcore",
-            );
-            // eslint-disable-next-line no-console
-            console.log("[ProtectionService] Synced configs", {
-              includedUrls: activeIncluded.length,
-              excludedUrls: activeExcluded.length,
-              blockedApps: state.blockedApps.filter((app) => app.enabled)
-                .length,
-              keywords: state.keywords.length,
-              reelsApps: state.enabledReelsApps.length,
-              nsfwApps: state.enabledNsfwApps.length,
-              skippedCategoryDomainResync: Boolean(options?.skipResync),
-            });
-          } catch (e) {
-            console.error("[ProtectionService] Sync failed:", e);
-          } finally {
-            ProtectionService._pendingResolve = null;
-            resolve();
-          }
-        });
+              const controlMode = appState.controlMode;
+              await FreedomAccessibility.updateHardcoreMode(
+                controlMode === "hardcore",
+              );
+              // eslint-disable-next-line no-console
+              console.log("[ProtectionService] Synced configs", {
+                includedUrls: activeIncluded.length,
+                excludedUrls: activeExcluded.length,
+                blockedApps: state.blockedApps.filter((app) => app.enabled)
+                  .length,
+                keywords: state.keywords.length,
+                reelsApps: state.enabledReelsApps.length,
+                nsfwApps: state.enabledNsfwApps.length,
+                skippedCategoryDomainResync: Boolean(options?.skipResync),
+              });
+            } catch (e) {
+              console.error("[ProtectionService] Sync failed:", e);
+            } finally {
+              ProtectionService._pendingResolve = null;
+              resolve();
+            }
+          },
+        );
       }, 300); // 300ms debounce
     });
   },
@@ -271,8 +274,7 @@ export const ProtectionService = {
     listener: (event: { domain: string; timestamp: number }) => void,
   ): { remove: () => void } => {
     return FreedomVpn.onDomainBlocked((event) => {
-      logBlockedUrl(event.domain, event.timestamp);
-      incrementDailyBlockedCount();
+      accumulateBlockedCount();
       useAppStore.getState().incrementBlocked();
       listener(event);
     });
@@ -291,8 +293,7 @@ export const ProtectionService = {
     }) => void,
   ): { remove: () => void } => {
     return FreedomAccessibility.onUrlBlocked((event) => {
-      logBlockedUrl(event.url, event.timestamp);
-      incrementDailyBlockedCount();
+      accumulateBlockedCount();
       useAppStore.getState().incrementBlocked();
       listener(event);
     });

@@ -1,7 +1,7 @@
 import {
+  batchedAppStoreStorage,
   getTodayBlockedCount,
   getTotalBlockedCount,
-  sqliteStorage,
 } from "@/db/database";
 import type { AppTheme } from "@/constants/overlay-themes";
 import type {
@@ -155,7 +155,13 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: "freedom-app-store",
-      storage: createJSONStorage(() => sqliteStorage),
+      storage: createJSONStorage(() => batchedAppStoreStorage),
+      // protection is runtime status, always reset below on every rehydrate —
+      // persisting it would be pure waste.
+      partialize: (state) => {
+        const { protection: _protection, ...persisted } = state;
+        return persisted;
+      },
       onRehydrateStorage: () => (state) => {
         state?.setProtection({
           vpn: false,

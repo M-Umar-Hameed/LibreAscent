@@ -155,6 +155,9 @@ class FreedomAccessibilityService : AccessibilityService() {
             "yandex.", "ecosia.org", "startpage.com", "ampproject.org",
             "webcache.googleusercontent.com", "translate.google"
         )
+
+        // Domain-like pattern used to scan the full-screen text blob fallback scan.
+        private val FALLBACK_DOMAIN_PATTERN = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?\\.[a-z0-9][a-z0-9-]*[a-z0-9](?:\\.[a-z]{2,})?")
     }
 
     override fun onServiceConnected() {
@@ -572,10 +575,8 @@ class FreedomAccessibilityService : AccessibilityService() {
 
                 // 2. Regex Scan: Find everything that looks like a domain in the blob
                 if (blockedResult == null) {
-                    val domainPattern = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?\\.[a-z0-9][a-z0-9-]*[a-z0-9](?:\\.[a-z]{2,})?")
-
                     // PASS A: Standard matching
-                    var matches = domainPattern.findAll(fullText.lowercase())
+                    var matches = FALLBACK_DOMAIN_PATTERN.findAll(fullText.lowercase())
                     for (match in matches) {
                         val word = match.value
                         if (word.length > 5) {
@@ -592,7 +593,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                     // PASS B: Compact matching (catch "y o u t u b e . c o m")
                     if (blockedResult == null) {
                         val compactText = fullText.replace(" ", "").lowercase()
-                        matches = domainPattern.findAll(compactText)
+                        matches = FALLBACK_DOMAIN_PATTERN.findAll(compactText)
                         for (match in matches) {
                             val word = match.value
                             if (word.length > 5) {

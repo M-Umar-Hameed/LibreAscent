@@ -51,9 +51,16 @@ class ContentMatcher {
     @Volatile private var nsfwMonitoredApps = ConcurrentHashMap.newKeySet<String>()
 
     private val searchEngineDomains = setOf(
-        "google.com", "bing.com", "duckduckgo.com", "yahoo.com", 
+        "google.com", "bing.com", "duckduckgo.com", "yahoo.com",
         "baidu.com", "yandex.com", "ecosia.org", "startpage.com"
     )
+
+    // Precompiled patterns reused across events instead of allocating per call.
+    private val candidateSplitPattern = Regex("\\s*[|·»]\\s*|\\s+[-:]\\s+")
+    private val invisibleCharsPattern = Regex("[\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]")
+    private val embeddedCandidateDomainPattern = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\\.[a-z0-9]{2,}")
+    private val compactTextPattern = Regex("[\\s\\-_\\.\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]+")
+    private val nonAlphanumericPattern = Regex("[^a-z0-9]")
 
     /**
      * Check if a URL or extracted text should be blocked.
@@ -68,8 +75,7 @@ class ContentMatcher {
 
         // Samsung/Chrome often hide URLs in titles like "porntrex.tv | Best Videos"
         // or "Best Videos - porntrex.tv". We split and check ALL parts.
-        val delimiters = Regex("\\s*[|·»]\\s*|\\s+[-:]\\s+")
-        val parts = url.split(delimiters)
+        val parts = url.split(candidateSplitPattern)
 
         for (rawPart in parts) {
             val normalized = normalizeUrl(rawPart)
@@ -141,7 +147,7 @@ class ContentMatcher {
 
     private fun normalizeUrl(url: String): String {
         // Strip Unicode formatting characters
-        val stripped = url.replace(Regex("[\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]"), "")
+        val stripped = url.replace(invisibleCharsPattern, "")
 
         return stripped.lowercase()
             .removePrefix("https://")
@@ -242,8 +248,7 @@ class ContentMatcher {
         val candidates = decoded.split('/', '.', '=', '&', '?', '#')
 
         // Reassemble potential domains: look for "name.tld" patterns in the decoded URL
-        val domainPattern = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\\.[a-z0-9]{2,}")
-        for (match in domainPattern.findAll(decoded)) {
+        for (match in embeddedCandidateDomainPattern.findAll(decoded)) {
             val candidate = match.value
             if (candidate == primaryDomain) continue
             // Skip common search/analytics domains to avoid false positives
@@ -271,7 +276,7 @@ class ContentMatcher {
         
         // Compact matching pass: handles "p o r n" or "p-o-r-n" or "p\u200Eo\u200Er\u200En"
         // We strip whitespace, common separators, and Unicode directional/invisible separators
-        val compactText = text.lowercase().replace(Regex("[\\s\\-_\\.\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]+"), "")
+        val compactText = text.lowercase().replace(compactTextPattern, "")
         for (keyword in blockedKeywords) {
             val lowerKeyword = keyword.lowercase()
             if (lowerKeyword.length > 3 && compactText.contains(lowerKeyword)) {
@@ -284,14 +289,15 @@ class ContentMatcher {
 
     private fun findMatchingKeyword(url: String): String? {
         val lowerUrl = url.lowercase()
-        
+        // Look for surrounding context (alphanumeric block). Split once and
+        // reuse for every keyword instead of re-splitting per keyword.
+        val textBlocks = lowerUrl.split(nonAlphanumericPattern)
+
         for (keyword in blockedKeywords) {
             val lowerKeyword = keyword.lowercase()
-            
+
             if (lowerUrl.contains(lowerKeyword)) {
                 var hasValidBlock = false
-                // Look for surrounding context (alphanumeric block)
-                val textBlocks = lowerUrl.split(Regex("[^a-z0-9]"))
                 for (block in textBlocks) {
                     if (block.contains(lowerKeyword)) {
                         // Heuristic 1: If the block is extremely long (>15 chars), it's probably a base64 token or hash.
@@ -325,6 +331,23 @@ class ContentMatcher {
         }
         return null
     }
+
+    /**
+     * Test-only entry points for the keyword matcher. Bypass SharedPreferences
+     * persistence and logging (unmocked in plain JVM unit tests) so
+     * findMatchingKeyword can be exercised directly.
+     */
+    internal fun setKeywordsForTest(keywords: Collection<String>) {
+        blockedKeywords.clear()
+        keywords.forEach { k ->
+            val normalized = k.trim().lowercase()
+            if (normalized.isNotEmpty() && !normalized.startsWith("#")) {
+                blockedKeywords.add(normalized)
+            }
+        }
+    }
+
+    internal fun findMatchingKeywordForTest(text: String): String? = findMatchingKeyword(text)
 
     /**
      * Get the set of blocked keywords for WebView text search.
@@ -425,7 +448,7 @@ class ContentMatcher {
     }
 
     private fun cleanPkg(pkg: String): String {
-        return pkg.replace(Regex("[\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]"), "")
+        return pkg.replace(invisibleCharsPattern, "")
             .trim()
             .lowercase()
     }

@@ -30,6 +30,10 @@ class BrowserUrlMonitor {
     private val browsers = mutableMapOf<String, BrowserConfig>()
     private var lastDetectedUrl: String = ""
 
+    // Precompiled patterns reused across nodes/events instead of allocating per call.
+    private val invisibleCharsPattern = Regex("[\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]")
+    private val whitespacePattern = Regex("\\s+")
+
     /**
      * Update the list of monitored browsers and persist to SharedPreferences.
      */
@@ -567,7 +571,7 @@ class BrowserUrlMonitor {
             val str = text?.toString() ?: return@forEach
             if (looksLikeUrl(str)) return str
             // Sometimes the domain is hiding inside a page title (e.g. "pornhub.com - videos")
-            val words = str.split(Regex("\\s+"))
+            val words = str.split(whitespacePattern)
             if (words.size > 1) {
                 for (word in words) {
                     if (word.length in 4..254 && looksLikeUrl(word)) return word
@@ -580,8 +584,8 @@ class BrowserUrlMonitor {
             if (looksLikeUrl(contentDesc)) return contentDesc
             val extracted = extractUrlFromDescription(contentDesc)
             if (extracted != null) return extracted
-            
-            val words = contentDesc.split(Regex("\\s+"))
+
+            val words = contentDesc.split(whitespacePattern)
             if (words.size > 1) {
                 for (word in words) {
                     if (word.length in 4..254 && looksLikeUrl(word)) return word
@@ -596,8 +600,8 @@ class BrowserUrlMonitor {
             event.text?.reversed()?.forEach { text ->
                 val str = text?.toString() ?: return@forEach
                 if (looksLikeUrl(str)) return str
-                
-                val words = str.split(Regex("\\s+"))
+
+                val words = str.split(whitespacePattern)
                 if (words.size > 1) {
                     for (word in words) {
                         if (word.length in 4..254 && looksLikeUrl(word)) return word
@@ -759,7 +763,7 @@ class BrowserUrlMonitor {
      */
     private fun looksLikeUrl(text: String): Boolean {
         // Strip out invisible control characters like U+200E that Samsung injects
-        val stripped = text.replace(Regex("[\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]"), "").trim()
+        val stripped = text.replace(invisibleCharsPattern, "").trim()
         val t = stripped.lowercase()
         
         if (t.isEmpty() || t.length < 3 || t == ".com" || t == ".net") return false
@@ -800,7 +804,7 @@ class BrowserUrlMonitor {
         val cleanUrl = if (split.size > 1 && looksLikeUrl(firstPart)) firstPart else url.trim()
 
         // Strip Unicode formatting characters
-        val stripped = cleanUrl.replace(Regex("[\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]"), "")
+        val stripped = cleanUrl.replace(invisibleCharsPattern, "")
 
         return stripped.lowercase()
             .removePrefix("https://")

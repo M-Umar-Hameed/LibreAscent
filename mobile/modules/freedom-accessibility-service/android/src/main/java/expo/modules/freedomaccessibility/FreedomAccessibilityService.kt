@@ -121,7 +121,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         @Volatile
         private var cachedBackground: Bitmap? = null
         @Volatile
-        private var cachedBackgroundPath: String = ""
+        private var cachedBackgroundKey: String = ""
         @Volatile
         private var backgroundDecodeInFlight = false
 
@@ -1079,7 +1079,8 @@ class FreedomAccessibilityService : AccessibilityService() {
             )
         }
 
-        val cached = if (cachedBackgroundPath == path) cachedBackground else null
+        val key = backgroundKey(path)
+        val cached = if (cachedBackgroundKey == key) cachedBackground else null
         if (cached != null) {
             bgImage.setImageBitmap(cached)
             container.addView(bgImage)
@@ -1095,9 +1096,13 @@ class FreedomAccessibilityService : AccessibilityService() {
         val reqHeight = metrics.heightPixels
 
         Thread {
+            // Throwable, not Exception: a large image throws OutOfMemoryError,
+            // which would otherwise reach the default handler and kill the
+            // process, taking this service with it. The overlay is opaque
+            // without the image.
             val bitmap = try {
                 decodeSampledBackground(path, reqWidth, reqHeight)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.w(TAG, "Failed to load overlay background: ${e.message}")
                 null
             }
@@ -1105,13 +1110,23 @@ class FreedomAccessibilityService : AccessibilityService() {
                 backgroundDecodeInFlight = false
                 if (bitmap == null) return@post
                 cachedBackground = bitmap
-                cachedBackgroundPath = path
+                cachedBackgroundKey = key
                 if (container.parent == null) return@post
                 bgImage.setImageBitmap(bitmap)
                 container.addView(bgImage, 0)
                 container.addView(scrim, 1)
             }
         }.start()
+    }
+
+    /**
+     * Cache key for the theme background. The picker writes every custom image
+     * to the same file name, so the path alone would never change and a new
+     * image would never be picked up.
+     */
+    private fun backgroundKey(path: String): String {
+        val file = Uri.parse(path).path ?: return path
+        return "$path:${java.io.File(file).lastModified()}"
     }
 
     /**
@@ -1124,8 +1139,10 @@ class FreedomAccessibilityService : AccessibilityService() {
         contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
+        // Either dimension still covering the screen is enough to halve again.
+        // Requiring both leaves ordinary portrait/landscape photos at full size.
         var sampleSize = 1
-        while (bounds.outWidth / (sampleSize * 2) >= reqWidth &&
+        while (bounds.outWidth / (sampleSize * 2) >= reqWidth ||
             bounds.outHeight / (sampleSize * 2) >= reqHeight
         ) {
             sampleSize *= 2
@@ -1139,6 +1156,9 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     private fun hideInstantOverlay() {
         handler.post {
+            // Drop this overlay's queued auto-dismiss. Left pending, it would
+            // fire during a later overlay and cut that one short.
+            handler.removeCallbacksAndMessages(OVERLAY_DISMISS_TOKEN)
             if (!isInstantOverlayShowing) return@post
             try {
                 instantOverlay?.let { windowManager?.removeView(it) }

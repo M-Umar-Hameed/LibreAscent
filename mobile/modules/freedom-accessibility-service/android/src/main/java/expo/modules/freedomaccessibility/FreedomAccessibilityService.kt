@@ -53,6 +53,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     private var lastCheckUrl: String = ""
     private var blockCooldownUntil: Long = 0
     private var lastFullScanAt: Long = 0
+    private var fullScanPending = false
     // Remember the last whitelisted domain per browser, so text-only events still get context
     private var lastWhitelistedDomain: String? = null
     private var lastWhitelistedPackage: String? = null
@@ -71,6 +72,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         private val OVERLAY_DISMISS_TOKEN = Any()
         private val SCOPE_TOKEN = Any()
         private val REPROBE_TOKEN = Any()
+        private val FULL_SCAN_TOKEN = Any()
 
         // Content-changed stays subscribed for every package: an in-app WebView
         // lives in a package we cannot enumerate, and its events are the only
@@ -101,11 +103,12 @@ class FreedomAccessibilityService : AccessibilityService() {
         // safe because content-changed events are never unsubscribed, so the next
         // WebView event re-arms the hold before anything can be scanned without it.
         private const val WEBVIEW_HOLD_MS = 5000L
-        // The full-screen text pass reads every node of every browser window and
-        // is the only caller that runs the per-indicator node searches, so it is
-        // rate limited rather than run on each of up to ten events per second.
-        // The ceiling it trades for that is up to this much delay before an
-        // AMP/proxy page is recognised.
+        // ponytail: the full-screen text pass reads every node of every browser
+        // window and is the only caller that runs the per-indicator node searches,
+        // so it is rate limited rather than run on each of up to ten events per
+        // second. Ceiling: one leading scan plus one trailing scan per interval,
+        // so a page is recognised up to this much late but never skipped. A
+        // per-package or per-URL scan budget if that latency ever matters.
         private const val FULL_SCAN_MIN_INTERVAL_MS = 750L
 
         // Built-in keywords for NSFW app scanning (Reddit, Twitter labels)
@@ -362,6 +365,10 @@ class FreedomAccessibilityService : AccessibilityService() {
                 lastCheckUrl = ""
                 lastUrlCheckTime = 0
                 consecutiveBlockCount = 0
+                // A scan for the previous app must not rate limit the new one's first.
+                lastFullScanAt = 0
+                handler.removeCallbacksAndMessages(FULL_SCAN_TOKEN)
+                fullScanPending = false
                 // Dismiss any lingering overlay - but never dismiss a reels
                 // overlay here. The reels overlay is dismissed only by the
                 // "I understand" button handler, which sends the user home/back.
@@ -550,84 +557,23 @@ class FreedomAccessibilityService : AccessibilityService() {
         // Secondary fallback for Chrome/Samsung Internet hidden URLs or AMP masks
         // If current URL bar just says "google.com", we scan the entire visible screen
         // as a large string blob and check for any blocked domains or keywords.
-        if (blockedResult == null && searchWebViews && rootNode != null &&
-            now - lastFullScanAt >= FULL_SCAN_MIN_INTERVAL_MS) {
-            lastFullScanAt = now
-            val sb = StringBuilder()
-            sb.append(browserMonitor.extractAllText(rootNode))
-
-            // Samsung Internet leaves WebView children unpopulated until an
-            // explicit node text search forces them, so that search runs here and
-            // nowhere else on the browser path.
-            browserMonitor.searchWebViewForUrls(rootNode, deep = true)
-                .forEach { sb.append(' ').append(it) }
-
-            try {
-                for (window in windows) {
-                    if (window.id != event.windowId) {
-                        val windowRoot = window.root
-                        if (windowRoot != null) {
-                            if (windowRoot.packageName?.toString() == packageName) {
-                                sb.append(" ").append(browserMonitor.extractAllText(windowRoot))
-                            }
-                            windowRoot.recycle()
-                        }
-                    }
+        if (blockedResult == null && searchWebViews && rootNode != null) {
+            if (now - lastFullScanAt >= FULL_SCAN_MIN_INTERVAL_MS) {
+                lastFullScanAt = now
+                scanFullScreenForBlock(rootNode, packageName, contextDomain, pageWhitelisted)?.let {
+                    blockedResult = it.first
+                    blockedCandidate = it.second
                 }
-            } catch (_: Exception) {}
-
-            val fullText = sb.toString()
-            if (fullText.isNotBlank()) {
-                // 1. Keyword check on the full blob - skip if page is whitelisted
-                if (!pageWhitelisted) {
-                    val matchedKeyword = contentMatcher.findMatchingKeywordDirectly(fullText)
-                    if (matchedKeyword != null) {
-                        Log.w(TAG, "SAMSUNG BLOCK: Found keyword [$matchedKeyword] in visual text")
-                        blockedResult = ContentMatcher.MatchResult(true, ContentMatcher.MatchType.KEYWORD, matchedKeyword)
-                        blockedCandidate = matchedKeyword
-                    }
-                }
-
-                // 2. Regex Scan: Find everything that looks like a domain in the blob
-                if (blockedResult == null) {
-                    val lowerText = fullText.lowercase()
-                    // PASS A: Standard matching
-                    var matches = FALLBACK_DOMAIN_PATTERN.findAll(lowerText)
-                    for (match in matches) {
-                        val word = match.value
-                        if (word.length > 5) {
-                            val result = contentMatcher.isUrlBlocked(word, contextDomain)
-                            if (result.blocked) {
-                                Log.w(TAG, "SAMSUNG BLOCK: Found domain [$word] in visual text via Regex")
-                                blockedResult = result
-                                blockedCandidate = word
-                                break
-                            }
-                        }
-                    }
-
-                    // PASS B: Compact matching (catch "y o u t u b e . c o m")
-                    if (blockedResult == null) {
-                        val compactText = lowerText.replace(" ", "")
-                        matches = FALLBACK_DOMAIN_PATTERN.findAll(compactText)
-                        for (match in matches) {
-                            val word = match.value
-                            if (word.length > 5) {
-                                val result = contentMatcher.isUrlBlocked(word, contextDomain)
-                                if (result.blocked) {
-                                    Log.w(TAG, "SAMSUNG BLOCK: Found compact domain [$word] in visual text via Regex")
-                                    blockedResult = result
-                                    blockedCandidate = word
-                                    break
-                                }
-                            }
-                        }
-                    }
-                }
+            } else {
+                // The suppressed event may be the last of its burst, so a page that
+                // finishes rendering inside the interval would otherwise never be
+                // scanned at all. One trailing pass covers that.
+                scheduleTrailingFullScan(packageName, contextDomain, pageWhitelisted)
             }
         }
 
-        if (blockedResult == null) {
+        val matched = blockedResult
+        if (matched == null) {
             // URL is Allowed
             if (allowedCandidate != lastCheckUrl || now - lastUrlCheckTime > 300) {
                 lastCheckUrl = allowedCandidate
@@ -638,12 +584,122 @@ class FreedomAccessibilityService : AccessibilityService() {
         }
 
         // We have a Block!
-        if (blockedCandidate == lastCheckUrl && now - lastUrlCheckTime < 300) return 
-        
+        if (blockedCandidate == lastCheckUrl && now - lastUrlCheckTime < 300) return
+
+        applyBlock(packageName, blockedCandidate, matched)
+    }
+
+    /**
+     * Scan the whole visible screen as one text blob for a blocked keyword or
+     * domain. This is the fallback for hidden URLs and AMP/proxy masks, where the
+     * URL bar reads as a search engine throughout.
+     *
+     * @return the match and the text it was found in, or null if nothing matched.
+     */
+    private fun scanFullScreenForBlock(
+        rootNode: android.view.accessibility.AccessibilityNodeInfo,
+        packageName: String,
+        contextDomain: String?,
+        pageWhitelisted: Boolean
+    ): Pair<ContentMatcher.MatchResult, String>? {
+        val sb = StringBuilder()
+        sb.append(browserMonitor.extractAllText(rootNode))
+
+        // Samsung Internet leaves WebView children unpopulated until an explicit
+        // node text search forces them.
+        browserMonitor.searchWebViewForUrls(rootNode, deep = true)
+            .forEach { sb.append(' ').append(it) }
+
+        try {
+            for (window in windows) {
+                if (window.id != rootNode.windowId) {
+                    val windowRoot = window.root
+                    if (windowRoot != null) {
+                        if (windowRoot.packageName?.toString() == packageName) {
+                            sb.append(" ").append(browserMonitor.extractAllText(windowRoot))
+                        }
+                        windowRoot.recycle()
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        val fullText = sb.toString()
+        if (fullText.isBlank()) return null
+
+        // 1. Keyword check on the full blob - skip if page is whitelisted
+        if (!pageWhitelisted) {
+            val matchedKeyword = contentMatcher.findMatchingKeywordDirectly(fullText)
+            if (matchedKeyword != null) {
+                Log.w(TAG, "SAMSUNG BLOCK: Found keyword [$matchedKeyword] in visual text")
+                return ContentMatcher.MatchResult(true, ContentMatcher.MatchType.KEYWORD, matchedKeyword) to matchedKeyword
+            }
+        }
+
+        // 2. Regex Scan: Find everything that looks like a domain in the blob
+        val lowerText = fullText.lowercase()
+        // PASS A: Standard matching
+        for (match in FALLBACK_DOMAIN_PATTERN.findAll(lowerText)) {
+            val word = match.value
+            if (word.length > 5) {
+                val result = contentMatcher.isUrlBlocked(word, contextDomain)
+                if (result.blocked) {
+                    Log.w(TAG, "SAMSUNG BLOCK: Found domain [$word] in visual text via Regex")
+                    return result to word
+                }
+            }
+        }
+
+        // PASS B: Compact matching (catch "y o u t u b e . c o m")
+        val compactText = lowerText.replace(" ", "")
+        for (match in FALLBACK_DOMAIN_PATTERN.findAll(compactText)) {
+            val word = match.value
+            if (word.length > 5) {
+                val result = contentMatcher.isUrlBlocked(word, contextDomain)
+                if (result.blocked) {
+                    Log.w(TAG, "SAMSUNG BLOCK: Found compact domain [$word] in visual text via Regex")
+                    return result to word
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Run one full-screen scan after the rate limit expires, against whatever is
+     * foreground then. Only one is ever queued.
+     */
+    private fun scheduleTrailingFullScan(
+        packageName: String,
+        contextDomain: String?,
+        pageWhitelisted: Boolean
+    ) {
+        if (fullScanPending) return
+        fullScanPending = true
+        handler.postAtTime({
+            fullScanPending = false
+            if (System.currentTimeMillis() < blockCooldownUntil) return@postAtTime
+            val root = rootInActiveWindow ?: return@postAtTime
+            if (root.packageName?.toString() == packageName) {
+                lastFullScanAt = System.currentTimeMillis()
+                scanFullScreenForBlock(root, packageName, contextDomain, pageWhitelisted)?.let {
+                    applyBlock(packageName, it.second, it.first)
+                }
+            }
+            root.recycle()
+        }, FULL_SCAN_TOKEN, android.os.SystemClock.uptimeMillis() + FULL_SCAN_MIN_INTERVAL_MS)
+    }
+
+    private fun applyBlock(
+        packageName: String,
+        blockedCandidate: String,
+        blockedResult: ContentMatcher.MatchResult
+    ) {
+        val now = System.currentTimeMillis()
         lastCheckUrl = blockedCandidate
         lastUrlCheckTime = now
         consecutiveBlockCount++
-        
+
         Log.i(TAG, "Blocked URL: $blockedCandidate (${blockedResult.matchType}: ${blockedResult.matchedValue}) - Attempt $consecutiveBlockCount")
 
         // Show instant overlay with the actual blocked reason
@@ -661,7 +717,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             performGlobalAction(GLOBAL_ACTION_HOME)
             consecutiveBlockCount = 0
         }
-        
+
         // Also broadcast for JS layer
         broadcastUrlBlocked(blockedCandidate, blockedResult)
     }

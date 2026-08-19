@@ -265,7 +265,9 @@ class BrowserUrlMonitor {
         val resolved = finalizeCandidates(candidates)
         if (resolved != null) return resolved
 
-        searchWebViewForUrls(rootNode, deep = true).forEach { candidates.add(it) }
+        // Nothing resolved, so pay for the indicator searches. The tree scan above
+        // already covered this root, so only the searches run here.
+        if (rootNode != null) searchIndicatorsForUrls(rootNode, emptySet(), candidates)
         return finalizeCandidates(candidates)
     }
 
@@ -277,15 +279,15 @@ class BrowserUrlMonitor {
             "com.sec.android.app.sbrowser:id/location_bar_edit_text",
             "com.sec.android.app.sbrowser:id/url_bar_parent",
             "com.sec.android.app.sbrowser:id/url_bar_container",
-            // AMP/redirect indicator bar. Previously reached through the universal
-            // id sweep, which no longer runs once the configured id resolves.
+            // AMP/redirect indicator bar, the full set from UNIVERSAL_URL_BAR_FALLBACKS
             "com.sec.android.app.sbrowser:id/pagehead_url",
             "com.sec.android.app.sbrowser:id/amp_url",
             "com.sec.android.app.sbrowser:id/original_url",
             "com.sec.android.app.sbrowser:id/site_url",
             "com.sec.android.app.sbrowser:id/page_url",
             "com.sec.android.app.sbrowser:id/security_url",
-            "com.sec.android.app.sbrowser:id/url_info"
+            "com.sec.android.app.sbrowser:id/url_info",
+            "com.sec.android.app.sbrowser:id/header_text"
         )
         for (id in toolbarIds) {
             try {
@@ -457,12 +459,21 @@ class BrowserUrlMonitor {
             Log.w(TAG, "Error in WebView deep tree scan: ${e.message}")
         }
         
-        // 2. Targeted IPC search (forces Samsung WebViews/Toolbars to reveal opaque text nodes)
-        // This is critical because Samsung Internet does not populate child views until explicitly searched!
-        // Each indicator walks the whole remote hierarchy in the target app's
-        // process, so callers opt in only where nothing cheaper has worked.
-        if (!deep) return found
+        if (deep) searchIndicatorsForUrls(rootNode, keywords, found)
+        return found
+    }
 
+    /**
+     * Targeted IPC search (forces Samsung WebViews/Toolbars to reveal opaque text nodes).
+     * This is critical because Samsung Internet does not populate child views until
+     * explicitly searched! Each indicator walks the whole remote hierarchy in the
+     * target app's process, so callers opt in only where nothing cheaper has worked.
+     */
+    private fun searchIndicatorsForUrls(
+        rootNode: AccessibilityNodeInfo,
+        keywords: Set<String>,
+        found: MutableSet<String>
+    ) {
         val searchIndicators = ADULT_TLDS + listOf(
             "http", "www", ".com", ".net", ".org", ".co", ".io", ".me", ".cc", ".info", ".ly", ".gl", "://"
         ) + keywords.toList() // Search for custom keywords directly via IPC
@@ -499,10 +510,6 @@ class BrowserUrlMonitor {
             }
         }
         
-        if (found.isNotEmpty()) {
-            Log.d(TAG, "searchWebViewForUrls found ${found.size} candidates using indicators and tree scan")
-        }
-        return found
     }
 
     /**
@@ -572,7 +579,13 @@ class BrowserUrlMonitor {
 
                 // Samsung/Chrome optimization: if we found the toolbar node but it has no text,
                 // do an immediate tree-scan restricted to this branch.
-                val branchCands = searchWebViewForUrls(urlNode)
+                // Samsung's toolbar children stay unpopulated until a text search
+                // forces them, so its empty-bar branch is the one case worth the
+                // indicator searches; they stay branch-scoped either way.
+                val branchCands = searchWebViewForUrls(
+                    urlNode,
+                    deep = packageName == "com.sec.android.app.sbrowser"
+                )
                 if (branchCands.isNotEmpty()) {
                     val winner = branchCands.first()
                     Log.d(TAG, "Branch scan recovered text from ID branch: $winner")
@@ -845,9 +858,11 @@ class BrowserUrlMonitor {
         private const val TAG = "BrowserUrlMonitor"
         private const val PREFS_NAME = "freedom_browser_configs"
         private const val PREFS_KEY_BROWSERS = "browsers"
-        // Matches the ceiling extractAllText already uses to capture every string
-        // on screen, WebView content included. Nothing in this file traverses
-        // deeper than that ceiling to find text it acts on.
+        // ponytail: matches the ceiling extractAllText already uses to capture
+        // every string on screen, WebView content included. Ceiling: depth is the
+        // wrong lever, since traversal cost scales with node count, so a wide
+        // shallow tree costs the same as before. A node budget once there is a
+        // measurement to size one against.
         private const val MAX_SCAN_DEPTH = 60
 
         /**
@@ -855,6 +870,10 @@ class BrowserUrlMonitor {
          * carries no usable text resolves to null in the lookup, so it does not
          * stop the scan: a blank or focused-empty URL bar must not suppress the
          * remaining fallbacks.
+         *
+         * ponytail: first match wins rather than every id being collected.
+         * Ceiling: only one universal id can contribute per event, so ordering
+         * decides which. Collect several if one id proves insufficient.
          */
         internal fun firstUrlBarMatch(ids: List<String>, lookup: (String) -> String?): String? {
             for (id in ids) {

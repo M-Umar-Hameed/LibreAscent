@@ -21,7 +21,8 @@ export function initDB(): void {
       blocked_count INTEGER DEFAULT 0
     );
 
-    -- Reclaim rows from the removed blocked_urls table.
+    -- Drop the removed blocked_urls table. Its pages go to the free list for
+    -- reuse; the file only shrinks on VACUUM.
     DROP TABLE IF EXISTS blocked_urls;
 
     -- Table for simple key-value persistence (e.g. Zustand stores)

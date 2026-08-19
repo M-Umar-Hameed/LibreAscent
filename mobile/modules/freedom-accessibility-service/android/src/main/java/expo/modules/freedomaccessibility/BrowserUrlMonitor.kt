@@ -138,70 +138,6 @@ class BrowserUrlMonitor {
     }
 
     /**
-     * Deep debug: dump ALL text/desc nodes in the top 800px of the screen from ALL windows.
-     * Logs every node regardless of whether it looks like a URL. This helps discover
-     * Samsung Browser's AMP/redirect indicator bar resource IDs and text.
-     */
-    fun debugDumpAllWindows(windows: List<android.view.accessibility.AccessibilityWindowInfo>?, rootNode: AccessibilityNodeInfo?, packageName: String) {
-        Log.d(TAG, "=== DEBUG DUMP START (pkg=$packageName, windowCount=${windows?.size ?: 0}) ===")
-
-        if (rootNode != null) {
-            Log.d(TAG, "--- Active window root (pkg=${rootNode.packageName}) childCount=${rootNode.childCount} ---")
-            deepDumpNode(rootNode, 0, 30)
-        }
-
-        windows?.forEachIndexed { idx, window ->
-            try {
-                val root = window.root
-                if (root != null) {
-                    val winPkg = root.packageName?.toString() ?: "unknown"
-                    Log.d(TAG, "--- Window[$idx] id=${window.id} type=${window.type} pkg=$winPkg childCount=${root.childCount} ---")
-                    deepDumpNode(root, 0, 30)
-                    root.recycle()
-                }
-            } catch (e: Exception) {}
-        }
-        Log.d(TAG, "=== DEBUG DUMP END ===")
-    }
-
-    /**
-     * Dump EVERY node that has any text, contentDescription, or viewId.
-     * No position filtering, no URL heuristic — raw dump to discover hidden nodes.
-     */
-    private fun deepDumpNode(node: AccessibilityNodeInfo, depth: Int, maxDepth: Int) {
-        if (depth > maxDepth) return
-
-        val rect = android.graphics.Rect()
-        node.getBoundsInScreen(rect)
-
-        val text = node.text?.toString()
-        val desc = node.contentDescription?.toString()
-        val viewId = node.viewIdResourceName
-        val className = node.className?.toString()?.substringAfterLast('.')
-
-        // Log ANY node that has text, desc, or a viewId — no position filter
-        val hasContent = text != null || desc != null || viewId != null
-        if (hasContent) {
-            val indent = "  ".repeat(minOf(depth, 10))
-            val textHex = text?.let { dumpHex(it.take(30)) } ?: ""
-            Log.d(TAG, "${indent}DUMP d=$depth [$rect] cls=$className id=$viewId text=[${text?.take(80)}] desc=[${desc?.take(80)}] hex=[$textHex]")
-        }
-
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            deepDumpNode(child, depth + 1, maxDepth)
-            child.recycle()
-        }
-    }
-
-    /**
-     * Convert a string to hex representation to detect invisible/control characters.
-     */
-    private fun dumpHex(s: String): String {
-        return s.map { String.format("%04x", it.code) }.joinToString(" ")
-    }
-
-    /**
      * Debug: recursively dump node tree looking for URL-like text nodes.
      */
     private fun dumpNodeTree(node: AccessibilityNodeInfo, packageName: String, depth: Int, maxDepth: Int) {
@@ -342,7 +278,9 @@ class BrowserUrlMonitor {
      */
     fun extractUrlCandidatesWithWindows(
         event: AccessibilityEvent,
-        windows: List<android.view.accessibility.AccessibilityWindowInfo>?,
+        // Resolved only on the scavenge path: getWindows() is a binder round trip
+        // and most events never reach it.
+        windowsProvider: () -> List<android.view.accessibility.AccessibilityWindowInfo>?,
         activeRoot: AccessibilityNodeInfo?,
         targetPackageName: String
     ): Set<String>? {
@@ -364,7 +302,8 @@ class BrowserUrlMonitor {
         }
 
         // 2. If empty, scavenge ALL windows
-        if (candidates.isEmpty() && windows != null) {
+        val windows = if (candidates.isEmpty()) windowsProvider() else null
+        if (windows != null) {
             for (window in windows) {
                 try {
                     val root = window.root ?: continue

@@ -7,6 +7,11 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
+# This file is prebuild-generated. Every rule below is also declared as
+# extraProguardRules in app.config.ts, which re-emits them into an
+# expo-build-properties block after a prebuild. Edit them there; the copies
+# here only keep the current checked-in build working.
+
 # react-native-reanimated
 -keep class com.swmansion.reanimated.** { *; }
 -keep class com.facebook.react.turbomodule.** { *; }

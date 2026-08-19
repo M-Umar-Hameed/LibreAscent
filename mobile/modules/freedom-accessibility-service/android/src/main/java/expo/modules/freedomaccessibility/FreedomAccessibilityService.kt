@@ -61,6 +61,9 @@ class FreedomAccessibilityService : AccessibilityService() {
     // so it runs on scope transitions only, never per event.
     private var deepInspectionEnabled = false
     private var scopeDowngradePending = false
+    // True when the event being handled is the one that raised the scope to deep,
+    // and so was itself processed with the old flags.
+    private var scopeUpgradedThisEvent = false
     // When an in-app/detached WebView last announced itself. Such packages cannot
     // be known in advance, so the WebView's own events are the only signal, and a
     // timestamp cannot be pointed at the wrong package by a transient window.
@@ -292,6 +295,7 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     private fun applyServiceScope(deep: Boolean, force: Boolean = false) {
         if (!force && deep == deepInspectionEnabled) return
+        if (deep && !deepInspectionEnabled) scopeUpgradedThisEvent = true
         val info = serviceInfo ?: AccessibilityServiceInfo()
         info.eventTypes = if (deep) DEEP_EVENT_TYPES else IDLE_EVENT_TYPES
         info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
@@ -337,6 +341,8 @@ class FreedomAccessibilityService : AccessibilityService() {
 
         // Skip our own app's events
         if (packageName == applicationContext.packageName) return
+
+        scopeUpgradedThisEvent = false
 
         // Always intercept raw webview events even if the OS attributes them to a different package
         // (Samsung Internet often delegates rendering to Android System Webview in a detached process)
@@ -477,14 +483,19 @@ class FreedomAccessibilityService : AccessibilityService() {
         if (System.currentTimeMillis() < blockCooldownUntil) return
 
         val candidates = mutableSetOf<String>()
-        val keywords = contentMatcher.getKeywords().toSet()
 
-        browserMonitor.extractUrlCandidatesWithWindows(event, windows, rootNode, packageName)?.let { candidates.addAll(it) }
+        browserMonitor.extractUrlCandidatesWithWindows(event, { windows }, rootNode, packageName)?.let { candidates.addAll(it) }
 
         if (candidates.isEmpty()) {
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
                 Log.d(TAG, "Browser $packageName: URL extraction returned null")
             }
+            // The flags this event just asked for land asynchronously, so it was
+            // handled without them. A WebView in a package we do not monitor may
+            // emit nothing further to retry on, so queue one pass for once they
+            // are live. Null package: the WebView's events carry a different
+            // package than the window that hosts it.
+            if (scopeUpgradedThisEvent) scheduleTrailingFullScan(null, null, false)
             return
         }
 
@@ -670,10 +681,12 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     /**
      * Run one full-screen scan after the rate limit expires, against whatever is
-     * foreground then. Only one is ever queued.
+     * foreground then. Only one is ever queued. A null packageName accepts
+     * whichever package is foreground at fire time, for callers whose event
+     * package is not the package of the window being rendered.
      */
     private fun scheduleTrailingFullScan(
-        packageName: String,
+        packageName: String?,
         contextDomain: String?,
         pageWhitelisted: Boolean
     ) {
@@ -683,10 +696,11 @@ class FreedomAccessibilityService : AccessibilityService() {
             fullScanPending = false
             if (System.currentTimeMillis() < blockCooldownUntil) return@postAtTime
             val root = rootInActiveWindow ?: return@postAtTime
-            if (root.packageName?.toString() == packageName) {
+            val livePackage = root.packageName?.toString()
+            if (livePackage != null && (packageName == null || livePackage == packageName)) {
                 lastFullScanAt = System.currentTimeMillis()
-                scanFullScreenForBlock(root, packageName, contextDomain, pageWhitelisted)?.let {
-                    applyBlock(packageName, it.second, it.first)
+                scanFullScreenForBlock(root, livePackage, contextDomain, pageWhitelisted)?.let {
+                    applyBlock(livePackage, it.second, it.first)
                 }
             }
             root.recycle()
@@ -1184,8 +1198,9 @@ class FreedomAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "Failed to load overlay background: ${e.message}")
                 null
             }
+            // Cleared here rather than in the post, which onDestroy can drop.
+            backgroundDecodeInFlight = false
             handler.post {
-                backgroundDecodeInFlight = false
                 if (bitmap == null) return@post
                 cachedBackground = bitmap
                 cachedBackgroundKey = key

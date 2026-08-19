@@ -369,8 +369,10 @@ class ContentMatcher {
     fun isPerCategoryMode(): Boolean = usingPerCategoryMode
 
     fun setNsfwMonitoredApps(packages: Collection<String>) {
-        nsfwMonitoredApps.clear()
-        packages.forEach { nsfwMonitoredApps.add(it.trim().lowercase()) }
+        // Clear-then-add would leave a window where a reader sees no monitored apps.
+        val normalized = packages.map { it.trim().lowercase() }.toSet()
+        nsfwMonitoredApps.retainAll(normalized)
+        nsfwMonitoredApps.addAll(normalized)
         Log.i("ContentMatcher", "Updated NSFW monitored apps: ${nsfwMonitoredApps.size}")
     }
 

@@ -182,10 +182,12 @@ export default function RootLayout(): ReactNode {
         // State is updated inside ProtectionService.
       }),
       ProtectionService.onDomainBlocked(() => {
-        // Handled natively by OverlayService
+        // Nothing to do here: the VPN service drops the query and the
+        // foreground service updates the blocked count from its own broadcast.
       }),
       ProtectionService.onUrlBlocked(() => {
-        // Handled natively by OverlayService
+        // Nothing to do here: the accessibility service has already drawn the
+        // overlay in-process before broadcasting this.
       }),
     ];
 

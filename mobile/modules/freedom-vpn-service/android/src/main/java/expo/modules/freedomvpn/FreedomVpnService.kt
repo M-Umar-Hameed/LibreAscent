@@ -64,6 +64,9 @@ class FreedomVpnService : VpnService() {
         // Cloudflare Family DNS — blocks malware AND adult content
         private const val DNS_PRIMARY = "1.1.1.1"
         private const val DNS_SECONDARY = "1.0.0.1"
+        private const val DNS_PRIMARY_V6 = "2606:4700:4700::1111"
+        private const val DNS_SECONDARY_V6 = "2606:4700:4700::1001"
+        private const val TUN_ADDRESS_V6 = "fd00:1:1::2"
         // Kept short so a dead upstream frees its worker quickly instead of
         // holding it (and its socket) for seconds.
         private const val DNS_TIMEOUT_MS = 2000
@@ -90,6 +93,258 @@ class FreedomVpnService : VpnService() {
             "com.whatsapp",
             "com.whatsapp.w4b"
         )
+
+        private const val IPV4_HEADER_MIN_SIZE = 20
+        private const val IPV6_HEADER_SIZE = 40
+        private const val PROTOCOL_UDP = 17
+
+        /** IP and UDP header fields needed to answer a captured DNS query. */
+        internal class UdpPacket(
+            val srcIp: ByteArray,
+            val dstIp: ByteArray,
+            val srcPort: Int,
+            val dstPort: Int,
+            val udpOffset: Int
+        )
+
+        /**
+         * Parse the IP and UDP headers of a captured packet.
+         *
+         * Returns null when the packet is not UDP over IPv4/IPv6, or is too
+         * short to hold a UDP header. `srcIp`/`dstIp` are 4 bytes for IPv4 and
+         * 16 for IPv6, which is what the response builder dispatches on.
+         */
+        internal fun parseUdpPacket(data: ByteArray, length: Int): UdpPacket? {
+            if (length < IPV4_HEADER_MIN_SIZE) return null
+
+            return when ((data[0].toInt() and 0xFF) shr 4) {
+                4 -> parseIpv4Udp(data, length)
+                6 -> parseIpv6Udp(data, length)
+                else -> null
+            }
+        }
+
+        private fun parseIpv4Udp(data: ByteArray, length: Int): UdpPacket? {
+            // IP Header Length (in 32-bit words)
+            val ihl = (data[0].toInt() and 0xF) * 4
+            if (length < ihl + 8) return null // Not enough data for UDP header
+            if ((data[9].toInt() and 0xFF) != PROTOCOL_UDP) return null
+
+            val srcIp = ByteArray(4)
+            val dstIp = ByteArray(4)
+            System.arraycopy(data, 12, srcIp, 0, 4)
+            System.arraycopy(data, 16, dstIp, 0, 4)
+
+            return udpPacketAt(data, srcIp, dstIp, ihl)
+        }
+
+        /**
+         * IPv6 has a fixed 40-byte header: byte 6 is Next Header, bytes 8-23
+         * the source address and 24-39 the destination.
+         *
+         * ponytail: a Next Header that is not UDP is dropped rather than walked
+         * as an extension-header chain. Device DNS queries do not carry
+         * extension headers, and a Fragment header would need reassembly this
+         * service cannot do. Walk the chain if real traffic ever needs it.
+         */
+        private fun parseIpv6Udp(data: ByteArray, length: Int): UdpPacket? {
+            if (length < IPV6_HEADER_SIZE + 8) return null
+            if ((data[6].toInt() and 0xFF) != PROTOCOL_UDP) return null
+
+            val srcIp = ByteArray(16)
+            val dstIp = ByteArray(16)
+            System.arraycopy(data, 8, srcIp, 0, 16)
+            System.arraycopy(data, 24, dstIp, 0, 16)
+
+            return udpPacketAt(data, srcIp, dstIp, IPV6_HEADER_SIZE)
+        }
+
+        private fun udpPacketAt(
+            data: ByteArray,
+            srcIp: ByteArray,
+            dstIp: ByteArray,
+            udpOffset: Int
+        ) = UdpPacket(
+            srcIp,
+            dstIp,
+            // Source port (bytes 0-1 of UDP header)
+            ((data[udpOffset].toInt() and 0xFF) shl 8) or (data[udpOffset + 1].toInt() and 0xFF),
+            // Destination port (bytes 2-3 of UDP header)
+            ((data[udpOffset + 2].toInt() and 0xFF) shl 8) or (data[udpOffset + 3].toInt() and 0xFF),
+            udpOffset
+        )
+
+        /**
+         * Build a complete IP+UDP packet wrapping a DNS response payload, in
+         * the same address family as the query it answers.
+         */
+        internal fun buildResponseIpPacket(
+            dnsResponse: ByteArray,
+            srcIp: ByteArray,   // Source IP (DNS server)
+            dstIp: ByteArray,   // Destination IP (device)
+            srcPort: Int,        // Source port (53)
+            dstPort: Int         // Destination port (original query source port)
+        ): ByteArray =
+            if (srcIp.size == 16) {
+                buildIpv6ResponsePacket(dnsResponse, srcIp, dstIp, srcPort, dstPort)
+            } else {
+                buildIpv4ResponsePacket(dnsResponse, srcIp, dstIp, srcPort, dstPort)
+            }
+
+        private fun buildIpv4ResponsePacket(
+            dnsResponse: ByteArray,
+            srcIp: ByteArray,
+            dstIp: ByteArray,
+            srcPort: Int,
+            dstPort: Int
+        ): ByteArray {
+            val udpLength = 8 + dnsResponse.size
+            val ipLength = 20 + udpLength
+
+            val packet = ByteArray(ipLength)
+
+            // === IPv4 Header (20 bytes) ===
+            packet[0] = 0x45.toByte()           // Version 4, IHL 5 (20 bytes)
+            packet[1] = 0x00.toByte()           // DSCP/ECN
+            packet[2] = (ipLength shr 8).toByte()  // Total length
+            packet[3] = (ipLength and 0xFF).toByte()
+            packet[4] = 0x00.toByte()           // Identification
+            packet[5] = 0x00.toByte()
+            packet[6] = 0x40.toByte()           // Flags: Don't Fragment
+            packet[7] = 0x00.toByte()           // Fragment offset
+            packet[8] = 0x40.toByte()           // TTL: 64
+            packet[9] = 0x11.toByte()           // Protocol: UDP (17)
+            packet[10] = 0x00.toByte()          // Header checksum (will calculate)
+            packet[11] = 0x00.toByte()
+
+            // Source IP
+            System.arraycopy(srcIp, 0, packet, 12, 4)
+            // Destination IP
+            System.arraycopy(dstIp, 0, packet, 16, 4)
+
+            // Calculate IP header checksum
+            val ipChecksum = calculateChecksum(packet, 0, 20)
+            packet[10] = (ipChecksum shr 8).toByte()
+            packet[11] = (ipChecksum and 0xFF).toByte()
+
+            // === UDP Header (8 bytes) ===
+            val udpOffset = 20
+            writeUdpHeader(packet, udpOffset, srcPort, dstPort, udpLength)
+            packet[udpOffset + 6] = 0x00.toByte() // UDP checksum (optional for IPv4)
+            packet[udpOffset + 7] = 0x00.toByte()
+
+            // DNS response payload
+            System.arraycopy(dnsResponse, 0, packet, 28, dnsResponse.size)
+
+            return packet
+        }
+
+        private fun buildIpv6ResponsePacket(
+            dnsResponse: ByteArray,
+            srcIp: ByteArray,
+            dstIp: ByteArray,
+            srcPort: Int,
+            dstPort: Int
+        ): ByteArray {
+            val udpLength = 8 + dnsResponse.size
+            val packet = ByteArray(IPV6_HEADER_SIZE + udpLength)
+
+            // === IPv6 Header (40 bytes) ===
+            packet[0] = 0x60.toByte()                   // Version 6, traffic class 0
+            packet[4] = (udpLength shr 8).toByte()      // Payload length (excludes header)
+            packet[5] = (udpLength and 0xFF).toByte()
+            packet[6] = PROTOCOL_UDP.toByte()           // Next header: UDP
+            packet[7] = 0x40.toByte()                   // Hop limit: 64
+            System.arraycopy(srcIp, 0, packet, 8, 16)
+            System.arraycopy(dstIp, 0, packet, 24, 16)
+
+            // === UDP Header (8 bytes) ===
+            val udpOffset = IPV6_HEADER_SIZE
+            writeUdpHeader(packet, udpOffset, srcPort, dstPort, udpLength)
+
+            // DNS response payload
+            System.arraycopy(dnsResponse, 0, packet, udpOffset + 8, dnsResponse.size)
+
+            // RFC 8200 section 8.1: the UDP checksum is mandatory over IPv6 and
+            // a receiver discards a datagram carrying a zero checksum, so a
+            // computed zero is transmitted as 0xFFFF.
+            var checksum = ipv6UdpChecksum(packet, udpOffset, udpLength, srcIp, dstIp)
+            if (checksum == 0) checksum = 0xFFFF
+            packet[udpOffset + 6] = (checksum shr 8).toByte()
+            packet[udpOffset + 7] = (checksum and 0xFF).toByte()
+
+            return packet
+        }
+
+        private fun writeUdpHeader(
+            packet: ByteArray,
+            udpOffset: Int,
+            srcPort: Int,
+            dstPort: Int,
+            udpLength: Int
+        ) {
+            packet[udpOffset] = (srcPort shr 8).toByte()
+            packet[udpOffset + 1] = (srcPort and 0xFF).toByte()
+            packet[udpOffset + 2] = (dstPort shr 8).toByte()
+            packet[udpOffset + 3] = (dstPort and 0xFF).toByte()
+            packet[udpOffset + 4] = (udpLength shr 8).toByte()
+            packet[udpOffset + 5] = (udpLength and 0xFF).toByte()
+        }
+
+        /**
+         * UDP checksum over the IPv6 pseudo-header (RFC 8200 section 8.1):
+         * source and destination addresses, 4-byte upper-layer length, three
+         * zero bytes and the next header value, followed by the UDP header
+         * (checksum field zeroed) and payload.
+         *
+         * Caller must not have written the checksum field yet.
+         */
+        private fun ipv6UdpChecksum(
+            packet: ByteArray,
+            udpOffset: Int,
+            udpLength: Int,
+            srcIp: ByteArray,
+            dstIp: ByteArray
+        ): Int {
+            val pseudo = ByteArray(40 + udpLength)
+            System.arraycopy(srcIp, 0, pseudo, 0, 16)
+            System.arraycopy(dstIp, 0, pseudo, 16, 16)
+            pseudo[32] = (udpLength ushr 24).toByte()
+            pseudo[33] = (udpLength ushr 16).toByte()
+            pseudo[34] = (udpLength ushr 8).toByte()
+            pseudo[35] = (udpLength and 0xFF).toByte()
+            pseudo[39] = PROTOCOL_UDP.toByte()
+            System.arraycopy(packet, udpOffset, pseudo, 40, udpLength)
+
+            return calculateChecksum(pseudo, 0, pseudo.size)
+        }
+
+        /**
+         * Calculate a one's-complement checksum (RFC 1071).
+         */
+        private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Int {
+            var sum = 0L
+            var i = offset
+            val end = offset + length
+
+            // Sum all 16-bit words
+            while (i < end - 1) {
+                sum += ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
+                i += 2
+            }
+
+            // If odd number of bytes, pad with zero
+            if (i < end) {
+                sum += (data[i].toInt() and 0xFF) shl 8
+            }
+
+            // Fold 32-bit sum to 16 bits
+            while (sum shr 16 > 0) {
+                sum = (sum and 0xFFFF) + (sum shr 16)
+            }
+
+            return (sum.inv() and 0xFFFF).toInt()
+        }
     }
 
     private lateinit var dnsInterceptor: DnsInterceptor
@@ -139,8 +394,25 @@ class FreedomVpnService : VpnService() {
      * all app and system traffic here. This service only forwards DNS packets,
      * so full-device routing can break non-DNS traffic such as carrier/IMS
      * services on some phones.
+     *
+     * IPv6 is configured the same narrow way. Some devices and configurations
+     * reject IPv6 on a tunnel, so a failure there deliberately falls back to an
+     * IPv4-only tunnel: losing IPv6 filtering is far better than losing all
+     * filtering.
      */
     private fun establishVpn(): Boolean {
+        vpnInterface = tryEstablish(withIpv6 = true) ?: tryEstablish(withIpv6 = false)
+
+        return if (vpnInterface == null) {
+            Log.e(TAG, "VPN interface is null — permission may have been revoked")
+            false
+        } else {
+            Log.i(TAG, "VPN interface established successfully")
+            true
+        }
+    }
+
+    private fun tryEstablish(withIpv6: Boolean): ParcelFileDescriptor? {
         return try {
             val builder = Builder()
                 .setSession("LibreAscent")
@@ -156,6 +428,14 @@ class FreedomVpnService : VpnService() {
                 // Block connections without VPN if tunnel goes down
                 .setBlocking(true)
 
+            if (withIpv6) {
+                builder.addAddress(TUN_ADDRESS_V6, 128)
+                    .addRoute(DNS_PRIMARY_V6, 128)
+                    .addRoute(DNS_SECONDARY_V6, 128)
+                    .addDnsServer(DNS_PRIMARY_V6)
+                    .addDnsServer(DNS_SECONDARY_V6)
+            }
+
             addBypassedApplication(builder, packageName)
             DEFAULT_BYPASSED_PACKAGES.forEach { addBypassedApplication(builder, it) }
 
@@ -163,18 +443,10 @@ class FreedomVpnService : VpnService() {
                 builder.setMetered(false)
             }
 
-            vpnInterface = builder.establish()
-
-            if (vpnInterface == null) {
-                Log.e(TAG, "VPN interface is null — permission may have been revoked")
-                false
-            } else {
-                Log.i(TAG, "VPN interface established successfully")
-                true
-            }
+            builder.establish()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to establish VPN interface", e)
-            false
+            Log.e(TAG, "Failed to establish VPN interface (ipv6=$withIpv6)", e)
+            null
         }
     }
 
@@ -239,58 +511,29 @@ class FreedomVpnService : VpnService() {
     /**
      * Process a single IP packet from the TUN interface.
      *
-     * IP packet layout:
-     * - Byte 0: version (4 bits) + IHL (4 bits)
-     * - Byte 9: protocol (6=TCP, 17=UDP)
-     * - Bytes 12-15: source IP
-     * - Bytes 16-19: destination IP
-     * - After IP header: transport layer (UDP/TCP)
+     * We only care about UDP packets to port 53 (DNS), over IPv4 or IPv6.
      *
-     * We only care about UDP packets to port 53 (DNS).
+     * ponytail: DNS over TCP is routed into the tunnel and silently dropped
+     * here, and DoH/DoT bypasses the tunnel entirely. Both are known remaining
+     * holes, tracked separately.
      */
     private fun processIpPacket(
         packet: ByteBuffer,
         length: Int
     ) {
-        if (length < 20) return // Minimum IP header size
-
         val rawData = packet.array()
 
-        // Check IP version (must be IPv4 = 4)
-        val versionIhl = rawData[0].toInt() and 0xFF
-        val version = versionIhl shr 4
-        if (version != 4) return // Skip IPv6 for now
-
-        // IP Header Length (in 32-bit words)
-        val ihl = (versionIhl and 0xF) * 4
-        if (length < ihl + 8) return // Not enough data for UDP header
-
-        // Protocol (byte 9)
-        val protocol = rawData[9].toInt() and 0xFF
-        if (protocol != 17) return // Only UDP (17)
-
-        // Extract source and destination IP
-        val srcIp = ByteArray(4)
-        val dstIp = ByteArray(4)
-        System.arraycopy(rawData, 12, srcIp, 0, 4)
-        System.arraycopy(rawData, 16, dstIp, 0, 4)
-
-        // UDP header starts after IP header
-        val udpOffset = ihl
-
-        // Destination port (bytes 2-3 of UDP header)
-        val dstPort = ((rawData[udpOffset + 2].toInt() and 0xFF) shl 8) or
-                (rawData[udpOffset + 3].toInt() and 0xFF)
-
-        // Source port (bytes 0-1 of UDP header)
-        val srcPort = ((rawData[udpOffset].toInt() and 0xFF) shl 8) or
-                (rawData[udpOffset + 1].toInt() and 0xFF)
+        val ip = parseUdpPacket(rawData, length) ?: return
+        val srcIp = ip.srcIp
+        val dstIp = ip.dstIp
+        val srcPort = ip.srcPort
+        val dstPort = ip.dstPort
 
         // Only process DNS (port 53)
         if (dstPort != DnsInterceptor.DNS_PORT) return
 
         // DNS payload starts after UDP header (8 bytes)
-        val dnsOffset = udpOffset + 8
+        val dnsOffset = ip.udpOffset + 8
         val dnsLength = length - dnsOffset
         if (dnsLength < DnsInterceptor.DNS_HEADER_SIZE) return
 
@@ -361,7 +604,13 @@ class FreedomVpnService : VpnService() {
         dstIp: ByteArray,
         srcPort: Int
     ) {
-        val dnsServers = listOf(DNS_PRIMARY, DNS_SECONDARY)
+        // Answer an IPv6 query from an IPv6 upstream so the response can be
+        // rebuilt in the family the client asked over.
+        val dnsServers = if (srcIp.size == 16) {
+            listOf(DNS_PRIMARY_V6, DNS_SECONDARY_V6)
+        } else {
+            listOf(DNS_PRIMARY, DNS_SECONDARY)
+        }
 
         for (server in dnsServers) {
             try {
@@ -403,92 +652,6 @@ class FreedomVpnService : VpnService() {
         }
 
         Log.w(TAG, "All DNS servers failed for query")
-    }
-
-    /**
-     * Build a complete IP+UDP packet wrapping a DNS response payload.
-     *
-     * This creates a valid IPv4 packet that the TUN interface will
-     * deliver to the requesting application.
-     */
-    private fun buildResponseIpPacket(
-        dnsResponse: ByteArray,
-        srcIp: ByteArray,   // Source IP (DNS server)
-        dstIp: ByteArray,   // Destination IP (device)
-        srcPort: Int,        // Source port (53)
-        dstPort: Int         // Destination port (original query source port)
-    ): ByteArray {
-        val udpLength = 8 + dnsResponse.size
-        val ipLength = 20 + udpLength
-
-        val packet = ByteArray(ipLength)
-
-        // === IPv4 Header (20 bytes) ===
-        packet[0] = 0x45.toByte()           // Version 4, IHL 5 (20 bytes)
-        packet[1] = 0x00.toByte()           // DSCP/ECN
-        packet[2] = (ipLength shr 8).toByte()  // Total length
-        packet[3] = (ipLength and 0xFF).toByte()
-        packet[4] = 0x00.toByte()           // Identification
-        packet[5] = 0x00.toByte()
-        packet[6] = 0x40.toByte()           // Flags: Don't Fragment
-        packet[7] = 0x00.toByte()           // Fragment offset
-        packet[8] = 0x40.toByte()           // TTL: 64
-        packet[9] = 0x11.toByte()           // Protocol: UDP (17)
-        packet[10] = 0x00.toByte()          // Header checksum (will calculate)
-        packet[11] = 0x00.toByte()
-
-        // Source IP
-        System.arraycopy(srcIp, 0, packet, 12, 4)
-        // Destination IP
-        System.arraycopy(dstIp, 0, packet, 16, 4)
-
-        // Calculate IP header checksum
-        val ipChecksum = calculateChecksum(packet, 0, 20)
-        packet[10] = (ipChecksum shr 8).toByte()
-        packet[11] = (ipChecksum and 0xFF).toByte()
-
-        // === UDP Header (8 bytes) ===
-        val udpOffset = 20
-        packet[udpOffset] = (srcPort shr 8).toByte()
-        packet[udpOffset + 1] = (srcPort and 0xFF).toByte()
-        packet[udpOffset + 2] = (dstPort shr 8).toByte()
-        packet[udpOffset + 3] = (dstPort and 0xFF).toByte()
-        packet[udpOffset + 4] = (udpLength shr 8).toByte()
-        packet[udpOffset + 5] = (udpLength and 0xFF).toByte()
-        packet[udpOffset + 6] = 0x00.toByte() // UDP checksum (optional for IPv4)
-        packet[udpOffset + 7] = 0x00.toByte()
-
-        // DNS response payload
-        System.arraycopy(dnsResponse, 0, packet, 28, dnsResponse.size)
-
-        return packet
-    }
-
-    /**
-     * Calculate IP header checksum (RFC 1071).
-     */
-    private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Int {
-        var sum = 0L
-        var i = offset
-        val end = offset + length
-
-        // Sum all 16-bit words
-        while (i < end - 1) {
-            sum += ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
-            i += 2
-        }
-
-        // If odd number of bytes, pad with zero
-        if (i < end) {
-            sum += (data[i].toInt() and 0xFF) shl 8
-        }
-
-        // Fold 32-bit sum to 16 bits
-        while (sum shr 16 > 0) {
-            sum = (sum and 0xFFFF) + (sum shr 16)
-        }
-
-        return (sum.inv() and 0xFFFF).toInt()
     }
 
     /**

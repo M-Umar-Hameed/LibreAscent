@@ -50,7 +50,6 @@ class FreedomAccessibilityService : AccessibilityService() {
     private var lastUrlCheckTime: Long = 0
     private var consecutiveBlockCount = 0
     private var lastCheckUrl: String = ""
-    private var lastSamsungDebugTime: Long = 0
     private var blockCooldownUntil: Long = 0
     // Remember the last whitelisted domain per browser, so text-only events still get context
     private var lastWhitelistedDomain: String? = null
@@ -313,28 +312,7 @@ class FreedomAccessibilityService : AccessibilityService() {
 
         val candidates = mutableSetOf<String>()
         val keywords = contentMatcher.getKeywords().toSet()
-        val sourceNode = event.source
-        
-        if (packageName == "com.sec.android.app.sbrowser") {
-            // AGGRESSIVE LOGGING: Let's see exactly what events Samsung Internet broadcasts under the hood
-            val typeStr = AccessibilityEvent.eventTypeToString(event.eventType)
-            val pkgHex = packageName.map { String.format("%04x", it.code) }.joinToString(" ")
-            Log.d(TAG, "SAMSUNG RAW EVENT | Pkg: $packageName | Hex: $pkgHex | Type: $typeStr | Class: ${event.className} | Text: ${event.text?.joinToString(",")} | Desc: ${event.contentDescription}")
 
-            // DEBUG: Deep dump event.source for Samsung Browser to find hidden URL nodes
-            if (sourceNode != null) {
-                val now = System.currentTimeMillis()
-                if (now - lastSamsungDebugTime > 3000) {
-                    lastSamsungDebugTime = now
-                    try {
-                        Log.d(TAG, "SAMSUNG SOURCE DUMP: cls=${sourceNode.className} id=${sourceNode.viewIdResourceName} text=[${sourceNode.text}] desc=[${sourceNode.contentDescription}] childCount=${sourceNode.childCount}")
-                        browserMonitor.debugDumpAllWindows(windows, rootNode, packageName)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Debug dump failed: ${e.message}")
-                    }
-                }
-            }
-        }
         browserMonitor.extractUrlCandidatesWithWindows(event, windows, rootNode, packageName)?.let { candidates.addAll(it) }
 
         if (candidates.isEmpty()) {

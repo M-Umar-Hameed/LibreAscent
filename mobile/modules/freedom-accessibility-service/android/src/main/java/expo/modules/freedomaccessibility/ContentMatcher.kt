@@ -75,7 +75,9 @@ class ContentMatcher {
             val normalized = normalizeUrl(rawPart)
             if (normalized.isEmpty()) continue
 
-            Log.d("ContentMatcher", "Checking candidate: '$normalized' (adultBlockingEnabled=$adultBlockingEnabled)")
+            if (BuildConfig.DEBUG) {
+                Log.d("ContentMatcher", "Checking candidate: '$normalized' (adultBlockingEnabled=$adultBlockingEnabled)")
+            }
 
             if (looksLikeUrl(normalized)) {
                 if (!adultBlockingEnabled) {

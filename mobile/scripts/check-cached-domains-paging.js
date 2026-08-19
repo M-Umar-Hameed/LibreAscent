@@ -152,18 +152,36 @@ assert.deepStrictEqual(
 );
 
 // hasCachedDomains / hasSourceDomains: the EXISTS checks behind the ad-block
-// enable path must not answer yes for an empty category or a pruned source.
-const exists = (sql, arg) =>
-  db.prepare(sql).get(arg).e === 1;
+// enable path must not answer yes for an empty category, a pruned source, or a
+// source whose rows are all still under the category it used to belong to.
+const exists = (sql, ...args) => db.prepare(sql).get(...args).e === 1;
 const HAS_CATEGORY_SQL =
   "SELECT EXISTS(SELECT 1 FROM cached_domains WHERE category_id = ? LIMIT 1) as e";
 const HAS_SOURCE_SQL =
-  "SELECT EXISTS(SELECT 1 FROM cached_domains WHERE source_id = ? LIMIT 1) as e";
-assert.ok(databaseSrc.includes(HAS_CATEGORY_SQL), "hasCachedDomains query drifted");
+  "SELECT EXISTS(SELECT 1 FROM cached_domains WHERE source_id = ? AND category_id = ? LIMIT 1) as e";
+assert.ok(
+  databaseSrc.includes(HAS_CATEGORY_SQL),
+  "hasCachedDomains query drifted",
+);
 assert.ok(databaseSrc.includes(HAS_SOURCE_SQL), "hasSourceDomains query drifted");
 assert.strictEqual(exists(HAS_CATEGORY_SQL, "exact"), true, "populated category");
 assert.strictEqual(exists(HAS_CATEGORY_SQL, "empty"), false, "empty category");
-assert.strictEqual(exists(HAS_SOURCE_SQL, "src-b"), true, "populated source");
-assert.strictEqual(exists(HAS_SOURCE_SQL, "src-gone"), false, "unknown source");
+assert.strictEqual(
+  exists(HAS_SOURCE_SQL, "src-b", "dupes"),
+  true,
+  "source with rows under its own category",
+);
+assert.strictEqual(
+  exists(HAS_SOURCE_SQL, "src-gone", "dupes"),
+  false,
+  "unknown source",
+);
+// The F1 case: src-b's rows exist, but under "dupes". A release that moves it
+// to a new category must not be told its cache is still usable.
+assert.strictEqual(
+  exists(HAS_SOURCE_SQL, "src-b", "moved-category"),
+  false,
+  "rows under the source's previous category must not count as a cache hit",
+);
 
 console.log("cachedDomains keyset paging: all checks passed");

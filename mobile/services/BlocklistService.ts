@@ -524,6 +524,7 @@ export const BlocklistService = {
     sourceId: string,
     url: string,
     format: "domains" | "hosts" | "keywords",
+    categoryId: string,
   ): Promise<{
     changed: boolean;
     list: string[];
@@ -533,10 +534,12 @@ export const BlocklistService = {
   }> => {
     const cached = getSourceCache(sourceId);
 
-    // A cached ETag/hash only means "unchanged" if the rows it was recorded
-    // for still exist. Without this the server keeps answering 304 against an
-    // empty cache and the category can never repopulate.
-    const cacheUsable = cached !== null && hasSourceDomains(sourceId);
+    // A cached ETag/hash only means "unchanged" if the rows it was recorded for
+    // still exist under the category this source now belongs to. Without this
+    // the server keeps answering 304 against a category that has no rows, and
+    // that category can never repopulate.
+    const cacheUsable =
+      cached !== null && hasSourceDomains(sourceId, categoryId);
 
     // For complex URLs (comma-separated, Bon-Appetit), skip conditional request
     // and use content hash comparison instead.
@@ -732,11 +735,14 @@ export const BlocklistService = {
         onProgress?.(i + 1, total, `Checking ${source.name}...`);
         await new Promise((r) => setTimeout(r, 0));
 
+        const categoryId = BlocklistService.getCategoryForSource(source);
+
         try {
           const result = await BlocklistService.fetchSourceWithCache(
             source.id,
             source.url,
             source.format,
+            categoryId,
           );
 
           if (!result.changed) {
@@ -754,7 +760,6 @@ export const BlocklistService = {
             continue;
           }
 
-          const categoryId = BlocklistService.getCategoryForSource(source);
           saveSourceDomains(
             source.id,
             categoryId,

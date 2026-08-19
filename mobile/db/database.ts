@@ -50,7 +50,9 @@ export function initDB(): void {
     CREATE INDEX IF NOT EXISTS idx_cached_domains_cat_domain
       ON cached_domains(category_id, domain);
     -- Strict prefix of idx_cached_domains_cat_domain: serves no query the
-    -- composite cannot, and costs a write on every cached domain.
+    -- composite cannot, and costs a write on every cached domain. Freeing its
+    -- b-tree blocks the first launch after this ships, once, in exchange for
+    -- dropping ~1M index writes from every blocklist refresh.
     DROP INDEX IF EXISTS idx_cached_domains_category;
   `);
 }
@@ -226,14 +228,15 @@ export function contentFingerprint(content: string): string {
   return h.toString(36);
 }
 
-// ponytail: parse + insert still run on the JS thread, so a ~1M-domain source
-// stalls it for the whole transaction. Upgrade path is fetching, parsing and
-// inserting natively; a yield here would hold the transaction open across
-// unrelated writes.
 /**
  * Replace cached domains for a source and update its HTTP cache headers.
  * Uses batch INSERT for speed (~300 rows per statement to stay under
  * SQLite's 999-variable limit).
+ *
+ * ponytail: parse + insert still run on the JS thread, so a ~1M-domain source
+ * stalls it for the whole transaction. Upgrade path is fetching, parsing and
+ * inserting natively; a yield here would hold the transaction open across
+ * unrelated writes.
  */
 export function saveSourceDomains(
   sourceId: string,
@@ -320,11 +323,18 @@ export function hasCachedDomains(categoryId: string): boolean {
   return row?.e === 1;
 }
 
-/** Whether a source still holds the rows its cached ETag was recorded for. */
-export function hasSourceDomains(sourceId: string): boolean {
+/**
+ * Whether a source still holds rows under `categoryId`. Keyed on both columns:
+ * rows left under a source's previous category are as stale as no rows at all.
+ */
+export function hasSourceDomains(
+  sourceId: string,
+  categoryId: string,
+): boolean {
   const row = db.getFirstSync<{ e: number }>(
-    "SELECT EXISTS(SELECT 1 FROM cached_domains WHERE source_id = ? LIMIT 1) as e",
+    "SELECT EXISTS(SELECT 1 FROM cached_domains WHERE source_id = ? AND category_id = ? LIMIT 1) as e",
     sourceId,
+    categoryId,
   );
   return row?.e === 1;
 }

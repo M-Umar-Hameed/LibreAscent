@@ -13,6 +13,10 @@
 
 # Add any project specific keep options here:
 
+# Keep obfuscated release stack traces deobfuscatable via mapping.txt.
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
+
 # Strip debug/verbose logging in release builds. Requires minifyEnabled
 # (see gradle.properties: android.enableMinifyInReleaseBuilds).
 -assumenosideeffects class android.util.Log {
@@ -20,12 +24,12 @@
     public static *** v(...);
 }
 
-# The Android framework instantiates these classes by the fully-qualified
-# name declared in each module's AndroidManifest.xml (accessibility
-# service, VPN service, foreground service, overlay service, device admin
-# receiver, boot/banking-restore receivers). R8 can't see that manifest
-# reference, so without an explicit keep it can rename or strip them,
-# breaking service binding at runtime.
+# Deliberate redundancy over AAPT's auto-generated keeps (aapt_rules.txt
+# already keeps <init>() for each of these manifest-declared components,
+# and R8 doesn't strip/rename overrides of a live android.jar method like
+# onAccessibilityEvent/onReceive/onStartCommand/onRevoke/onEnabled). Not
+# load-bearing, but cheap insurance on the app's core services/receivers;
+# the cost is R8 can't shrink these classes' private internals.
 -keep class expo.modules.freedomaccessibility.FreedomAccessibilityService { *; }
 -keep class expo.modules.freedomaccessibility.BankingRestoreReceiver { *; }
 -keep class expo.modules.freedomvpn.FreedomVpnService { *; }

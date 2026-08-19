@@ -1,5 +1,6 @@
 import * as SQLite from "expo-sqlite";
 import { drainPending } from "./blockedCountAccumulator";
+import { shouldWrite } from "./dedupeWrite";
 
 // Create or open the database.
 // To use synchronous database calls (which are often easier for simple React Native state),
@@ -100,17 +101,18 @@ export const sqliteStorage = {
   },
 };
 
-let pendingAppStoreWrite: { key: string; value: string } | null = null;
-
 /**
- * Storage adapter for useAppStore's persist middleware. Queues the write
- * in memory instead of committing it on every set() — commit happens via
- * flushBlockedStats() on the flush interval / AppState background.
+ * Storage adapter for useAppStore's persist middleware. Writes go straight
+ * through to sqliteStorage (no deferral — settings must hit disk promptly),
+ * except a write whose serialized value is unchanged from the last one is
+ * skipped. useAppStore's partialize keeps the per-event blocked-count fields
+ * out of the persisted blob, so a blocked event's set() call reaches here
+ * with a byte-identical value and is a no-op — no queue or timer needed.
  */
-export const batchedAppStoreStorage = {
+export const dedupingAppStoreStorage = {
   getItem: sqliteStorage.getItem,
   setItem: (name: string, value: string): void => {
-    pendingAppStoreWrite = { key: name, value };
+    if (shouldWrite(value)) sqliteStorage.setItem(name, value);
   },
   removeItem: sqliteStorage.removeItem,
 };
@@ -118,38 +120,21 @@ export const batchedAppStoreStorage = {
 export { incrementPending as accumulateBlockedCount } from "./blockedCountAccumulator";
 
 /**
- * Commits the pending blocked count and any queued app-store write in a
- * single transaction. Call on the flush interval and on AppState background.
+ * Commits the pending blocked count to the stats table. Call on the flush
+ * interval and on AppState background.
  */
 export function flushBlockedStats(): void {
   const count = drainPending();
-  if (count === 0 && !pendingAppStoreWrite) return;
+  if (count === 0) return;
 
-  db.execSync("BEGIN TRANSACTION");
-  try {
-    if (count > 0) {
-      const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
-      db.runSync(
-        `INSERT INTO stats (date, blocked_count) VALUES (?, ?)
-         ON CONFLICT(date) DO UPDATE SET blocked_count = blocked_count + ?;`,
-        today,
-        count,
-        count,
-      );
-    }
-    if (pendingAppStoreWrite) {
-      db.runSync(
-        `INSERT INTO kv_store (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;`,
-        pendingAppStoreWrite.key,
-        pendingAppStoreWrite.value,
-      );
-      pendingAppStoreWrite = null;
-    }
-    db.execSync("COMMIT");
-  } catch (e) {
-    db.execSync("ROLLBACK");
-    throw e;
-  }
+  const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+  db.runSync(
+    `INSERT INTO stats (date, blocked_count) VALUES (?, ?)
+     ON CONFLICT(date) DO UPDATE SET blocked_count = blocked_count + ?;`,
+    today,
+    count,
+    count,
+  );
 }
 
 /**

@@ -1,5 +1,5 @@
 import {
-  batchedAppStoreStorage,
+  dedupingAppStoreStorage,
   getTodayBlockedCount,
   getTotalBlockedCount,
 } from "@/db/database";
@@ -60,6 +60,10 @@ interface AppState {
   completeOnboarding: () => void;
   hydrateStats: () => void;
 }
+
+type PersistedAppState = Omit<AppState, "protection" | "stats"> & {
+  stats: Pick<BlockingStats, "cleanSince" | "daysClean">;
+};
 
 export const useAppStore = create<AppState>()(
   persist(
@@ -155,12 +159,30 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: "freedom-app-store",
-      storage: createJSONStorage(() => batchedAppStoreStorage),
-      // protection is runtime status, always reset below on every rehydrate —
-      // persisting it would be pure waste.
-      partialize: (state) => {
-        const { protection: _protection, ...persisted } = state;
-        return persisted;
+      storage: createJSONStorage(() => dedupingAppStoreStorage),
+      // protection is runtime status, always reset below on every rehydrate,
+      // so persisting it would be pure waste. blockedToday/totalBlocked are
+      // re-read from the stats table by hydrateStats(), and lastBlockedAt
+      // has no other consumer — dropping all three from the persisted blob
+      // means a blocked event's write is byte-identical to the last one, so
+      // dedupingAppStoreStorage can skip it with no queue or timer needed.
+      // cleanSince/daysClean have no other home and must stay persisted.
+      partialize: (state): PersistedAppState => {
+        const { protection: _protection, stats, ...rest } = state;
+        return {
+          ...rest,
+          stats: { cleanSince: stats.cleanSince, daysClean: stats.daysClean },
+        };
+      },
+      merge: (persistedState, currentState) => {
+        const persisted = persistedState as
+          | Partial<PersistedAppState>
+          | undefined;
+        return {
+          ...currentState,
+          ...persisted,
+          stats: { ...currentState.stats, ...persisted?.stats },
+        };
       },
       onRehydrateStorage: () => (state) => {
         state?.setProtection({

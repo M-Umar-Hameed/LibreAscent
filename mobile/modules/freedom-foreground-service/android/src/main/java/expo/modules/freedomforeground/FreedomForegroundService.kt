@@ -10,7 +10,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -32,6 +34,18 @@ class FreedomForegroundService : Service() {
     private var blockedCount: Int = 0
     private var cachedOpenAppIntent: PendingIntent? = null
     private var lastBlockedNotifyAt: Long = 0
+    private var pendingNotify = false
+    private val notifyHandler = Handler(Looper.getMainLooper())
+
+    private val trailingNotify = Runnable {
+        pendingNotify = false
+        updateBlockedNotification()
+    }
+
+    private fun updateBlockedNotification() {
+        lastBlockedNotifyAt = SystemClock.elapsedRealtime()
+        updateNotification(null, "Content blocking active • $blockedCount blocked today")
+    }
 
     companion object {
         private const val TAG = "FreedomForeground"
@@ -142,11 +156,17 @@ class FreedomForegroundService : Service() {
         blockedDomainReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 blockedCount++
-                // Rate-limit rebuilds; a burst of blocks is one notification update
-                val now = SystemClock.elapsedRealtime()
-                if (now - lastBlockedNotifyAt >= BLOCKED_NOTIFY_INTERVAL_MS) {
-                    lastBlockedNotifyAt = now
-                    updateNotification(null, "Content blocking active • $blockedCount blocked today")
+                // Rate-limit rebuilds: a burst of blocks is one update now plus a
+                // trailing one at the interval boundary, so the count is never left stale.
+                val elapsed = SystemClock.elapsedRealtime() - lastBlockedNotifyAt
+                if (elapsed >= BLOCKED_NOTIFY_INTERVAL_MS) {
+                    updateBlockedNotification()
+                } else if (!pendingNotify) {
+                    pendingNotify = true
+                    notifyHandler.postDelayed(
+                        trailingNotify,
+                        BLOCKED_NOTIFY_INTERVAL_MS - elapsed
+                    )
                 }
             }
         }
@@ -160,6 +180,7 @@ class FreedomForegroundService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        notifyHandler.removeCallbacks(trailingNotify)
         blockedDomainReceiver?.let {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(it)
         }

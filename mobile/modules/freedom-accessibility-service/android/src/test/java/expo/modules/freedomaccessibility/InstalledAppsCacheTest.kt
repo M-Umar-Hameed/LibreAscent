@@ -58,4 +58,24 @@ class InstalledAppsCacheTest {
         )
         assertEquals(2, loads)
     }
+
+    @Test
+    fun invalidationDuringLoadIsNotCached() {
+        val start = 3_000_000L
+
+        // A package is installed while the query is in flight, so the result is
+        // returned but must not be cached.
+        val stale = InstalledAppsCache.get(start) {
+            InstalledAppsCache.invalidate()
+            load()
+        }
+        assertEquals("pkg.1", stale.first()["packageName"])
+        assertEquals(1, loads)
+
+        assertEquals(
+            "pkg.2",
+            InstalledAppsCache.get(start + 1) { load() }.first()["packageName"]
+        )
+        assertEquals(2, loads)
+    }
 }

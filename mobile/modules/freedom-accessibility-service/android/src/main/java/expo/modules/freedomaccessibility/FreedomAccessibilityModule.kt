@@ -41,8 +41,9 @@ class FreedomAccessibilityModule : Module() {
 
     // Blocked-URL and reels events are buffered and flushed on a fixed interval
     // so a burst of blocks wakes the JS thread once instead of once per event.
-    // Touched only from the main thread (LocalBroadcastManager delivery and the
-    // flush handler both run there), so no synchronisation is needed.
+    // The buffer is only ever touched from the main thread (LocalBroadcastManager
+    // delivery and the flush handler both run there), so no synchronisation is
+    // needed. Teardown runs on another thread and must not touch it.
     private val flushHandler = Handler(Looper.getMainLooper())
     private val pendingEvents = mutableListOf<Pair<String, Map<String, Any?>>>()
     private var flushScheduled = false
@@ -647,9 +648,10 @@ class FreedomAccessibilityModule : Module() {
         urlBlockedReceiver?.let { lbm.unregisterReceiver(it) }
         reelsDetectedReceiver?.let { lbm.unregisterReceiver(it) }
 
+        // removeCallbacks is thread-safe; the buffer itself must not be touched
+        // here because teardown does not run on the main thread. It dies with
+        // the module instance.
         flushHandler.removeCallbacks(flushRunnable)
-        flushScheduled = false
-        pendingEvents.clear()
 
         urlBlockedReceiver = null
         reelsDetectedReceiver = null

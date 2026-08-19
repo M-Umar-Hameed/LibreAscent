@@ -20,8 +20,9 @@ class FreedomVpnModule : Module() {
 
     // Blocked-domain events are buffered and flushed on a fixed interval so an
     // ad-heavy page wakes the JS thread once instead of once per blocked
-    // request. Touched only from the main thread (LocalBroadcastManager
-    // delivery and the flush handler both run there).
+    // request. The buffer is only ever touched from the main thread
+    // (LocalBroadcastManager delivery and the flush handler both run there).
+    // Teardown runs on another thread and must not touch it.
     private val flushHandler = Handler(Looper.getMainLooper())
     private val pendingBlocked = mutableListOf<Map<String, Any?>>()
     private var flushScheduled = false
@@ -220,9 +221,10 @@ class FreedomVpnModule : Module() {
         domainBlockedReceiver?.let { lbm.unregisterReceiver(it) }
         vpnStatusReceiver?.let { lbm.unregisterReceiver(it) }
 
+        // removeCallbacks is thread-safe; the buffer itself must not be touched
+        // here because teardown does not run on the main thread. It dies with
+        // the module instance.
         flushHandler.removeCallbacks(flushRunnable)
-        flushScheduled = false
-        pendingBlocked.clear()
 
         domainBlockedReceiver = null
         vpnStatusReceiver = null

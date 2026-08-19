@@ -108,9 +108,9 @@ class FreedomVpnModule : Module() {
             }
         }
 
-        AsyncFunction("addCategory") { name: String, domains: List<String>, promise: Promise ->
+        AsyncFunction("addCategory") { name: String, domains: List<String>, replace: Boolean, promise: Promise ->
             try {
-                FreedomVpnService.blocklist.addCategory(name, domains)
+                FreedomVpnService.blocklist.addCategory(name, domains, replace)
                 promise.resolve(null)
             } catch (e: Exception) {
                 promise.reject("ERR_VPN_CATEGORY", e.message, e)

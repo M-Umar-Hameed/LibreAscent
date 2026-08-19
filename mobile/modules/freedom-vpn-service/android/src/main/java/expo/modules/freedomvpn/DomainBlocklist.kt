@@ -6,19 +6,23 @@ import java.util.concurrent.ConcurrentHashMap
  * Domain blocklist with O(1) lookup via HashSet.
  * Supports exact match and suffix matching (blocks subdomains).
  *
- * Thread-safe: uses ConcurrentHashMap for concurrent reads/writes
- * from the VPN packet processing thread and the JS config thread.
+ * Thread-safe: the main blocklist and whitelist are immutable sets swapped
+ * behind volatile references, and category sets are concurrent sets replaced
+ * atomically in the map. Readers on the VPN packet processing thread always
+ * observe either the previous or the next complete set.
  */
 class DomainBlocklist {
 
     // Main blocklist — stores normalized domains
-    private val blockedDomains = ConcurrentHashMap.newKeySet<String>()
+    @Volatile
+    private var blockedDomains: Set<String> = emptySet()
 
     // Per-category domain sets — for enabling/disabling categories at runtime
     private val categories = ConcurrentHashMap<String, MutableSet<String>>()
 
     // Whitelist — domains explicitly allowed (takes precedence over blocklist)
-    private val whitelist = ConcurrentHashMap.newKeySet<String>()
+    @Volatile
+    private var whitelist: Set<String> = emptySet()
 
     /**
      * Check if a domain should be blocked.
@@ -34,36 +38,46 @@ class DomainBlocklist {
         val normalized = normalize(domain)
         if (normalized.isEmpty()) return false
 
-        // Check whitelist first (exact + suffix)
-        if (matchesList(normalized, whitelist)) return false
+        val candidates = parentChain(normalized)
 
-        if (matchesList(normalized, blockedDomains)) return true
+        // Check whitelist first (exact + suffix)
+        if (matchesList(candidates, whitelist)) return false
+
+        if (matchesList(candidates, blockedDomains)) return true
 
         for (categorySet in categories.values) {
-            if (matchesList(normalized, categorySet)) return true
+            if (matchesList(candidates, categorySet)) return true
         }
 
         return false
     }
 
     /**
-     * Check if the domain or any of its parent domains match the given set.
-     * Example: for "sub.example.com", checks:
-     *   "sub.example.com" → "example.com" → "com"
+     * The domain followed by each of its parent domains.
+     * Example: "sub.example.com" → ["sub.example.com", "example.com", "com"]
      */
-    private fun matchesList(domain: String, domainSet: Set<String>): Boolean {
-        // Exact match
-        if (domainSet.contains(domain)) return true
+    private fun parentChain(domain: String): List<String> {
+        val chain = ArrayList<String>(4)
+        chain.add(domain)
 
-        // Suffix/parent match
         var current = domain
         while (true) {
             val dotIndex = current.indexOf('.')
             if (dotIndex < 0 || dotIndex == current.length - 1) break
             current = current.substring(dotIndex + 1)
-            if (domainSet.contains(current)) return true
+            chain.add(current)
         }
 
+        return chain
+    }
+
+    /**
+     * Check if the domain or any of its parent domains match the given set.
+     */
+    private fun matchesList(candidates: List<String>, domainSet: Set<String>): Boolean {
+        for (candidate in candidates) {
+            if (domainSet.contains(candidate)) return true
+        }
         return false
     }
 
@@ -71,39 +85,38 @@ class DomainBlocklist {
      * Replace the entire blocklist with a new set of domains.
      */
     fun setDomains(domains: Collection<String>) {
-        blockedDomains.clear()
-        domains.forEach { domain ->
-            val normalized = normalize(domain)
-            if (normalized.isNotEmpty()) {
-                blockedDomains.add(normalized)
-            }
-        }
+        blockedDomains = normalizedSet(domains)
     }
 
     /**
      * Add domains to the blocklist.
      */
     fun addDomains(domains: Collection<String>) {
-        domains.forEach { domain ->
-            val normalized = normalize(domain)
-            if (normalized.isNotEmpty()) {
-                blockedDomains.add(normalized)
-            }
-        }
+        blockedDomains = blockedDomains + normalizedSet(domains)
     }
 
     /**
-     * Add/append domains to a category.
-     * Domains are also added to the main blocklist.
-     * If the category already exists, domains are appended (not replaced).
+     * Add domains to a category.
+     * When [replace] is true the category is reset to exactly these domains,
+     * otherwise they are appended to whatever the category already holds.
+     * Callers that stream a category in batches pass replace=true for the first
+     * batch only.
      */
-    fun addCategory(name: String, domains: Collection<String>) {
-        val normalizedDomains = domains
-            .map { normalize(it) }
-            .filter { it.isNotEmpty() }
+    fun addCategory(name: String, domains: Collection<String>, replace: Boolean) {
+        val target = if (replace) {
+            ConcurrentHashMap.newKeySet<String>()
+        } else {
+            categories.getOrPut(name) { ConcurrentHashMap.newKeySet() }
+        }
 
-        val existing = categories.getOrPut(name) { ConcurrentHashMap.newKeySet() }
-        existing.addAll(normalizedDomains)
+        domains.forEach { domain ->
+            val normalized = normalize(domain)
+            if (normalized.isNotEmpty()) {
+                target.add(normalized)
+            }
+        }
+
+        if (replace) categories[name] = target
     }
 
     /**
@@ -118,31 +131,44 @@ class DomainBlocklist {
      * Set the whitelist (excluded domains).
      */
     fun setWhitelist(domains: Collection<String>) {
-        whitelist.clear()
-        domains.forEach { domain ->
-            val normalized = normalize(domain)
-            if (normalized.isNotEmpty()) {
-                whitelist.add(normalized)
-            }
-        }
+        whitelist = normalizedSet(domains)
     }
 
     /**
      * Get the total number of blocked domains.
      */
     fun size(): Int {
-        val allDomains = HashSet<String>(blockedDomains)
-        categories.values.forEach { allDomains.addAll(it) }
-        return allDomains.size
+        // ponytail: sums per-set sizes, which are O(1); a domain listed in two
+        // categories is counted twice. De-duplicating would need a flattened
+        // union set, roughly +37 MB per million domains in the VPN process.
+        var total = blockedDomains.size
+        for (categorySet in categories.values) {
+            total += categorySet.size
+        }
+        return total
     }
 
     /**
      * Clear everything.
      */
     fun clear() {
-        blockedDomains.clear()
+        blockedDomains = emptySet()
         categories.clear()
-        whitelist.clear()
+        whitelist = emptySet()
+    }
+
+    /**
+     * Normalize a collection into an immutable set, dropping unusable entries.
+     */
+    private fun normalizedSet(domains: Collection<String>): Set<String> {
+        val result = HashSet<String>(domains.size * 4 / 3 + 1)
+        domains.forEach { domain ->
+            val normalized = normalize(domain)
+            if (normalized.isNotEmpty()) {
+                result.add(normalized)
+            }
+        }
+        return result
     }
 
     /**

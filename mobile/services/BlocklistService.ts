@@ -85,11 +85,13 @@ export const BlocklistService = {
    */
   sendInBatches: async (
     domains: string[],
-    batchFn: (batch: string[]) => Promise<void>,
+    batchFn: (batch: string[], index: number) => Promise<void>,
   ): Promise<void> => {
+    let index = 0;
     for (let i = 0; i < domains.length; i += BlocklistService.BATCH_SIZE) {
       const batch = domains.slice(i, i + BlocklistService.BATCH_SIZE);
-      await batchFn(batch);
+      await batchFn(batch, index);
+      index += 1;
     }
   },
 
@@ -164,8 +166,8 @@ export const BlocklistService = {
       try {
         await BlocklistService.sendInBatches(
           category.domains,
-          async (batch) => {
-            await FreedomVpn.addCategory(category.id, batch);
+          async (batch, index) => {
+            await FreedomVpn.addCategory(category.id, batch, index === 0);
             if (toAccessibility) {
               await FreedomAccessibility.appendCategoryDomains(
                 category.id,
@@ -599,7 +601,7 @@ export const BlocklistService = {
       const batch = readCachedDomainsBatch(categoryId, PAGE, offset);
       if (batch.length === 0) break;
       if (syncVpn) {
-        await FreedomVpn.addCategory(categoryId, batch);
+        await FreedomVpn.addCategory(categoryId, batch, offset === 0);
       }
       if (syncAccessibility) {
         await FreedomAccessibility.appendCategoryDomains(categoryId, batch);

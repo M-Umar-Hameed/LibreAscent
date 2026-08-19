@@ -10,7 +10,7 @@ interface FreedomVpnModuleInterface {
   isVpnPrepared(): Promise<boolean>;
   prepareVpn(): Promise<boolean>;
   updateBlocklist(domains: string[]): Promise<void>;
-  addCategory(name: string, domains: string[]): Promise<void>;
+  addCategory(name: string, domains: string[], replace: boolean): Promise<void>;
   removeCategory(name: string): Promise<void>;
   setWhitelist(domains: string[]): Promise<void>;
   getBlockedCount(): Promise<number>;
@@ -60,12 +60,17 @@ export async function updateBlocklist(domains: string[]): Promise<void> {
   return FreedomVpnNative.updateBlocklist(domains);
 }
 
+/**
+ * Set a category's domains. Defaults to replacing the category; pass
+ * replace=false to append when streaming a category in batches.
+ */
 export async function addCategory(
   name: string,
   domains: string[],
+  replace = true,
 ): Promise<void> {
   if (!FreedomVpnNative) return;
-  return FreedomVpnNative.addCategory(name, domains);
+  return FreedomVpnNative.addCategory(name, domains, replace);
 }
 
 export async function removeCategory(name: string): Promise<void> {

@@ -97,6 +97,18 @@ class FreedomVpnServiceTest {
     }
 
     @Test
+    fun ipv6UdpChecksumOfZeroIsSentAsAllOnes() {
+        // This vector sums to exactly 0xFFFF, so the one's complement is
+        // 0x0000 — illegal over IPv6 and required to go on the wire as 0xFFFF.
+        val body = hex("a124") + ByteArray(18)
+        val packet = FreedomVpnService.buildResponseIpPacket(
+            body, cloudflareV6, tunV6, 53, 40000
+        )
+
+        assertEquals(0xFFFF, be16(packet, 46))
+    }
+
+    @Test
     fun ipv6UdpChecksumIsNeverZero() {
         for (i in 0 until 256) {
             val body = ByteArray(20) { ((it * 7 + i) and 0xFF).toByte() }
@@ -134,6 +146,21 @@ class FreedomVpnServiceTest {
         assertEquals(41234, parsed.srcPort)
         assertEquals(53, parsed.dstPort)
         assertEquals(20, parsed.udpOffset)
+    }
+
+    @Test
+    fun ipv4OptionsShiftTheUdpOffset() {
+        val query = dnsQuery("ads.example.com")
+        val packet = ipv4UdpPacket(41234, 53, query, optionBytes = 4)
+
+        val parsed = assertNotNull(FreedomVpnService.parseUdpPacket(packet, packet.size))
+        assertEquals(24, parsed.udpOffset) // IHL 6, not a hardcoded 20
+        assertEquals(41234, parsed.srcPort)
+        assertEquals(53, parsed.dstPort)
+
+        val dns = packet.copyOfRange(parsed.udpOffset + 8, packet.size)
+        val result = assertNotNull(DnsInterceptor(DomainBlocklist()).processQuery(dns, dns.size))
+        assertEquals("ads.example.com", result.domain)
     }
 
     @Test
@@ -186,17 +213,23 @@ class FreedomVpnServiceTest {
         return packet
     }
 
-    private fun ipv4UdpPacket(srcPort: Int, dstPort: Int, payload: ByteArray): ByteArray {
+    private fun ipv4UdpPacket(
+        srcPort: Int,
+        dstPort: Int,
+        payload: ByteArray,
+        optionBytes: Int = 0
+    ): ByteArray {
+        val ihl = 20 + optionBytes
         val udpLength = 8 + payload.size
-        val packet = ByteArray(20 + udpLength)
-        packet[0] = 0x45.toByte()
-        packet[2] = ((20 + udpLength) shr 8).toByte()
-        packet[3] = ((20 + udpLength) and 0xFF).toByte()
+        val packet = ByteArray(ihl + udpLength)
+        packet[0] = (0x40 or (ihl / 4)).toByte()
+        packet[2] = ((ihl + udpLength) shr 8).toByte()
+        packet[3] = ((ihl + udpLength) and 0xFF).toByte()
         packet[8] = 0x40.toByte()
         packet[9] = 17
         byteArrayOf(10, 0, 0, 2).copyInto(packet, 12)
         byteArrayOf(1, 1, 1, 1).copyInto(packet, 16)
-        writeUdp(packet, 20, srcPort, dstPort, udpLength, payload)
+        writeUdp(packet, ihl, srcPort, dstPort, udpLength, payload)
         return packet
     }
 
@@ -223,7 +256,10 @@ class FreedomVpnServiceTest {
      * Written independently of the production routine.
      */
     private fun verifyIpv6UdpChecksum(packet: ByteArray): Int {
-        val udpLength = be16(packet, 4)
+        // Read from the UDP length field, not the IPv6 payload length: the
+        // builder writes both from one variable, so trusting the IP header
+        // would hide a bug in it.
+        val udpLength = be16(packet, 44)
         var sum = 0
         for (offset in intArrayOf(8, 24)) {
             for (i in offset until offset + 16 step 2) sum += be16(packet, i)

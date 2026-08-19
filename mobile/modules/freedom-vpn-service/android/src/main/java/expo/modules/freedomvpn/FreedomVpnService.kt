@@ -445,7 +445,11 @@ class FreedomVpnService : VpnService() {
 
             builder.establish()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to establish VPN interface (ipv6=$withIpv6)", e)
+            if (withIpv6) {
+                Log.w(TAG, "VPN establish failed with IPv6, retrying without: ${e.message}")
+            } else {
+                Log.e(TAG, "Failed to establish VPN interface", e)
+            }
             null
         }
     }
@@ -604,10 +608,14 @@ class FreedomVpnService : VpnService() {
         dstIp: ByteArray,
         srcPort: Int
     ) {
-        // Answer an IPv6 query from an IPv6 upstream so the response can be
-        // rebuilt in the family the client asked over.
+        // An IPv6 query prefers the IPv6 upstreams but falls back to the IPv4
+        // ones: the tunnel advertises IPv6 resolvers even on a network with no
+        // IPv6 route, where those sends fail with ENETUNREACH. The DNS payload
+        // is family-agnostic and buildResponseIpPacket rebuilds the answer in
+        // the client's family from the captured srcIp, so a v6 client can be
+        // answered from a v4 resolver.
         val dnsServers = if (srcIp.size == 16) {
-            listOf(DNS_PRIMARY_V6, DNS_SECONDARY_V6)
+            listOf(DNS_PRIMARY_V6, DNS_SECONDARY_V6, DNS_PRIMARY, DNS_SECONDARY)
         } else {
             listOf(DNS_PRIMARY, DNS_SECONDARY)
         }

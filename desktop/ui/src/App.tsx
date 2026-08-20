@@ -65,12 +65,13 @@ export function App() {
   const [domain, setDomain] = useState("example.com");
   const [newDomain, setNewDomain] = useState("");
   const [newApp, setNewApp] = useState("");
+  const [newKeyword, setNewKeyword] = useState("");
   const [domainResult, setDomainResult] = useState<DomainResult>("idle");
   const [loading, setLoading] = useState(false);
   const [lastBlock, setLastBlock] = useState<string | null>(null);
   const [frictionTarget, setFrictionTarget] = useState<{
-    cmd: string;
     title: string;
+    run: () => Promise<void>;
   } | null>(null);
 
   const refreshStatus = () => {
@@ -122,7 +123,7 @@ export function App() {
 
   async function runAction(cmd: string, title?: string) {
     if (config?.controlMode !== "flexible" && title) {
-      setFrictionTarget({ cmd, title });
+      setFrictionTarget({ title, run: () => invoke(cmd).then(() => {}) });
       return;
     }
 
@@ -208,6 +209,64 @@ export function App() {
     }
   }
 
+  async function addKeyword() {
+    const value = newKeyword.trim().toLowerCase();
+    if (!config || !value) return;
+    if (config.keywords.includes(value)) {
+      setNewKeyword("");
+      return;
+    }
+    const updated = { ...config, keywords: [...config.keywords, value] };
+    try {
+      await invoke("update_config", { config: updated });
+      setConfig(updated);
+      setNewKeyword("");
+    } catch (e) {
+      alert(e);
+    }
+  }
+
+  async function removeKeyword(value: string) {
+    if (!config) return;
+    if (config.controlMode !== "flexible") {
+      alert("Control Mode prevents removing rules directly.");
+      return;
+    }
+    const updated = { ...config, keywords: config.keywords.filter((k) => k !== value) };
+    try {
+      await invoke("update_config", { config: updated });
+      setConfig(updated);
+    } catch (e) {
+      alert(e);
+    }
+  }
+
+  const MODE_RANK: Record<DesktopConfig["controlMode"], number> = {
+    flexible: 0,
+    locked: 1,
+    hardcore: 2,
+  };
+
+  async function writeControlMode(mode: DesktopConfig["controlMode"]) {
+    if (!config) return;
+    const updated = { ...config, controlMode: mode };
+    await invoke("update_config", { config: updated });
+    setConfig(updated);
+  }
+
+  function changeControlMode(mode: DesktopConfig["controlMode"]) {
+    if (!config || mode === config.controlMode) return;
+    const lowering = MODE_RANK[mode] < MODE_RANK[config.controlMode];
+    if (lowering) {
+      setFrictionTarget({
+        title: `Lower Control Mode to ${mode}`,
+        run: () => writeControlMode(mode),
+      });
+      return;
+    }
+    writeControlMode(mode).catch((e) => alert(e));
+  }
+
   if (frictionTarget && config) {
     return (
       <FrictionGuard
@@ -216,11 +275,11 @@ export function App() {
         clickCount={config.friction.clickCount}
         onCancel={() => setFrictionTarget(null)}
         onSuccess={async () => {
-          const cmd = frictionTarget.cmd;
+          const run = frictionTarget.run;
           setFrictionTarget(null);
           setLoading(true);
           try {
-            await invoke(cmd);
+            await run();
             refreshStatus();
           } catch (e) {
             alert(e);
@@ -339,6 +398,25 @@ export function App() {
       </section>
 
       <section className="panel">
+        <h2>Control Mode</h2>
+        <div className="actions-row">
+          {(["flexible", "locked", "hardcore"] as const).map((mode) => (
+            <button
+              key={mode}
+              disabled={loading}
+              className={config?.controlMode === mode ? "" : "btn-secondary"}
+              onClick={() => changeControlMode(mode)}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+        <p className="path">
+          Raising restriction applies immediately. Lowering requires the Control Mode friction step.
+        </p>
+      </section>
+
+      <section className="panel">
         <h2>Blocked domains</h2>
         <div className="domain-row">
           <input
@@ -353,6 +431,28 @@ export function App() {
             <li key={blockedDomain}>
               <span>{blockedDomain}</span>
               <button className="btn-link" onClick={() => removeDomain(blockedDomain)}>
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section className="panel">
+        <h2>Blocked keywords</h2>
+        <div className="domain-row">
+          <input
+            placeholder="e.g. porn"
+            value={newKeyword}
+            onChange={(e) => setNewKeyword(e.target.value)}
+          />
+          <button onClick={addKeyword}>Add</button>
+        </div>
+        <ul className="app-list">
+          {config?.keywords.map((keyword) => (
+            <li key={keyword}>
+              <span>{keyword}</span>
+              <button className="btn-link" onClick={() => removeKeyword(keyword)}>
                 Remove
               </button>
             </li>

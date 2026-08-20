@@ -115,6 +115,7 @@ pub fn save(path: &std::path::Path, config: &DesktopConfig) -> serde_json::Resul
 pub fn load_blocklist(config_path: &std::path::Path) -> crate::blocklist::DomainBlocklist {
     let config = load_or_create(config_path).unwrap_or_else(|_| default_config());
     let mut blocklist = crate::blocklist::DomainBlocklist::new(config.included_domains, config.excluded_domains);
+    blocklist.extend_keywords(config.keywords);
 
     let cached_path = config_path.parent().unwrap().join("blocklist.txt");
     if cached_path.exists() {

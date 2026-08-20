@@ -7,34 +7,29 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
-# This file is prebuild-generated. Every rule below is also declared as
-# extraProguardRules in app.config.ts, which re-emits them into an
-# expo-build-properties block after a prebuild. Edit them there; the copies
-# here only keep the current checked-in build working.
-
 # react-native-reanimated
 -keep class com.swmansion.reanimated.** { *; }
 -keep class com.facebook.react.turbomodule.** { *; }
 
 # Add any project specific keep options here:
 
+# @generated begin expo-build-properties - expo prebuild (DO NOT MODIFY)
+# react-native-reanimated
+-keep class com.swmansion.reanimated.** { *; }
+-keep class com.facebook.react.turbomodule.** { *; }
+
 # Keep obfuscated release stack traces deobfuscatable via mapping.txt.
 -keepattributes SourceFile,LineNumberTable
 -renamesourcefileattribute SourceFile
 
-# Strip debug/verbose logging in release builds. Requires minifyEnabled
-# (see gradle.properties: android.enableMinifyInReleaseBuilds).
+# Strip debug/verbose logging in release builds.
 -assumenosideeffects class android.util.Log {
     public static *** d(...);
     public static *** v(...);
 }
 
-# Deliberate redundancy over AAPT's auto-generated keeps (aapt_rules.txt
-# already keeps <init>() for each of these manifest-declared components,
-# and R8 doesn't strip/rename overrides of a live android.jar method like
-# onAccessibilityEvent/onReceive/onStartCommand/onRevoke/onEnabled). Not
-# load-bearing, but cheap insurance on the app's core services/receivers;
-# the cost is R8 can't shrink these classes' private internals.
+# Deliberate redundancy over AAPT's auto-generated keeps: cheap
+# insurance on the app's core services and receivers.
 -keep class expo.modules.freedomaccessibility.FreedomAccessibilityService { *; }
 -keep class expo.modules.freedomaccessibility.BankingRestoreReceiver { *; }
 -keep class expo.modules.freedomvpn.FreedomVpnService { *; }
@@ -42,3 +37,4 @@
 -keep class expo.modules.freedomforeground.BootReceiver { *; }
 -keep class expo.modules.freedomoverlay.OverlayService { *; }
 -keep class expo.modules.freedomdeviceadmin.FreedomDeviceAdminReceiver { *; }
+# @generated end expo-build-properties

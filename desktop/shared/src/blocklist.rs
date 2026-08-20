@@ -4,6 +4,7 @@ use std::collections::HashSet;
 pub struct DomainBlocklist {
     blocked: HashSet<String>,
     allowed: HashSet<String>,
+    keywords: Vec<String>,
 }
 
 impl DomainBlocklist {
@@ -22,6 +23,17 @@ impl DomainBlocklist {
         self.allowed.extend(domains.into_iter().filter_map(|d| normalize_domain(&d)));
     }
 
+    pub fn extend_keywords(&mut self, keywords: impl IntoIterator<Item = String>) {
+        self.keywords.extend(keywords.into_iter().filter_map(|k| {
+            let normalized = k.trim().to_ascii_lowercase();
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        }));
+    }
+
     pub fn is_blocked(&self, domain: &str) -> bool {
         let Some(normalized) = normalize_domain(domain) else {
             return false;
@@ -31,7 +43,13 @@ impl DomainBlocklist {
             return false;
         }
 
-        matches_domain_set(&normalized, &self.blocked)
+        if matches_domain_set(&normalized, &self.blocked) {
+            return true;
+        }
+
+        self.keywords
+            .iter()
+            .any(|keyword| normalized.contains(keyword.as_str()))
     }
 }
 
@@ -165,5 +183,27 @@ invalid-no-dot
         assert!(blocklist.is_blocked("example.com"));
         assert!(!blocklist.is_blocked("safe.example.com"));
         assert!(!blocklist.is_blocked("cdn.safe.example.com"));
+    }
+
+    #[test]
+    fn blocks_domains_containing_keyword() {
+        let mut blocklist = DomainBlocklist::default();
+        blocklist.extend_keywords(vec!["porn".to_string(), " CASINO ".to_string()]);
+
+        assert!(blocklist.is_blocked("pornhub.com"));
+        assert!(blocklist.is_blocked("my-casino.net"));
+        assert!(!blocklist.is_blocked("example.com"));
+    }
+
+    #[test]
+    fn keyword_respects_allowlist_and_ignores_blank() {
+        let mut blocklist = DomainBlocklist::new(
+            Vec::<String>::new(),
+            vec!["safe-porn-help.org".to_string()],
+        );
+        blocklist.extend_keywords(vec!["porn".to_string(), "   ".to_string()]);
+
+        assert!(blocklist.is_blocked("pornsite.com"));
+        assert!(!blocklist.is_blocked("safe-porn-help.org"));
     }
 }

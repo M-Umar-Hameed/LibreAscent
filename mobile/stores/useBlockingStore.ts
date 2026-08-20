@@ -107,7 +107,7 @@ export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
     id: "hagezi-pro",
     name: "HaGeZi Pro (Ads/Trackers)",
-    url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/pro.txt",
+    url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt",
     format: "domains",
     enabled: true,
     category: "ads",

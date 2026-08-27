@@ -8,6 +8,8 @@ interface FreedomDeviceAdminModuleInterface {
     packages: string[],
     suspended: boolean,
   ): Promise<string[]>;
+  setSelfUninstallBlocked(blocked: boolean): Promise<boolean>;
+  isSelfUninstallBlocked(): Promise<boolean>;
 }
 
 let FreedomDeviceAdminNative: FreedomDeviceAdminModuleInterface | null = null;
@@ -39,4 +41,16 @@ export async function setPackagesSuspended(
 ): Promise<string[]> {
   if (!FreedomDeviceAdminNative) return packages;
   return FreedomDeviceAdminNative.setPackagesSuspended(packages, suspended);
+}
+
+export async function setSelfUninstallBlocked(
+  blocked: boolean,
+): Promise<boolean> {
+  if (!FreedomDeviceAdminNative) return false;
+  return FreedomDeviceAdminNative.setSelfUninstallBlocked(blocked);
+}
+
+export async function isSelfUninstallBlocked(): Promise<boolean> {
+  if (!FreedomDeviceAdminNative) return false;
+  return FreedomDeviceAdminNative.isSelfUninstallBlocked();
 }

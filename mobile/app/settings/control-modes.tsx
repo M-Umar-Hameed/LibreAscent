@@ -1,5 +1,6 @@
 import { InteractionGuard } from "@/components/InteractionGuard";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
+import * as FreedomDeviceAdmin from "@/modules/freedom-device-admin/src";
 import { useAppTheme } from "@/providers/ThemeProvider";
 import { useAppStore } from "@/stores/useAppStore";
 import type { ControlMode } from "@/types/blocking";
@@ -7,7 +8,7 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
 import type { ComponentProps, ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -18,6 +19,11 @@ export default function ControlModesScreen(): ReactNode {
     useAppStore();
   const [pendingMode, setPendingMode] = useState<ControlMode>(controlMode);
   const [pendingSurveillance, setPendingSurveillance] = useState(surveillance);
+  const [isDeviceOwner, setIsDeviceOwner] = useState(false);
+
+  useEffect(() => {
+    void FreedomDeviceAdmin.isDeviceOwner().then(setIsDeviceOwner);
+  }, []);
 
   const modes: {
     id: ControlMode;
@@ -78,6 +84,11 @@ export default function ControlModesScreen(): ReactNode {
     setSurveillance(pendingSurveillance);
     setControlMode(pendingMode);
     void FreedomAccessibility.updateHardcoreMode(pendingMode === "hardcore");
+    void FreedomDeviceAdmin.setSelfUninstallBlocked(
+      pendingMode === "hardcore",
+    ).catch(() => {
+      /* ignore if not device owner */
+    });
     router.back();
   };
 
@@ -556,12 +567,42 @@ export default function ControlModesScreen(): ReactNode {
               What is Lockdown?
             </Text>
           </View>
-          <Text className="text-sm leading-5" style={{ color: t.textColor }}>
-            Hardcore mode uses the Accessibility Service to monitor specific
-            System Settings. If you try to uninstall LibreAscent or deactivate
-            its Admin access, the app will automatically bounce you back to
-            protect your focus.
-          </Text>
+          {isDeviceOwner ? (
+            <Text className="text-sm leading-5" style={{ color: t.textColor }}>
+              Hardcore mode uses OS-level Device Owner protection and the
+              Accessibility Service to monitor System Settings. Uninstalling
+              LibreAscent or deactivating Admin access is blocked by the system.
+            </Text>
+          ) : (
+            <View>
+              <Text
+                className="text-sm leading-5 mb-2"
+                style={{ color: t.textColor }}
+              >
+                Hardcore mode uses the Accessibility Service to bounce you away
+                from uninstall and admin settings. Protection is best-effort and
+                is paused during Banking Mode.
+              </Text>
+              <Text
+                className="text-xs font-semibold mb-1"
+                style={{ color: t.mutedTextColor }}
+              >
+                For OS-level uninstall protection, set up Device Owner via ADB:
+              </Text>
+              <View
+                className="p-2.5 rounded-lg"
+                style={{ backgroundColor: t.bgColor }}
+              >
+                <Text
+                  selectable
+                  className="text-xs"
+                  style={{ color: t.accentColor, fontFamily: "monospace" }}
+                >
+                  adb shell dpm set-device-owner com.libreascent.app/expo.modules.freedomdeviceadmin.FreedomDeviceAdminReceiver
+                </Text>
+              </View>
+            </View>
+          )}
         </View>
 
         {isDirty && (

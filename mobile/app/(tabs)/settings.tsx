@@ -9,6 +9,7 @@ import {
   type BlockingState,
 } from "@/stores/useBlockingStore";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
+import * as FreedomDeviceAdmin from "@/modules/freedom-device-admin/src";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import * as Crypto from "expo-crypto";
@@ -68,7 +69,7 @@ export default function SettingsScreen(): ReactNode {
   const router = useRouter();
 
   const [pendingAction, setPendingAction] = useState<
-    "boot" | "applock" | "adblock" | null
+    "boot" | "applock" | "adblock" | "banking" | null
   >(null);
 
   const [bankingActive, setBankingActive] = useState(false);
@@ -102,21 +103,15 @@ export default function SettingsScreen(): ReactNode {
     }, []),
   );
 
-  const handleBankingToggle = async (enable: boolean): Promise<void> => {
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    if (enable && bankingCooldownMs > 0) {
-      Alert.alert(
-        "Banking limit reached",
-        `You've used all 3 sessions. Try again in ${bankingCountdown(bankingCooldownMs)}.`,
-      );
-      return;
-    }
+  const startBanking = async (): Promise<void> => {
+    setPendingAction(null);
     try {
-      if (enable) {
-        await FreedomAccessibility.startBankingMode();
-      } else {
-        await FreedomAccessibility.endBankingMode();
+      try {
+        await FreedomDeviceAdmin.setSelfUninstallBlocked(true);
+      } catch {
+        // ERR_NOT_DEVICE_OWNER: allow banking with WS-A friction
       }
+      await FreedomAccessibility.startBankingMode();
       const state = await FreedomAccessibility.getBankingState();
       setBankingActive(state.active);
       setBankingRemainingMs(state.remainingMs);
@@ -128,6 +123,43 @@ export default function SettingsScreen(): ReactNode {
         "Banking mode unavailable",
         "Grant the one-time permission with adb, then try again.",
       );
+    }
+  };
+
+  const endBanking = async (): Promise<void> => {
+    try {
+      await FreedomAccessibility.endBankingMode();
+      const state = await FreedomAccessibility.getBankingState();
+      setBankingActive(state.active);
+      setBankingRemainingMs(state.remainingMs);
+      setBankingCooldownMs(state.cooldownRemainingMs);
+      setBankingAttemptsRemaining(state.attemptsRemaining);
+    } catch (e) {
+      console.error("[Settings] Banking mode toggle failed:", e);
+      Alert.alert(
+        "Banking mode unavailable",
+        "Grant the one-time permission with adb, then try again.",
+      );
+    }
+  };
+
+  const handleBankingToggle = (enable: boolean): void => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    if (enable && bankingCooldownMs > 0) {
+      Alert.alert(
+        "Banking limit reached",
+        `You've used all 3 sessions. Try again in ${bankingCountdown(bankingCooldownMs)}.`,
+      );
+      return;
+    }
+    if (enable) {
+      if (controlMode === "flexible") {
+        void startBanking();
+      } else {
+        setPendingAction("banking");
+      }
+    } else {
+      void endBanking();
     }
   };
 
@@ -467,7 +499,7 @@ export default function SettingsScreen(): ReactNode {
                   !bankingHasPermission ||
                   (!bankingActive && bankingCooldownMs > 0)
                 }
-                onValueChange={(v) => void handleBankingToggle(v)}
+                onValueChange={handleBankingToggle}
                 trackColor={{ false: "#ccc", true: t.accentColor }}
                 thumbColor={bankingActive ? "#fff" : "#999"}
                 aria-label="Toggle banking mode"
@@ -1051,12 +1083,15 @@ export default function SettingsScreen(): ReactNode {
             ? "Disable Auto-start"
             : pendingAction === "applock"
               ? "Disable App Lock"
-              : "Disable Ad Blocking"
+              : pendingAction === "adblock"
+                ? "Disable Ad Blocking"
+                : "Enable Banking Mode"
         }
         onSuccess={() => {
           if (pendingAction === "boot") toggleBoot();
           else if (pendingAction === "applock") disableAppLock();
           else if (pendingAction === "adblock") void applyAdBlock(false);
+          else if (pendingAction === "banking") void startBanking();
         }}
         onCancel={() => {
           setPendingAction(null);

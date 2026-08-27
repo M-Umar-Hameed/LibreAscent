@@ -114,4 +114,11 @@ declare module "freedom-foreground-service" {
 declare module "freedom-device-admin" {
   export function isAdminActive(): Promise<boolean>;
   export function requestAdminActivation(): Promise<boolean>;
+  export function isDeviceOwner(): Promise<boolean>;
+  export function setPackagesSuspended(
+    packages: string[],
+    suspended: boolean,
+  ): Promise<string[]>;
+  export function setSelfUninstallBlocked(blocked: boolean): Promise<boolean>;
+  export function isSelfUninstallBlocked(): Promise<boolean>;
 }

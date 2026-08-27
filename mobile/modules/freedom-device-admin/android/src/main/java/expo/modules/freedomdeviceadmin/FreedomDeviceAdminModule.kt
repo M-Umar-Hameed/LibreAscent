@@ -4,6 +4,7 @@ import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.UserManager
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
@@ -87,6 +88,40 @@ class FreedomDeviceAdminModule : Module() {
                 promise.resolve(failed.toList())
             } catch (e: Exception) {
                 promise.reject("ERR_SUSPEND", e.message, e)
+            }
+        }
+
+        AsyncFunction("setSelfUninstallBlocked") { blocked: Boolean, promise: Promise ->
+            try {
+                val context = appContext.reactContext
+                    ?: run { promise.reject("ERR_NO_CONTEXT", "No context", null); return@AsyncFunction }
+                val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                if (!dpm.isDeviceOwnerApp(context.packageName)) {
+                    promise.reject("ERR_NOT_DEVICE_OWNER", "Not device owner", null)
+                    return@AsyncFunction
+                }
+                val componentName = ComponentName(context, FreedomDeviceAdminReceiver::class.java)
+                dpm.setUninstallBlocked(componentName, context.packageName, blocked)
+                if (blocked) {
+                    dpm.addUserRestriction(componentName, UserManager.DISALLOW_UNINSTALL_APPS)
+                } else {
+                    dpm.clearUserRestriction(componentName, UserManager.DISALLOW_UNINSTALL_APPS)
+                }
+                promise.resolve(dpm.isUninstallBlocked(componentName, context.packageName))
+            } catch (e: Exception) {
+                promise.reject("ERR_UNINSTALL_BLOCK", e.message, e)
+            }
+        }
+
+        AsyncFunction("isSelfUninstallBlocked") { promise: Promise ->
+            try {
+                val context = appContext.reactContext
+                    ?: run { promise.resolve(false); return@AsyncFunction }
+                val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                val componentName = ComponentName(context, FreedomDeviceAdminReceiver::class.java)
+                promise.resolve(dpm.isUninstallBlocked(componentName, context.packageName))
+            } catch (e: Exception) {
+                promise.resolve(false)
             }
         }
     }

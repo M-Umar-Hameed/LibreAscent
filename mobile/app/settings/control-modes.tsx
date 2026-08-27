@@ -84,7 +84,11 @@ export default function ControlModesScreen(): ReactNode {
     setSurveillance(pendingSurveillance);
     setControlMode(pendingMode);
     void FreedomAccessibility.updateHardcoreMode(pendingMode === "hardcore");
-    void FreedomDeviceAdmin.setSelfUninstallBlocked(pendingMode === "hardcore");
+    void FreedomDeviceAdmin.setSelfUninstallBlocked(
+      pendingMode === "hardcore",
+    ).catch(() => {
+      /* ignore if not device owner */
+    });
     router.back();
   };
 

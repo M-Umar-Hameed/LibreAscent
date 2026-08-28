@@ -3,7 +3,7 @@ import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/s
 import * as FreedomDeviceAdmin from "@/modules/freedom-device-admin/src";
 import { useAppTheme } from "@/providers/ThemeProvider";
 import { useAppStore } from "@/stores/useAppStore";
-import type { ControlMode } from "@/types/blocking";
+import { isModeUpgrade, type ControlMode } from "@/types/blocking";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
@@ -71,8 +71,10 @@ export default function ControlModesScreen(): ReactNode {
 
   const [isGuardVisible, setIsGuardVisible] = useState(false);
 
+  const upgrading = isModeUpgrade(controlMode, pendingMode);
+
   const onConfirmPress = (): void => {
-    if (controlMode === "flexible") {
+    if (controlMode === "flexible" || upgrading) {
       applyMode();
     } else {
       setIsGuardVisible(true);
@@ -80,8 +82,14 @@ export default function ControlModesScreen(): ReactNode {
   };
 
   const applyMode = (): void => {
+    // A promotion from an already-restricted mode keeps the current friction so
+    // it can't be used to launder a weaker surveillance config past the lock.
+    const nextSurveillance =
+      upgrading && controlMode !== "flexible"
+        ? surveillance
+        : pendingSurveillance;
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setSurveillance(pendingSurveillance);
+    setSurveillance(nextSurveillance);
     setControlMode(pendingMode);
     void FreedomAccessibility.updateHardcoreMode(pendingMode === "hardcore");
     void FreedomDeviceAdmin.setSelfUninstallBlocked(

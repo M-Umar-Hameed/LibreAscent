@@ -12,7 +12,7 @@
     "lint": "eslint . --ext .ts,.tsx --report-unused-disable-directives --max-warnings 0",
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
     "typecheck": "tsc --noEmit",
-    "check": "node scripts/check-blocked-count-accumulator.js && node scripts/check-app-store-dedup-write.js && node scripts/check-cached-domains-paging.js",
+    "check": "node scripts/check-blocked-count-accumulator.js && node scripts/check-app-store-dedup-write.js && node scripts/check-cached-domains-paging.js && node scripts/check-mode-upgrade.js",
     "unused": "knip",
     "prepare": "husky"
   },

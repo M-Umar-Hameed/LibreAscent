@@ -1,14 +1,17 @@
 version: 2
 updates:
-  # 1. Frontend & Logic (NPM)
+  # Mobile (Expo / React Native).
+  # Expo SDK packages are version-locked to the SDK release, so Dependabot's
+  # major bumps here are always false positives: SDK 54 pins expo-font to
+  # ~14.x while Dependabot offers 55.x, which belongs to SDK 55. These move
+  # together during an SDK upgrade, never as standalone PRs.
   - package-ecosystem: "npm"
-    directory: "/"
-    # Schedule: "weekly" saves your Action minutes vs "daily"
+    directory: "/mobile"
     schedule:
       interval: "weekly"
       day: "monday"
       time: "09:00"
-    # Groups: Updates all "react" related things in one single PR
+    open-pull-requests-limit: 5
     groups:
       react-dependencies:
         patterns:
@@ -16,13 +19,51 @@ updates:
           - "react-dom"
           - "@types/react"
           - "@types/react-dom"
+    ignore:
+      - dependency-name: "expo"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "expo-*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@expo/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-native"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      # NativeWind 4 requires Tailwind 3; Tailwind 4 is a breaking rewrite.
+      - dependency-name: "tailwindcss"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "nativewind"
+        update-types: ["version-update:semver-major"]
+
+  # Desktop UI (Vite / Tauri frontend).
+  - package-ecosystem: "npm"
+    directory: "/desktop/ui"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    groups:
       tauri-dependencies:
         patterns:
           - "@tauri-apps/*"
-    # Limits: Open max 5 PRs at a time so you don't get overwhelmed
+    ignore:
+      # A vite 5 -> 8 jump was proposed for an advisory that a patch release covers.
+      - dependency-name: "vite"
+        update-types: ["version-update:semver-major"]
+
+  # Desktop service and Tauri shell (Rust).
+  - package-ecosystem: "cargo"
+    directory: "/desktop"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
     open-pull-requests-limit: 5
 
-  # 2. Github Actions (Keep your CI workflows up to date)
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

@@ -8,7 +8,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 chrono = "0.4"
-hickory-proto = "0.24"
+hickory-proto = "0.26"
 hickory-resolver = { version = "0.24", features = ["dns-over-native-tls"] }
 libreascent-shared = { path = "../shared" }
 reqwest = { version = "0.12" }

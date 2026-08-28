@@ -55,6 +55,18 @@ export function getEffectiveMode(
   return order[sub] >= order[main] ? sub : main;
 }
 
+/**
+ * True when `pending` is a strictly stricter control mode than `current`
+ * (flexible < locked < hardcore). Promotions tighten protection and are
+ * allowed without friction; only weakening a mode requires friction.
+ */
+export function isModeUpgrade(
+  current: ControlMode,
+  pending: ControlMode,
+): boolean {
+  return pending !== current && getEffectiveMode(current, pending) === pending;
+}
+
 export function getEffectiveSurveillance(
   mainMode: ControlMode,
   mainSurv: SurveillanceConfig,

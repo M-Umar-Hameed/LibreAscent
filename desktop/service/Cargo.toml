@@ -13,6 +13,6 @@ hickory-resolver = { version = "0.24", features = ["dns-over-native-tls"] }
 libreascent-shared = { path = "../shared" }
 reqwest = { version = "0.12" }
 serde_json = "1"
-sysinfo = "0.33"
+sysinfo = "0.39"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 windows-service = "0.8"

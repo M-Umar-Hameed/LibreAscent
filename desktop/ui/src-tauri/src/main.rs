@@ -433,7 +433,8 @@ fn get_config() -> Result<DesktopConfig, String> {
 }
 
 #[tauri::command]
-fn update_config(config: DesktopConfig) -> Result<(), String> {
+fn update_config(mut config: DesktopConfig) -> Result<(), String> {
+    config.clamp_friction();
     save(&default_config_path(), &config).map_err(|e| e.to_string())
 }
 

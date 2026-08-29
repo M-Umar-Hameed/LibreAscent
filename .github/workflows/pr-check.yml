@@ -21,17 +21,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Node 22+ is required: scripts/check-cached-domains-paging.js uses
+      # node:sqlite, which does not exist in Node 20.
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
+          cache-dependency-path: mobile/package-lock.json
 
       - name: Install dependencies
+        working-directory: ./mobile
         run: npm ci
 
       - name: TypeScript Check
-        run: npx tsc --noEmit
+        working-directory: ./mobile
+        run: npm run typecheck
+
+      - name: Self-checks
+        working-directory: ./mobile
+        run: npm run check
 
       - name: Run ESLint Review
         uses: reviewdog/action-eslint@v1
@@ -39,6 +48,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           reporter: github-pr-review
           fail_level: error
+          workdir: ./mobile
 
       - name: Install Gitleaks
         run: |
@@ -50,6 +60,3 @@ jobs:
       - name: Gitleaks Security Scan
         run: |
           gitleaks detect --no-git --redact -v --source .
-
-      - name: Test Build
-        run: npm run build

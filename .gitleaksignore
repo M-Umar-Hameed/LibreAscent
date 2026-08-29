@@ -1,0 +1,12 @@
+# Reviewed false positive, gitleaks 8.24.3.
+#
+# The sidekiq-secret rule reports a BUNDLE_ENTERPRISE__CONTRIBSYS__COM
+# credential at README.md line 50. Investigated against the exact commit CI
+# scanned (77e7446): line 50 is blank, README.md is 137 lines of architecture
+# notes, and `git grep` finds no CONTRIBSYS, BUNDLE_GEMS or BUNDLE_ENTERPRISE
+# string anywhere in the repository, nor any hex:hex credential shape. There is
+# no secret here.
+#
+# Scoped to this one fingerprint so every other rule stays active, and so the
+# entry stops matching if README.md line 50 ever gains real content.
+README.md:sidekiq-secret:50

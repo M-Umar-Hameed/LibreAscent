@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 export type BlockedAppRule = {
   name: string;
   executable: string;

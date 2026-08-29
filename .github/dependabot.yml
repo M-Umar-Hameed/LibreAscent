@@ -69,6 +69,12 @@ updates:
     # 0 disables version-update PRs. Security updates are unaffected and
     # still open PRs, which is the only dependency noise worth having here.
     open-pull-requests-limit: 0
+    ignore:
+      # hickory-proto 0.26 fails to compile libreascent-service with 30
+      # errors (changed signatures, removed methods). Adopting it needs the
+      # DNS code ported to the new API. The advisory stays open and visible
+      # in the security tab; this only stops the un-mergeable PR recurring.
+      - dependency-name: "hickory-proto"
 
   - package-ecosystem: "github-actions"
     directory: "/"

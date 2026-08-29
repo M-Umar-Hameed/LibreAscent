@@ -69,7 +69,7 @@ export default function SettingsScreen(): ReactNode {
   const router = useRouter();
 
   const [pendingAction, setPendingAction] = useState<
-    "boot" | "applock" | "adblock" | "banking" | null
+    "boot" | "applock" | "adblock" | null
   >(null);
 
   const [bankingActive, setBankingActive] = useState(false);
@@ -153,11 +153,7 @@ export default function SettingsScreen(): ReactNode {
       return;
     }
     if (enable) {
-      if (controlMode === "flexible") {
-        void startBanking();
-      } else {
-        setPendingAction("banking");
-      }
+      void startBanking();
     } else {
       void endBanking();
     }
@@ -1083,15 +1079,12 @@ export default function SettingsScreen(): ReactNode {
             ? "Disable Auto-start"
             : pendingAction === "applock"
               ? "Disable App Lock"
-              : pendingAction === "adblock"
-                ? "Disable Ad Blocking"
-                : "Enable Banking Mode"
+              : "Disable Ad Blocking"
         }
         onSuccess={() => {
           if (pendingAction === "boot") toggleBoot();
           else if (pendingAction === "applock") disableAppLock();
           else if (pendingAction === "adblock") void applyAdBlock(false);
-          else if (pendingAction === "banking") void startBanking();
         }}
         onCancel={() => {
           setPendingAction(null);

@@ -136,6 +136,13 @@ impl DesktopConfig {
         self.control_mode == ControlMode::Flexible
     }
 
+    // ponytail: config.json is hand-editable; clamp so UI steppers and manual
+    // edits can't set friction weaker than the floor. Bounds mirror Settings.tsx.
+    pub fn clamp_friction(&mut self) {
+        self.friction.countdown_seconds = self.friction.countdown_seconds.clamp(5, 3600);
+        self.friction.click_count = self.friction.click_count.clamp(1, 999);
+    }
+
     pub fn tamper_log_path(&self) -> PathBuf {
         default_config_path().parent().unwrap().join("tamper.log")
     }
@@ -187,6 +194,27 @@ mod tests {
 
         assert_eq!(loaded.included_domains, vec!["example.com"]);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn clamp_friction_enforces_bounds() {
+        let mut config = default_config();
+
+        config.friction = FrictionConfig {
+            countdown_seconds: 0,
+            click_count: 0,
+        };
+        config.clamp_friction();
+        assert_eq!(config.friction.countdown_seconds, 5);
+        assert_eq!(config.friction.click_count, 1);
+
+        config.friction = FrictionConfig {
+            countdown_seconds: 99999,
+            click_count: 99999,
+        };
+        config.clamp_friction();
+        assert_eq!(config.friction.countdown_seconds, 3600);
+        assert_eq!(config.friction.click_count, 999);
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {

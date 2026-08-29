@@ -9,7 +9,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   icon: "./assets/images/icon.png",
   scheme: "libreascent",
   userInterfaceStyle: "automatic",
-  newArchEnabled: true,
   ios: {
     supportsTablet: true,
   },
@@ -19,7 +18,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       backgroundColor: "#0B1215",
       foregroundImage: "./assets/images/android-icon-foreground.png",
     },
-    edgeToEdgeEnabled: true,
     permissions: [
       "INTERNET",
       "FOREGROUND_SERVICE",
@@ -94,6 +92,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     ],
     "expo-font",
     "expo-sqlite",
+    "expo-asset",
+    "expo-image",
+    "expo-sharing",
+    "expo-web-browser",
     "./plugins/withAndroidPackageFix",
     "./plugins/withJvmTarget17",
     "./plugins/withArm64Only",

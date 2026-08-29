@@ -2,46 +2,9 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FrictionGuard } from "./FrictionGuard";
+import { Settings } from "./Settings";
+import type { DesktopConfig, DesktopStatus } from "./types";
 import logo from "./assets/logo.png";
-
-type BlockedAppRule = {
-  name: string;
-  executable: string;
-  fullPath?: string | null;
-};
-
-type BlocklistSource = {
-  id: string;
-  name: string;
-  url: string;
-  format: string;
-  enabled: boolean;
-};
-
-type DesktopConfig = {
-  schemaVersion: number;
-  adultBlockingEnabled: boolean;
-  sources: BlocklistSource[];
-  includedDomains: string[];
-  excludedDomains: string[];
-  keywords: string[];
-  blockedApps: BlockedAppRule[];
-  controlMode: "flexible" | "locked" | "hardcore";
-  friction: {
-    countdownSeconds: number;
-    clickCount: number;
-  };
-};
-
-type DesktopStatus = {
-  serviceInstalled: boolean;
-  serviceRunning: boolean;
-  dnsProxyRunning: boolean;
-  dnsControlled: boolean;
-  firewallControlled: boolean;
-  configPath: string;
-  isAdmin: boolean;
-};
 
 type DomainResult = "idle" | "blocked" | "allowed" | "error";
 
@@ -73,6 +36,7 @@ export function App() {
     title: string;
     run: () => Promise<void>;
   } | null>(null);
+  const [view, setView] = useState<"dashboard" | "settings">("dashboard");
 
   const refreshStatus = () => {
     invoke<DesktopStatus>("get_status")
@@ -267,6 +231,28 @@ export function App() {
     writeControlMode(mode).catch((e) => alert(e));
   }
 
+  async function writeFriction(next: DesktopConfig["friction"]) {
+    if (!config) return;
+    const updated = { ...config, friction: next };
+    await invoke("update_config", { config: updated });
+    setConfig(updated);
+  }
+
+  function changeFriction(next: DesktopConfig["friction"]) {
+    if (!config) return;
+    const weaker =
+      next.countdownSeconds < config.friction.countdownSeconds ||
+      next.clickCount < config.friction.clickCount;
+    if (weaker && config.controlMode !== "flexible") {
+      setFrictionTarget({
+        title: "Weaken friction settings",
+        run: () => writeFriction(next),
+      });
+      return;
+    }
+    writeFriction(next).catch((e) => alert(e));
+  }
+
   if (frictionTarget && config) {
     return (
       <FrictionGuard
@@ -293,206 +279,159 @@ export function App() {
 
   return (
     <main className="shell">
-      <section className="panel">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
-          <img src={logo} alt="LibreAscent" style={{ width: '40px', height: '40px' }} />
-          <div>
-            <p className="eyebrow" style={{ margin: 0 }}>LibreAscent Desktop</p>
-            <h1 style={{ margin: 0 }}>Windows protection</h1>
-          </div>
-        </div>
-        <dl className="status-grid">
-          <div>
-            <dt>Service installed</dt>
-            <dd>{status?.serviceInstalled ? "Yes" : "No"}</dd>
-          </div>
-          <div>
-            <dt>Service running</dt>
-            <dd>{status?.serviceRunning ? "Yes" : "No"}</dd>
-          </div>
-          <div>
-            <dt>System DNS</dt>
-            <dd>{status?.dnsControlled ? "Managed" : "External"}</dd>
-          </div>
-          <div>
-            <dt>Bypass guard</dt>
-            <dd>{status?.firewallControlled ? "Active" : "Missing"}</dd>
-          </div>
-        </dl>
+      <div className="actions-row" style={{ margin: 0 }}>
+        <button
+          className={view === "dashboard" ? "" : "btn-secondary"}
+          onClick={() => setView("dashboard")}
+        >
+          Dashboard
+        </button>
+        <button
+          className={view === "settings" ? "" : "btn-secondary"}
+          onClick={() => setView("settings")}
+        >
+          Settings
+        </button>
+      </div>
 
-        {status && !status.dnsControlled && !status.firewallControlled ? (
-          <p className="warning">
-            Browser blocking is not active until System DNS or the firewall bypass guard is managed by LibreAscent.
-          </p>
-        ) : null}
+      {view === "settings" && config ? (
+        <Settings
+          status={status}
+          config={config}
+          loading={loading}
+          onAction={runAction}
+          onChangeControlMode={changeControlMode}
+          onChangeFriction={changeFriction}
+        />
+      ) : (
+        <>
+          <section className="panel">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+              <img src={logo} alt="LibreAscent" style={{ width: '40px', height: '40px' }} />
+              <div>
+                <p className="eyebrow" style={{ margin: 0 }}>LibreAscent Desktop</p>
+                <h1 style={{ margin: 0 }}>Windows protection</h1>
+              </div>
+            </div>
+            <dl className="status-grid">
+              <div>
+                <dt>Service installed</dt>
+                <dd>{status?.serviceInstalled ? "Yes" : "No"}</dd>
+              </div>
+              <div>
+                <dt>Service running</dt>
+                <dd>{status?.serviceRunning ? "Yes" : "No"}</dd>
+              </div>
+              <div>
+                <dt>System DNS</dt>
+                <dd>{status?.dnsControlled ? "Managed" : "External"}</dd>
+              </div>
+              <div>
+                <dt>Bypass guard</dt>
+                <dd>{status?.firewallControlled ? "Active" : "Missing"}</dd>
+              </div>
+            </dl>
 
-        {status && !status.dnsControlled && status.firewallControlled ? (
-          <p className="warning">
-            System DNS is external, but LibreAscent is blocking Cloudflare DNS/WARP bypass routes with Windows Firewall.
-          </p>
-        ) : null}
+            {status && !status.dnsControlled && !status.firewallControlled ? (
+              <p className="warning">
+                Browser blocking is not active until System DNS or the firewall bypass guard is managed by LibreAscent.
+              </p>
+            ) : null}
 
-        {lastBlock ? <p className="warning">Last block: {lastBlock}</p> : null}
+            {status && !status.dnsControlled && status.firewallControlled ? (
+              <p className="warning">
+                System DNS is external, but LibreAscent is blocking Cloudflare DNS/WARP bypass routes with Windows Firewall.
+              </p>
+            ) : null}
 
-        <div className="actions-row">
-          {!status?.serviceInstalled ? (
-            <button disabled={loading} onClick={() => runAction("install_service")}>
-              Install Service
-            </button>
-          ) : (
-            <>
-              {!status?.serviceRunning ? (
-                <button disabled={loading} onClick={() => runAction("start_service")}>
-                  Start Service
-                </button>
-              ) : (
-                <button
-                  disabled={loading}
-                  onClick={() => runAction("stop_service", "Stop Protection")}
-                >
-                  Stop Service
-                </button>
-              )}
-              <button
-                disabled={loading}
-                className="btn-danger"
-                onClick={() => runAction("uninstall_service", "Uninstall Protection")}
-              >
-                Uninstall
-              </button>
-              <button
-                disabled={loading}
-                className="btn-secondary"
-                onClick={() => runAction("repair_service", "Repair Protection Service")}
-              >
-                Repair Service
-              </button>
-            </>
-          )}
-          <button disabled={loading} onClick={() => invoke("show_overlay")}>
-            Preview Overlay
-          </button>
-        </div>
+            {lastBlock ? <p className="warning">Last block: {lastBlock}</p> : null}
 
-        <div className="actions-row">
-          <button
-            disabled={loading || !status?.serviceRunning}
-            onClick={() => runAction("enable_dns_protection")}
-          >
-            Enable DNS Protection
-          </button>
-          <button
-            disabled={loading}
-            className="btn-secondary"
-            onClick={() => runAction("reset_dns", "Reset DNS Protection")}
-          >
-            Reset DNS
-          </button>
-        </div>
+            <p className="path">
+              {status?.configPath ?? "Config path unavailable"}
+              <br />
+              Mode: {config?.controlMode ?? "Unknown"}
+            </p>
+          </section>
 
-        <p className="path">
-          {status?.configPath ?? "Config path unavailable"}
-          <br />
-          Mode: {config?.controlMode ?? "Unknown"}
-        </p>
-      </section>
+          <section className="panel">
+            <h2>Blocked domains</h2>
+            <div className="domain-row">
+              <input
+                placeholder="e.g. example.com"
+                value={newDomain}
+                onChange={(e) => setNewDomain(e.target.value)}
+              />
+              <button onClick={addDomain}>Add</button>
+            </div>
+            <ul className="app-list">
+              {config?.includedDomains.map((blockedDomain) => (
+                <li key={blockedDomain}>
+                  <span>{blockedDomain}</span>
+                  <button className="btn-link" onClick={() => removeDomain(blockedDomain)}>
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
 
-      <section className="panel">
-        <h2>Control Mode</h2>
-        <div className="actions-row">
-          {(["flexible", "locked", "hardcore"] as const).map((mode) => (
-            <button
-              key={mode}
-              disabled={loading}
-              className={config?.controlMode === mode ? "" : "btn-secondary"}
-              onClick={() => changeControlMode(mode)}
-            >
-              {mode}
-            </button>
-          ))}
-        </div>
-        <p className="path">
-          Raising restriction applies immediately. Lowering requires the Control Mode friction step.
-        </p>
-      </section>
+          <section className="panel">
+            <h2>Blocked keywords</h2>
+            <div className="domain-row">
+              <input
+                placeholder="e.g. porn"
+                value={newKeyword}
+                onChange={(e) => setNewKeyword(e.target.value)}
+              />
+              <button onClick={addKeyword}>Add</button>
+            </div>
+            <ul className="app-list">
+              {config?.keywords.map((keyword) => (
+                <li key={keyword}>
+                  <span>{keyword}</span>
+                  <button className="btn-link" onClick={() => removeKeyword(keyword)}>
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
 
-      <section className="panel">
-        <h2>Blocked domains</h2>
-        <div className="domain-row">
-          <input
-            placeholder="e.g. example.com"
-            value={newDomain}
-            onChange={(e) => setNewDomain(e.target.value)}
-          />
-          <button onClick={addDomain}>Add</button>
-        </div>
-        <ul className="app-list">
-          {config?.includedDomains.map((blockedDomain) => (
-            <li key={blockedDomain}>
-              <span>{blockedDomain}</span>
-              <button className="btn-link" onClick={() => removeDomain(blockedDomain)}>
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
-      </section>
+          <section className="panel">
+            <h2>Blocked apps</h2>
+            <div className="domain-row">
+              <input
+                placeholder="e.g. discord.exe"
+                value={newApp}
+                onChange={(e) => setNewApp(e.target.value)}
+              />
+              <button onClick={addApp}>Add</button>
+            </div>
+            <ul className="app-list">
+              {config?.blockedApps.map((app) => (
+                <li key={app.executable}>
+                  <span>{app.executable}</span>
+                  <button className="btn-link" onClick={() => removeApp(app.executable)}>
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
 
-      <section className="panel">
-        <h2>Blocked keywords</h2>
-        <div className="domain-row">
-          <input
-            placeholder="e.g. porn"
-            value={newKeyword}
-            onChange={(e) => setNewKeyword(e.target.value)}
-          />
-          <button onClick={addKeyword}>Add</button>
-        </div>
-        <ul className="app-list">
-          {config?.keywords.map((keyword) => (
-            <li key={keyword}>
-              <span>{keyword}</span>
-              <button className="btn-link" onClick={() => removeKeyword(keyword)}>
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="panel">
-        <h2>Blocked apps</h2>
-        <div className="domain-row">
-          <input
-            placeholder="e.g. discord.exe"
-            value={newApp}
-            onChange={(e) => setNewApp(e.target.value)}
-          />
-          <button onClick={addApp}>Add</button>
-        </div>
-        <ul className="app-list">
-          {config?.blockedApps.map((app) => (
-            <li key={app.executable}>
-              <span>{app.executable}</span>
-              <button className="btn-link" onClick={() => removeApp(app.executable)}>
-                Remove
-              </button>
-            </li>
-          ))}
-        </ul>
-      </section>
-
-      <section className="panel">
-        <h2>Domain test</h2>
-        <div className="domain-row">
-          <input
-            value={domain}
-            onChange={(event) => setDomain(event.target.value)}
-          />
-          <button onClick={testDomain}>Test</button>
-        </div>
-        <p className={`result result-${domainResult}`}>{domainResult}</p>
-      </section>
+          <section className="panel">
+            <h2>Domain test</h2>
+            <div className="domain-row">
+              <input
+                value={domain}
+                onChange={(event) => setDomain(event.target.value)}
+              />
+              <button onClick={testDomain}>Test</button>
+            </div>
+            <p className={`result result-${domainResult}`}>{domainResult}</p>
+          </section>
+        </>
+      )}
     </main>
   );
 }

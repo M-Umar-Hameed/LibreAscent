@@ -223,3 +223,28 @@ button {
   color: white;
   cursor: pointer;
 }
+
+.stepper {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0 0;
+}
+
+.stepper-value {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.stepper-number {
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.stepper-label {
+  font-size: 12px;
+  color: #9aa8b7;
+  text-transform: uppercase;
+}

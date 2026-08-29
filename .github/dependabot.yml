@@ -74,7 +74,11 @@ updates:
       # errors (changed signatures, removed methods). Adopting it needs the
       # DNS code ported to the new API. The advisory stays open and visible
       # in the security tab; this only stops the un-mergeable PR recurring.
+      # Scoped to the 0.25+ line only, so a mergeable 0.24.x patch-level
+      # security fix still opens a PR. A bare dependency-name ignore would
+      # suppress those too, since ignore rules apply to security updates.
       - dependency-name: "hickory-proto"
+        versions: [">= 0.25"]
 
   - package-ecosystem: "github-actions"
     directory: "/"

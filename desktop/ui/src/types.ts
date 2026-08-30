@@ -27,6 +27,15 @@ export type DesktopConfig = {
     countdownSeconds: number;
     clickCount: number;
   };
+  frictionWindow: FrictionWindow;
+};
+
+export type FrictionWindow = {
+  enabled: boolean;
+  startHour: number;
+  endHour: number;
+  countdownSeconds: number;
+  clickCount: number;
 };
 
 export type DesktopStatus = {
@@ -38,3 +47,24 @@ export type DesktopStatus = {
   configPath: string;
   isAdmin: boolean;
 };
+
+export function frictionWindowContains(w: FrictionWindow, hour: number): boolean {
+  if (!w.enabled || w.startHour === w.endHour) return false;
+  return w.startHour < w.endHour
+    ? hour >= w.startHour && hour < w.endHour
+    : hour >= w.startHour || hour < w.endHour;
+}
+
+export function activeFriction(
+  config: DesktopConfig,
+  hour: number,
+): { countdownSeconds: number; clickCount: number; source: "window" | "base" } {
+  if (frictionWindowContains(config.frictionWindow, hour)) {
+    return {
+      countdownSeconds: config.frictionWindow.countdownSeconds,
+      clickCount: config.frictionWindow.clickCount,
+      source: "window",
+    };
+  }
+  return { ...config.friction, source: "base" };
+}

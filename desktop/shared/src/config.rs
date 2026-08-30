@@ -1,6 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Windows Firewall display names for the plaintext :53 DNS bypass seal. These
+/// two rules are added whenever DNS enforcement is active and are the canonical
+/// marker the desktop UI reads to report "Bypass guard" status. Single source of
+/// truth so the service (creates them) and the UI (checks them) cannot drift.
+pub const DNS_BYPASS_SEAL_RULE_NAMES: [&str; 2] = [
+    "LibreAscent Block Plaintext DNS UDP",
+    "LibreAscent Block Plaintext DNS TCP",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ControlMode {
@@ -260,6 +269,17 @@ mod tests {
         assert_eq!(config.control_mode, ControlMode::Flexible);
         assert_eq!(config.friction.countdown_seconds, 60);
         assert_eq!(config.friction.click_count, 50);
+    }
+
+    #[test]
+    fn dns_bypass_seal_rule_names_are_the_plaintext_dns_rules() {
+        assert_eq!(
+            DNS_BYPASS_SEAL_RULE_NAMES,
+            [
+                "LibreAscent Block Plaintext DNS UDP",
+                "LibreAscent Block Plaintext DNS TCP",
+            ]
+        );
     }
 
     #[test]

@@ -54,12 +54,9 @@ fn check_dns_control() -> bool {
 }
 
 fn check_firewall_control() -> bool {
-    [
-        "LibreAscent Block Cloudflare DNS UDP",
-        "LibreAscent Block Cloudflare DNS TCP",
-    ]
-    .into_iter()
-    .all(|name| firewall_rule_exists(name))
+    libreascent_shared::config::DNS_BYPASS_SEAL_RULE_NAMES
+        .into_iter()
+        .all(|name| firewall_rule_exists(name))
 }
 
 fn is_local_dns_proxy_running() -> bool {

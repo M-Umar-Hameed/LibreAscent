@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use libreascent_shared::config::{BlockedAppRule, DesktopConfig};
+use libreascent_shared::config::{BlockedAppRule, DesktopConfig, DNS_BYPASS_SEAL_RULE_NAMES};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -21,8 +21,8 @@ const OPENDNS_IPS: &str = "208.67.222.222,208.67.220.220,2620:119:35::35,2620:11
 const ADGUARD_IPS: &str = "94.140.14.14,94.140.15.15,2a10:50c0::ad1:ff,2a10:50c0::ad2:ff";
 
 const DNS_BYPASS_RULE_NAMES: [&str; 5] = [
-    "LibreAscent Block Plaintext DNS UDP",
-    "LibreAscent Block Plaintext DNS TCP",
+    DNS_BYPASS_SEAL_RULE_NAMES[0],
+    DNS_BYPASS_SEAL_RULE_NAMES[1],
     "LibreAscent Block DoH",
     "LibreAscent Block DoT",
     "LibreAscent Block DoQ",
@@ -199,8 +199,8 @@ fn dns_bypass_block_rules() -> Vec<FirewallRuleSpec> {
     let bypass_resolvers = format!("{CLOUDFLARE_IPS},{GOOGLE_IPS},{OPENDNS_IPS},{ADGUARD_IPS}");
 
     vec![
-        dns_block_rule("LibreAscent Block Plaintext DNS UDP", "UDP", None, "53"),
-        dns_block_rule("LibreAscent Block Plaintext DNS TCP", "TCP", None, "53"),
+        dns_block_rule(DNS_BYPASS_SEAL_RULE_NAMES[0], "UDP", None, "53"),
+        dns_block_rule(DNS_BYPASS_SEAL_RULE_NAMES[1], "TCP", None, "53"),
         dns_block_rule(
             "LibreAscent Block DoH",
             "TCP",
@@ -279,6 +279,15 @@ mod tests {
         let rules = dns_bypass_block_rules();
         let names: Vec<&str> = rules.iter().map(|rule| rule.name.as_str()).collect();
         assert_eq!(names, super::DNS_BYPASS_RULE_NAMES.to_vec());
+    }
+
+    #[test]
+    fn seal_rules_use_shared_bypass_guard_names() {
+        let rules = dns_bypass_block_rules();
+        let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
+        for seal in DNS_BYPASS_SEAL_RULE_NAMES {
+            assert!(names.contains(&seal), "missing seal rule {seal}");
+        }
     }
 
     #[test]

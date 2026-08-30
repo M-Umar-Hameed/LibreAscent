@@ -8,8 +8,10 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 chrono = "0.4"
-hickory-proto = "0.24"
-hickory-resolver = { version = "0.24", features = ["dns-over-native-tls"] }
+hickory-proto = "0.26"
+# 0.26 drops native-tls for rustls. ring avoids the NASM/CMake toolchain that
+# aws-lc-rs needs on Windows; platform-verifier keeps using the OS trust store.
+hickory-resolver = { version = "0.26", features = ["tls-ring", "rustls-platform-verifier"] }
 libreascent-shared = { path = "../shared" }
 reqwest = { version = "0.12" }
 serde_json = "1"

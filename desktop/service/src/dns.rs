@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
-use hickory_resolver::config::{NameServerConfigGroup, ResolverConfig, ResolverOpts};
-use hickory_resolver::error::ResolveErrorKind;
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::TokioResolver;
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::{DnsError, NetError};
 use libreascent_shared::blocklist::DomainBlocklist;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -21,26 +22,34 @@ const LOCAL_PROXY_TIMEOUT: Duration = Duration::from_secs(5);
 /// resolver but leaves Quad9:853 reachable, so this choice must stay Quad9 to
 /// match that exemption. The pooled connection and response cache keep steady
 /// -state latency close to plain UDP by avoiding a TLS handshake per query.
-fn build_upstream_resolver() -> TokioAsyncResolver {
+fn build_upstream_resolver() -> Result<TokioResolver> {
     use std::net::{IpAddr, Ipv4Addr};
 
     // IPv4-only Quad9 DoT endpoints. Talking to the upstream over IPv4 avoids a
     // hard failure on hosts without an IPv6 route; clients still receive AAAA
     // records normally. 9.9.9.9 is what the firewall leaves reachable on :853.
-    let quad9 = NameServerConfigGroup::from_ips_tls(
-        &[
-            IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
-            IpAddr::V4(Ipv4Addr::new(149, 112, 112, 112)),
-        ],
-        853,
-        "dns.quad9.net".to_string(),
-        true,
-    );
+    let server_name: Arc<str> = Arc::from("dns.quad9.net");
+    let quad9 = [
+        IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
+        IpAddr::V4(Ipv4Addr::new(149, 112, 112, 112)),
+    ]
+    .into_iter()
+    .map(|ip| {
+        let mut connection = ConnectionConfig::tls(Arc::clone(&server_name));
+        // Set explicitly rather than relying on the protocol default: the
+        // firewall exemption is written against Quad9 on :853.
+        connection.port = 853;
+        NameServerConfig::new(ip, true, vec![connection])
+    })
+    .collect();
     let config = ResolverConfig::from_parts(None, Vec::new(), quad9);
 
     let mut opts = ResolverOpts::default();
     opts.cache_size = 1024;
-    TokioAsyncResolver::tokio(config, opts)
+    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(opts)
+        .build()
+        .context("failed to build upstream DNS resolver")
 }
 
 pub struct BlockedDnsResponse {
@@ -79,7 +88,7 @@ pub async fn run_local_dns_proxy_with_ready(
     let broadcast_socket = UdpSocket::bind("127.0.0.1:0").await.ok();
     let mut buffer = vec![0_u8; 4096];
     let blocklist = Arc::new(config_loader::load_blocklist(&config_path));
-    let resolver = Arc::new(build_upstream_resolver());
+    let resolver = Arc::new(build_upstream_resolver()?);
     crate::dns_manager::log_tamper_event("DNS proxy started. Blocklist loaded.");
 
     loop {
@@ -140,35 +149,32 @@ pub async fn run_local_dns_proxy_with_ready(
     }
 }
 
-async fn resolve_via_upstream(resolver: &TokioAsyncResolver, request: &[u8]) -> Result<Vec<u8>> {
+async fn resolve_via_upstream(resolver: &TokioResolver, request: &[u8]) -> Result<Vec<u8>> {
     let message = Message::from_bytes(request).context("failed to parse DNS request")?;
-    let Some(query) = message.queries().first() else {
+    let Some(query) = message.queries.first() else {
         return build_error_response(request, ResponseCode::FormErr);
     };
 
-    let mut response = Message::new();
-    response.set_id(message.id());
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(OpCode::Query);
-    response.set_recursion_desired(message.recursion_desired());
-    response.set_recursion_available(true);
+    let mut response = Message::new(message.metadata.id, MessageType::Response, OpCode::Query);
+    response.metadata.recursion_desired = message.metadata.recursion_desired;
+    response.metadata.recursion_available = true;
     response.add_query(query.clone());
 
     match resolver.lookup(query.name().clone(), query.query_type()).await {
         Ok(lookup) => {
-            response.set_response_code(ResponseCode::NoError);
-            for record in lookup.records() {
+            response.metadata.response_code = ResponseCode::NoError;
+            for record in lookup.answers() {
                 response.add_answer(record.clone());
             }
         }
-        Err(error) => match error.kind() {
-            ResolveErrorKind::NoRecordsFound { response_code, .. } => {
-                response.set_response_code(*response_code);
-            }
-            _ => {
-                response.set_response_code(ResponseCode::ServFail);
-            }
-        },
+        // A name that does not resolve is a normal answer, not a failure: pass
+        // the upstream's code through so NXDOMAIN stays NXDOMAIN.
+        Err(NetError::Dns(DnsError::NoRecordsFound(no_records))) => {
+            response.metadata.response_code = no_records.response_code;
+        }
+        Err(_) => {
+            response.metadata.response_code = ResponseCode::ServFail;
+        }
     }
 
     response
@@ -200,7 +206,7 @@ pub async fn local_dns_proxy_responds() -> Result<bool> {
         match timeout(LOCAL_PROXY_TIMEOUT, socket.recv_from(&mut buffer)).await {
             Ok(Ok((size, _))) => {
                 return Message::from_bytes(&buffer[..size])
-                    .map(|response| response.id() == 0x4c41)
+                    .map(|response| response.metadata.id == 0x4c41)
                     .context("failed to parse local DNS health-check response")
             }
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => {
@@ -219,10 +225,8 @@ fn dns_probe_query() -> Result<Vec<u8>> {
     use hickory_proto::op::Query;
     use hickory_proto::rr::{Name, RecordType};
 
-    let mut message = Message::new();
-    message.set_id(0x4c41);
-    message.set_message_type(MessageType::Query);
-    message.set_recursion_desired(true);
+    let mut message = Message::new(0x4c41, MessageType::Query, OpCode::Query);
+    message.metadata.recursion_desired = true;
     message.add_query(Query::query(
         Name::from_ascii("cloudflare.com.").context("failed to build DNS health-check name")?,
         RecordType::A,
@@ -237,7 +241,7 @@ pub fn build_block_response_if_needed(
     blocklist: &DomainBlocklist,
 ) -> Result<Option<BlockedDnsResponse>> {
     let message = Message::from_bytes(request).context("failed to parse DNS request")?;
-    let Some(query) = message.queries().first() else {
+    let Some(query) = message.queries.first() else {
         return Ok(None);
     };
     let domain = query.name().to_ascii();
@@ -252,16 +256,13 @@ pub fn build_block_response_if_needed(
 
 pub fn build_error_response(request: &[u8], response_code: ResponseCode) -> Result<Vec<u8>> {
     let message = Message::from_bytes(request).context("failed to parse DNS request")?;
-    let mut response = Message::new();
-    response.set_id(message.id());
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(OpCode::Query);
-    response.set_authoritative(false);
-    response.set_recursion_desired(message.recursion_desired());
-    response.set_recursion_available(true);
-    response.set_response_code(response_code);
+    let mut response = Message::new(message.metadata.id, MessageType::Response, OpCode::Query);
+    response.metadata.authoritative = false;
+    response.metadata.recursion_desired = message.metadata.recursion_desired;
+    response.metadata.recursion_available = true;
+    response.metadata.response_code = response_code;
 
-    if let Some(query) = message.queries().first() {
+    if let Some(query) = message.queries.first() {
         response.add_query(query.clone());
     }
 
@@ -282,7 +283,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore]
     async fn resolves_via_quad9_dot() {
-        let resolver = build_upstream_resolver();
+        let resolver = build_upstream_resolver().expect("resolver should build");
         let request = dns_query("example.com.");
 
         let response_bytes = resolve_via_upstream(&resolver, &request)
@@ -290,9 +291,9 @@ mod tests {
             .expect("upstream should resolve");
         let response = Message::from_bytes(&response_bytes).expect("response should parse");
 
-        assert_eq!(response.response_code(), ResponseCode::NoError);
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
         assert!(
-            !response.answers().is_empty(),
+            !response.answers.is_empty(),
             "expected at least one A record from Quad9 DoT"
         );
     }
@@ -309,8 +310,8 @@ mod tests {
         let response = Message::from_bytes(&response_bytes).expect("response should parse");
 
         assert_eq!(blocked.domain, "example.com.");
-        assert_eq!(response.response_code(), ResponseCode::NXDomain);
-        assert_eq!(response.queries().len(), 1);
+        assert_eq!(response.metadata.response_code, ResponseCode::NXDomain);
+        assert_eq!(response.queries.len(), 1);
     }
 
     #[test]
@@ -332,8 +333,8 @@ mod tests {
             build_error_response(&request, ResponseCode::ServFail).expect("request should parse");
         let response = Message::from_bytes(&response_bytes).expect("response should parse");
 
-        assert_eq!(response.response_code(), ResponseCode::ServFail);
-        assert_eq!(response.queries().len(), 1);
+        assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
+        assert_eq!(response.queries.len(), 1);
     }
 
     #[test]
@@ -341,16 +342,14 @@ mod tests {
         let request = dns_probe_query().expect("query should encode");
         let message = Message::from_bytes(&request).expect("query should parse");
 
-        assert_eq!(message.id(), 0x4c41);
-        assert_eq!(message.queries().len(), 1);
-        assert_eq!(message.queries()[0].name().to_ascii(), "cloudflare.com.");
+        assert_eq!(message.metadata.id, 0x4c41);
+        assert_eq!(message.queries.len(), 1);
+        assert_eq!(message.queries[0].name().to_ascii(), "cloudflare.com.");
     }
 
     fn dns_query(domain: &str) -> Vec<u8> {
-        let mut message = Message::new();
-        message.set_id(42);
-        message.set_message_type(MessageType::Query);
-        message.set_recursion_desired(true);
+        let mut message = Message::new(42, MessageType::Query, OpCode::Query);
+        message.metadata.recursion_desired = true;
         message.add_query(Query::query(
             Name::from_ascii(domain).expect("domain should be valid"),
             RecordType::A,

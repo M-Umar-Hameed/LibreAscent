@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FrictionGuard } from "./FrictionGuard";
 import { Settings } from "./Settings";
 import type { DesktopConfig, DesktopStatus } from "./types";
+import { activeFriction } from "./types";
 import logo from "./assets/logo.png";
 
 type DomainResult = "idle" | "blocked" | "allowed" | "error";
@@ -253,12 +254,37 @@ export function App() {
     writeFriction(next).catch((e) => alert(e));
   }
 
+  async function writeFrictionWindow(next: DesktopConfig["frictionWindow"]) {
+    if (!config) return;
+    const updated = { ...config, frictionWindow: next };
+    await invoke("update_config", { config: updated });
+    setConfig(updated);
+  }
+
+  function changeFrictionWindow(next: DesktopConfig["frictionWindow"]) {
+    if (!config) return;
+    const cur = config.frictionWindow;
+    // Weakening = disabling an active window, or lowering its countdown/clicks.
+    const weaker =
+      (cur.enabled && !next.enabled) ||
+      next.countdownSeconds < cur.countdownSeconds ||
+      next.clickCount < cur.clickCount;
+    if (weaker && config.controlMode !== "flexible") {
+      setFrictionTarget({
+        title: "Weaken time-based friction",
+        run: () => writeFrictionWindow(next),
+      });
+      return;
+    }
+    writeFrictionWindow(next).catch((e) => alert(e));
+  }
+
   if (frictionTarget && config) {
     return (
       <FrictionGuard
         title={frictionTarget.title}
-        countdownSeconds={config.friction.countdownSeconds}
-        clickCount={config.friction.clickCount}
+        countdownSeconds={activeFriction(config, new Date().getHours()).countdownSeconds}
+        clickCount={activeFriction(config, new Date().getHours()).clickCount}
         onCancel={() => setFrictionTarget(null)}
         onSuccess={async () => {
           const run = frictionTarget.run;
@@ -302,6 +328,7 @@ export function App() {
           onAction={runAction}
           onChangeControlMode={changeControlMode}
           onChangeFriction={changeFriction}
+          onChangeFrictionWindow={changeFrictionWindow}
         />
       ) : (
         <>

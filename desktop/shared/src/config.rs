@@ -24,6 +24,13 @@ pub struct FrictionConfig {
     pub click_count: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveFriction {
+    pub countdown_seconds: u32,
+    pub click_count: u32,
+    pub locked: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrictionWindow {
@@ -202,37 +209,34 @@ impl DesktopConfig {
     }
 
     // Which friction is live for a given local hour (0..=23), per the selected
-    // mode. Timer = countdown only; Clicks = clicks only; TimeBased = the window
-    // challenge during its hours, none outside. Window `enabled` is ignored: the
-    // mode itself is the switch.
-    pub fn active_friction(&self, hour: u32) -> FrictionConfig {
+    // mode. Timer = countdown only; Clicks = clicks only; TimeBased = a pure
+    // time lock: fully locked (no bypass) inside the window, free outside.
+    // start_hour == end_hour locks the full 24 hours.
+    pub fn active_friction(&self, hour: u32) -> ActiveFriction {
         match self.friction_mode {
-            FrictionMode::Timer => FrictionConfig {
+            FrictionMode::Timer => ActiveFriction {
                 countdown_seconds: self.friction.countdown_seconds,
                 click_count: 0,
+                locked: false,
             },
-            FrictionMode::Clicks => FrictionConfig {
+            FrictionMode::Clicks => ActiveFriction {
                 countdown_seconds: 0,
                 click_count: self.friction.click_count,
+                locked: false,
             },
             FrictionMode::TimeBased => {
                 let w = &self.friction_window;
-                let in_window = w.start_hour != w.end_hour
-                    && if w.start_hour < w.end_hour {
-                        hour >= w.start_hour && hour < w.end_hour
-                    } else {
-                        hour >= w.start_hour || hour < w.end_hour
-                    };
-                if in_window {
-                    FrictionConfig {
-                        countdown_seconds: w.countdown_seconds,
-                        click_count: w.click_count,
-                    }
+                let locked = if w.start_hour == w.end_hour {
+                    true
+                } else if w.start_hour < w.end_hour {
+                    hour >= w.start_hour && hour < w.end_hour
                 } else {
-                    FrictionConfig {
-                        countdown_seconds: 0,
-                        click_count: 0,
-                    }
+                    hour >= w.start_hour || hour < w.end_hour
+                };
+                ActiveFriction {
+                    countdown_seconds: 0,
+                    click_count: 0,
+                    locked,
                 }
             }
         }
@@ -351,9 +355,8 @@ mod tests {
     }
 
     #[test]
-    fn active_friction_prefers_enabled_window() {
+    fn timebased_locks_inside_window_free_outside() {
         let mut config = default_config();
-        config.friction = FrictionConfig { countdown_seconds: 60, click_count: 50 };
         config.friction_window = FrictionWindow {
             enabled: true,
             start_hour: 20,
@@ -362,10 +365,10 @@ mod tests {
             click_count: 200,
         };
         config.friction_mode = FrictionMode::TimeBased;
-        assert_eq!(config.active_friction(22).countdown_seconds, 300);
-        assert_eq!(config.active_friction(22).click_count, 200);
-        assert_eq!(config.active_friction(12).countdown_seconds, 0);
-        assert_eq!(config.active_friction(12).click_count, 0);
+        assert!(config.active_friction(22).locked);
+        assert_eq!(config.active_friction(22).countdown_seconds, 0);
+        assert_eq!(config.active_friction(22).click_count, 0);
+        assert!(!config.active_friction(12).locked);
     }
 
     #[test]
@@ -376,6 +379,7 @@ mod tests {
         let f = config.active_friction(12);
         assert_eq!(f.countdown_seconds, 60);
         assert_eq!(f.click_count, 0);
+        assert!(!f.locked);
     }
 
     #[test]
@@ -386,6 +390,7 @@ mod tests {
         let f = config.active_friction(12);
         assert_eq!(f.countdown_seconds, 0);
         assert_eq!(f.click_count, 50);
+        assert!(!f.locked);
     }
 
     #[test]
@@ -399,10 +404,19 @@ mod tests {
             countdown_seconds: 300,
             click_count: 200,
         };
-        assert_eq!(config.active_friction(22).countdown_seconds, 300);
-        assert_eq!(config.active_friction(22).click_count, 200);
-        assert_eq!(config.active_friction(12).countdown_seconds, 0);
-        assert_eq!(config.active_friction(12).click_count, 0);
+        assert!(config.active_friction(22).locked);
+        assert!(!config.active_friction(12).locked);
+    }
+
+    #[test]
+    fn timebased_full_day_when_start_equals_end() {
+        let mut config = default_config();
+        config.friction_mode = FrictionMode::TimeBased;
+        config.friction_window.start_hour = 0;
+        config.friction_window.end_hour = 0;
+        assert!(config.active_friction(0).locked);
+        assert!(config.active_friction(12).locked);
+        assert!(config.active_friction(23).locked);
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 type FrictionGuardProps = {
   countdownSeconds: number;
   clickCount: number;
+  locked?: boolean;
   onSuccess: () => void;
   onCancel: () => void;
   title: string;
@@ -11,6 +12,7 @@ type FrictionGuardProps = {
 export function FrictionGuard({
   countdownSeconds,
   clickCount,
+  locked = false,
   onSuccess,
   onCancel,
   title,
@@ -28,10 +30,11 @@ export function FrictionGuard({
   }, [remainingSeconds]);
 
   useEffect(() => {
+    if (locked) return;
     if (remainingSeconds <= 0 && remainingClicks <= 0) {
       onSuccess();
     }
-  }, [remainingSeconds, remainingClicks, onSuccess]);
+  }, [locked, remainingSeconds, remainingClicks, onSuccess]);
 
   const handleProgress = () => {
     if (remainingSeconds > 0) return;
@@ -44,7 +47,13 @@ export function FrictionGuard({
         <p className="eyebrow">Control Mode Active</p>
         <h1>{title}</h1>
         
-        {remainingSeconds > 0 ? (
+        {locked ? (
+          <div className="friction-stage">
+            <p className="message">
+              Protection is locked during the time-based window. Try again after it ends.
+            </p>
+          </div>
+        ) : remainingSeconds > 0 ? (
           <div className="friction-stage">
             <p className="message">Wait for the countdown to finish...</p>
             <div className="counter">{remainingSeconds}s</div>

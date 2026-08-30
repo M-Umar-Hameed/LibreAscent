@@ -151,11 +151,12 @@ export function Settings({
         </div>
 
         <p className="warning" style={{ marginTop: 0 }}>
-          {active.source === "none"
-            ? "Active now: no friction (outside the time-based window)."
-            : `Active now: ${active.source === "window" ? "time-based window" : "base friction"} — ` +
+          {config.frictionMode === "timeBased"
+            ? active.locked
+              ? "Active now: locked (inside the time-based window)."
+              : "Active now: no friction (outside the time-based window)."
+            : `Active now: base friction — ` +
               (active.countdownSeconds > 0 ? `${active.countdownSeconds}s countdown` : "") +
-              (active.countdownSeconds > 0 && active.clickCount > 0 ? ", " : "") +
               (active.clickCount > 0 ? `${active.clickCount} clicks` : "") +
               "."}
         </p>
@@ -189,7 +190,7 @@ export function Settings({
         {config.frictionMode === "timeBased" && (
           <>
             <p className="path" style={{ marginTop: 0 }}>
-              Friction applies only between the chosen hours (24h clock). End before start wraps past midnight.
+              Protection is fully locked between the chosen hours (24h clock). End before start wraps past midnight. Set start and end to the same hour to lock all day.
             </p>
             <div className="stepper">
               <button className="btn-secondary" disabled={loading}
@@ -210,26 +211,6 @@ export function Settings({
               </div>
               <button className="btn-secondary" disabled={loading}
                 onClick={() => setWindow({ endHour: wrapHour(w.endHour + 1) })}>+</button>
-            </div>
-            <div className="stepper">
-              <button className="btn-secondary" disabled={loading}
-                onClick={() => setWindow({ countdownSeconds: clamp(w.countdownSeconds - COUNTDOWN_STEP, COUNTDOWN_MIN, COUNTDOWN_MAX) })}>-</button>
-              <div className="stepper-value">
-                <span className="stepper-number">{w.countdownSeconds}</span>
-                <span className="stepper-label">window countdown seconds</span>
-              </div>
-              <button className="btn-secondary" disabled={loading}
-                onClick={() => setWindow({ countdownSeconds: clamp(w.countdownSeconds + COUNTDOWN_STEP, COUNTDOWN_MIN, COUNTDOWN_MAX) })}>+</button>
-            </div>
-            <div className="stepper">
-              <button className="btn-secondary" disabled={loading}
-                onClick={() => setWindow({ clickCount: clamp(w.clickCount - CLICK_STEP, CLICK_MIN, CLICK_MAX) })}>-</button>
-              <div className="stepper-value">
-                <span className="stepper-number">{w.clickCount}</span>
-                <span className="stepper-label">window required clicks</span>
-              </div>
-              <button className="btn-secondary" disabled={loading}
-                onClick={() => setWindow({ clickCount: clamp(w.clickCount + CLICK_STEP, CLICK_MIN, CLICK_MAX) })}>+</button>
             </div>
           </>
         )}

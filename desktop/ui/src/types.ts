@@ -28,7 +28,10 @@ export type DesktopConfig = {
     clickCount: number;
   };
   frictionWindow: FrictionWindow;
+  frictionMode: FrictionMode;
 };
+
+export type FrictionMode = "timer" | "clicks" | "timeBased";
 
 export type FrictionWindow = {
   enabled: boolean;
@@ -48,23 +51,37 @@ export type DesktopStatus = {
   isAdmin: boolean;
 };
 
-export function frictionWindowContains(w: FrictionWindow, hour: number): boolean {
-  if (!w.enabled || w.startHour === w.endHour) return false;
-  return w.startHour < w.endHour
-    ? hour >= w.startHour && hour < w.endHour
-    : hour >= w.startHour || hour < w.endHour;
-}
-
 export function activeFriction(
   config: DesktopConfig,
   hour: number,
-): { countdownSeconds: number; clickCount: number; source: "window" | "base" } {
-  if (frictionWindowContains(config.frictionWindow, hour)) {
-    return {
-      countdownSeconds: config.frictionWindow.countdownSeconds,
-      clickCount: config.frictionWindow.clickCount,
-      source: "window",
-    };
+): { countdownSeconds: number; clickCount: number; source: "base" | "window" | "none" } {
+  switch (config.frictionMode) {
+    case "timer":
+      return {
+        countdownSeconds: config.friction.countdownSeconds,
+        clickCount: 0,
+        source: "base",
+      };
+    case "clicks":
+      return {
+        countdownSeconds: 0,
+        clickCount: config.friction.clickCount,
+        source: "base",
+      };
+    case "timeBased": {
+      const w = config.frictionWindow;
+      const inWindow =
+        w.startHour !== w.endHour &&
+        (w.startHour < w.endHour
+          ? hour >= w.startHour && hour < w.endHour
+          : hour >= w.startHour || hour < w.endHour);
+      return inWindow
+        ? {
+            countdownSeconds: w.countdownSeconds,
+            clickCount: w.clickCount,
+            source: "window",
+          }
+        : { countdownSeconds: 0, clickCount: 0, source: "none" };
+    }
   }
-  return { ...config.friction, source: "base" };
 }

@@ -9,6 +9,14 @@ pub enum ControlMode {
     Hardcore,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FrictionMode {
+    Timer,
+    Clicks,
+    TimeBased,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrictionConfig {
@@ -65,6 +73,8 @@ pub struct DesktopConfig {
     pub friction: FrictionConfig,
     #[serde(default = "default_friction_window")]
     pub friction_window: FrictionWindow,
+    #[serde(default = "default_friction_mode")]
+    pub friction_mode: FrictionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +93,10 @@ pub fn default_friction_window() -> FrictionWindow {
         countdown_seconds: 120,
         click_count: 100,
     }
+}
+
+pub fn default_friction_mode() -> FrictionMode {
+    FrictionMode::Timer
 }
 
 pub fn default_config() -> DesktopConfig {
@@ -115,6 +129,7 @@ pub fn default_config() -> DesktopConfig {
             click_count: 50,
         },
         friction_window: default_friction_window(),
+        friction_mode: default_friction_mode(),
     }
 }
 
@@ -186,16 +201,40 @@ impl DesktopConfig {
         self.friction_window.end_hour = self.friction_window.end_hour.min(23);
     }
 
-    // Which friction is live for a given local hour (0..=23): the time window
-    // when it is enabled and contains `hour`, otherwise base friction.
+    // Which friction is live for a given local hour (0..=23), per the selected
+    // mode. Timer = countdown only; Clicks = clicks only; TimeBased = the window
+    // challenge during its hours, none outside. Window `enabled` is ignored: the
+    // mode itself is the switch.
     pub fn active_friction(&self, hour: u32) -> FrictionConfig {
-        if self.friction_window.contains(hour) {
-            FrictionConfig {
-                countdown_seconds: self.friction_window.countdown_seconds,
-                click_count: self.friction_window.click_count,
+        match self.friction_mode {
+            FrictionMode::Timer => FrictionConfig {
+                countdown_seconds: self.friction.countdown_seconds,
+                click_count: 0,
+            },
+            FrictionMode::Clicks => FrictionConfig {
+                countdown_seconds: 0,
+                click_count: self.friction.click_count,
+            },
+            FrictionMode::TimeBased => {
+                let w = &self.friction_window;
+                let in_window = w.start_hour != w.end_hour
+                    && if w.start_hour < w.end_hour {
+                        hour >= w.start_hour && hour < w.end_hour
+                    } else {
+                        hour >= w.start_hour || hour < w.end_hour
+                    };
+                if in_window {
+                    FrictionConfig {
+                        countdown_seconds: w.countdown_seconds,
+                        click_count: w.click_count,
+                    }
+                } else {
+                    FrictionConfig {
+                        countdown_seconds: 0,
+                        click_count: 0,
+                    }
+                }
             }
-        } else {
-            self.friction.clone()
         }
     }
 
@@ -322,10 +361,68 @@ mod tests {
             countdown_seconds: 300,
             click_count: 200,
         };
+        config.friction_mode = FrictionMode::TimeBased;
         assert_eq!(config.active_friction(22).countdown_seconds, 300);
         assert_eq!(config.active_friction(22).click_count, 200);
-        assert_eq!(config.active_friction(12).countdown_seconds, 60);
-        assert_eq!(config.active_friction(12).click_count, 50);
+        assert_eq!(config.active_friction(12).countdown_seconds, 0);
+        assert_eq!(config.active_friction(12).click_count, 0);
+    }
+
+    #[test]
+    fn timer_mode_uses_countdown_only() {
+        let mut config = default_config();
+        config.friction_mode = FrictionMode::Timer;
+        config.friction = FrictionConfig { countdown_seconds: 60, click_count: 50 };
+        let f = config.active_friction(12);
+        assert_eq!(f.countdown_seconds, 60);
+        assert_eq!(f.click_count, 0);
+    }
+
+    #[test]
+    fn clicks_mode_uses_clicks_only() {
+        let mut config = default_config();
+        config.friction_mode = FrictionMode::Clicks;
+        config.friction = FrictionConfig { countdown_seconds: 60, click_count: 50 };
+        let f = config.active_friction(12);
+        assert_eq!(f.countdown_seconds, 0);
+        assert_eq!(f.click_count, 50);
+    }
+
+    #[test]
+    fn timebased_mode_ignores_enabled_flag() {
+        let mut config = default_config();
+        config.friction_mode = FrictionMode::TimeBased;
+        config.friction_window = FrictionWindow {
+            enabled: false,
+            start_hour: 20,
+            end_hour: 6,
+            countdown_seconds: 300,
+            click_count: 200,
+        };
+        assert_eq!(config.active_friction(22).countdown_seconds, 300);
+        assert_eq!(config.active_friction(22).click_count, 200);
+        assert_eq!(config.active_friction(12).countdown_seconds, 0);
+        assert_eq!(config.active_friction(12).click_count, 0);
+    }
+
+    #[test]
+    fn legacy_config_defaults_to_timer_mode() {
+        let path = temp_path("legacy-mode-config.json");
+        let json = r#"{
+            "schemaVersion": 1,
+            "adultBlockingEnabled": true,
+            "sources": [],
+            "includedDomains": [],
+            "excludedDomains": [],
+            "keywords": [],
+            "blockedApps": [],
+            "controlMode": "locked",
+            "friction": { "countdownSeconds": 60, "clickCount": 50 }
+        }"#;
+        std::fs::write(&path, json).expect("write legacy config");
+        let loaded = load_or_create(&path).expect("legacy config should load");
+        assert_eq!(loaded.friction_mode, FrictionMode::Timer);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

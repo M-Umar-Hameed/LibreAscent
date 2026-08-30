@@ -279,6 +279,27 @@ export function App() {
     writeFrictionWindow(next).catch((e) => alert(e));
   }
 
+  async function writeFrictionMode(next: DesktopConfig["frictionMode"]) {
+    if (!config) return;
+    const updated = { ...config, frictionMode: next };
+    await invoke("update_config", { config: updated });
+    setConfig(updated);
+  }
+
+  function changeFrictionMode(next: DesktopConfig["frictionMode"]) {
+    if (!config || next === config.frictionMode) return;
+    // Cross-mode strength is not comparable; gate every switch behind the
+    // friction step when a control mode is active.
+    if (config.controlMode !== "flexible") {
+      setFrictionTarget({
+        title: "Change friction type",
+        run: () => writeFrictionMode(next),
+      });
+      return;
+    }
+    writeFrictionMode(next).catch((e) => alert(e));
+  }
+
   if (frictionTarget && config) {
     return (
       <FrictionGuard
@@ -329,6 +350,7 @@ export function App() {
           onChangeControlMode={changeControlMode}
           onChangeFriction={changeFriction}
           onChangeFrictionWindow={changeFrictionWindow}
+          onChangeFrictionMode={changeFrictionMode}
         />
       ) : (
         <>

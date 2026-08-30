@@ -10,6 +10,7 @@ type SettingsProps = {
   onChangeControlMode: (mode: DesktopConfig["controlMode"]) => void;
   onChangeFriction: (next: DesktopConfig["friction"]) => void;
   onChangeFrictionWindow: (next: DesktopConfig["frictionWindow"]) => void;
+  onChangeFrictionMode: (next: DesktopConfig["frictionMode"]) => void;
 };
 
 const COUNTDOWN_MIN = 5;
@@ -30,6 +31,7 @@ export function Settings({
   onChangeControlMode,
   onChangeFriction,
   onChangeFrictionWindow,
+  onChangeFrictionMode,
 }: SettingsProps) {
   const setCountdown = (seconds: number) =>
     onChangeFriction({
@@ -132,115 +134,105 @@ export function Settings({
       <section className="panel">
         <h2>Friction setup</h2>
         <p className="path" style={{ marginTop: 0 }}>
-          Applied when Control Mode is Locked or Hardcore. Weakening either value requires the friction step.
-        </p>
-        <p className="warning" style={{ marginTop: 0 }}>
-          Active now: {active.source === "window" ? "Time-based window" : "Base friction"}
-          {" — "}{active.countdownSeconds}s countdown, {active.clickCount} clicks.
-        </p>
-
-        <div className="stepper">
-          <button
-            className="btn-secondary"
-            disabled={loading}
-            onClick={() => setCountdown(config.friction.countdownSeconds - COUNTDOWN_STEP)}
-          >
-            -
-          </button>
-          <div className="stepper-value">
-            <span className="stepper-number">{config.friction.countdownSeconds}</span>
-            <span className="stepper-label">countdown seconds</span>
-          </div>
-          <button
-            className="btn-secondary"
-            disabled={loading}
-            onClick={() => setCountdown(config.friction.countdownSeconds + COUNTDOWN_STEP)}
-          >
-            +
-          </button>
-        </div>
-
-        <div className="stepper">
-          <button
-            className="btn-secondary"
-            disabled={loading}
-            onClick={() => setClicks(config.friction.clickCount - CLICK_STEP)}
-          >
-            -
-          </button>
-          <div className="stepper-value">
-            <span className="stepper-number">{config.friction.clickCount}</span>
-            <span className="stepper-label">required clicks</span>
-          </div>
-          <button
-            className="btn-secondary"
-            disabled={loading}
-            onClick={() => setClicks(config.friction.clickCount + CLICK_STEP)}
-          >
-            +
-          </button>
-        </div>
-      </section>
-
-      <section className="panel">
-        <h2>Time-based friction</h2>
-        <p className="path" style={{ marginTop: 0 }}>
-          Override base friction between the chosen hours (24h clock). End before start wraps past midnight.
+          Applied when Control Mode is Locked or Hardcore. Pick one friction type. Weakening requires the friction step.
         </p>
 
         <div className="actions-row">
-          <button
-            disabled={loading}
-            className={w.enabled ? "" : "btn-secondary"}
-            onClick={() => setWindow({ enabled: !w.enabled })}
-          >
-            {w.enabled ? "Enabled" : "Disabled"}
-          </button>
+          {(["timer", "clicks", "timeBased"] as const).map((mode) => (
+            <button
+              key={mode}
+              disabled={loading}
+              className={config.frictionMode === mode ? "" : "btn-secondary"}
+              onClick={() => onChangeFrictionMode(mode)}
+            >
+              {mode === "timer" ? "Timer" : mode === "clicks" ? "Clicks" : "Time-based"}
+            </button>
+          ))}
         </div>
 
-        <div className="stepper">
-          <button className="btn-secondary" disabled={loading}
-            onClick={() => setWindow({ startHour: wrapHour(w.startHour - 1) })}>-</button>
-          <div className="stepper-value">
-            <span className="stepper-number">{w.startHour}:00</span>
-            <span className="stepper-label">start hour</span>
-          </div>
-          <button className="btn-secondary" disabled={loading}
-            onClick={() => setWindow({ startHour: wrapHour(w.startHour + 1) })}>+</button>
-        </div>
+        <p className="warning" style={{ marginTop: 0 }}>
+          {active.source === "none"
+            ? "Active now: no friction (outside the time-based window)."
+            : `Active now: ${active.source === "window" ? "time-based window" : "base friction"} — ` +
+              (active.countdownSeconds > 0 ? `${active.countdownSeconds}s countdown` : "") +
+              (active.countdownSeconds > 0 && active.clickCount > 0 ? ", " : "") +
+              (active.clickCount > 0 ? `${active.clickCount} clicks` : "") +
+              "."}
+        </p>
 
-        <div className="stepper">
-          <button className="btn-secondary" disabled={loading}
-            onClick={() => setWindow({ endHour: wrapHour(w.endHour - 1) })}>-</button>
-          <div className="stepper-value">
-            <span className="stepper-number">{w.endHour}:00</span>
-            <span className="stepper-label">end hour</span>
+        {config.frictionMode === "timer" && (
+          <div className="stepper">
+            <button className="btn-secondary" disabled={loading}
+              onClick={() => setCountdown(config.friction.countdownSeconds - COUNTDOWN_STEP)}>-</button>
+            <div className="stepper-value">
+              <span className="stepper-number">{config.friction.countdownSeconds}</span>
+              <span className="stepper-label">countdown seconds</span>
+            </div>
+            <button className="btn-secondary" disabled={loading}
+              onClick={() => setCountdown(config.friction.countdownSeconds + COUNTDOWN_STEP)}>+</button>
           </div>
-          <button className="btn-secondary" disabled={loading}
-            onClick={() => setWindow({ endHour: wrapHour(w.endHour + 1) })}>+</button>
-        </div>
+        )}
 
-        <div className="stepper">
-          <button className="btn-secondary" disabled={loading}
-            onClick={() => setWindow({ countdownSeconds: clamp(w.countdownSeconds - COUNTDOWN_STEP, COUNTDOWN_MIN, COUNTDOWN_MAX) })}>-</button>
-          <div className="stepper-value">
-            <span className="stepper-number">{w.countdownSeconds}</span>
-            <span className="stepper-label">window countdown seconds</span>
+        {config.frictionMode === "clicks" && (
+          <div className="stepper">
+            <button className="btn-secondary" disabled={loading}
+              onClick={() => setClicks(config.friction.clickCount - CLICK_STEP)}>-</button>
+            <div className="stepper-value">
+              <span className="stepper-number">{config.friction.clickCount}</span>
+              <span className="stepper-label">required clicks</span>
+            </div>
+            <button className="btn-secondary" disabled={loading}
+              onClick={() => setClicks(config.friction.clickCount + CLICK_STEP)}>+</button>
           </div>
-          <button className="btn-secondary" disabled={loading}
-            onClick={() => setWindow({ countdownSeconds: clamp(w.countdownSeconds + COUNTDOWN_STEP, COUNTDOWN_MIN, COUNTDOWN_MAX) })}>+</button>
-        </div>
+        )}
 
-        <div className="stepper">
-          <button className="btn-secondary" disabled={loading}
-            onClick={() => setWindow({ clickCount: clamp(w.clickCount - CLICK_STEP, CLICK_MIN, CLICK_MAX) })}>-</button>
-          <div className="stepper-value">
-            <span className="stepper-number">{w.clickCount}</span>
-            <span className="stepper-label">window required clicks</span>
-          </div>
-          <button className="btn-secondary" disabled={loading}
-            onClick={() => setWindow({ clickCount: clamp(w.clickCount + CLICK_STEP, CLICK_MIN, CLICK_MAX) })}>+</button>
-        </div>
+        {config.frictionMode === "timeBased" && (
+          <>
+            <p className="path" style={{ marginTop: 0 }}>
+              Friction applies only between the chosen hours (24h clock). End before start wraps past midnight.
+            </p>
+            <div className="stepper">
+              <button className="btn-secondary" disabled={loading}
+                onClick={() => setWindow({ startHour: wrapHour(w.startHour - 1) })}>-</button>
+              <div className="stepper-value">
+                <span className="stepper-number">{w.startHour}:00</span>
+                <span className="stepper-label">start hour</span>
+              </div>
+              <button className="btn-secondary" disabled={loading}
+                onClick={() => setWindow({ startHour: wrapHour(w.startHour + 1) })}>+</button>
+            </div>
+            <div className="stepper">
+              <button className="btn-secondary" disabled={loading}
+                onClick={() => setWindow({ endHour: wrapHour(w.endHour - 1) })}>-</button>
+              <div className="stepper-value">
+                <span className="stepper-number">{w.endHour}:00</span>
+                <span className="stepper-label">end hour</span>
+              </div>
+              <button className="btn-secondary" disabled={loading}
+                onClick={() => setWindow({ endHour: wrapHour(w.endHour + 1) })}>+</button>
+            </div>
+            <div className="stepper">
+              <button className="btn-secondary" disabled={loading}
+                onClick={() => setWindow({ countdownSeconds: clamp(w.countdownSeconds - COUNTDOWN_STEP, COUNTDOWN_MIN, COUNTDOWN_MAX) })}>-</button>
+              <div className="stepper-value">
+                <span className="stepper-number">{w.countdownSeconds}</span>
+                <span className="stepper-label">window countdown seconds</span>
+              </div>
+              <button className="btn-secondary" disabled={loading}
+                onClick={() => setWindow({ countdownSeconds: clamp(w.countdownSeconds + COUNTDOWN_STEP, COUNTDOWN_MIN, COUNTDOWN_MAX) })}>+</button>
+            </div>
+            <div className="stepper">
+              <button className="btn-secondary" disabled={loading}
+                onClick={() => setWindow({ clickCount: clamp(w.clickCount - CLICK_STEP, CLICK_MIN, CLICK_MAX) })}>-</button>
+              <div className="stepper-value">
+                <span className="stepper-number">{w.clickCount}</span>
+                <span className="stepper-label">window required clicks</span>
+              </div>
+              <button className="btn-secondary" disabled={loading}
+                onClick={() => setWindow({ clickCount: clamp(w.clickCount + CLICK_STEP, CLICK_MIN, CLICK_MAX) })}>+</button>
+            </div>
+          </>
+        )}
       </section>
     </>
   );

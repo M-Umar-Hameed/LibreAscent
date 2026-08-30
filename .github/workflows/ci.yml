@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege for the default GITHUB_TOKEN. Both jobs only read the
+# repository: checkout, npm ci, and cargo. Without this the token inherits
+# the repository default, which can include write scopes these jobs never use.
+permissions:
+  contents: read
+
 jobs:
   mobile:
     name: Mobile

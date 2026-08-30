@@ -301,11 +301,13 @@ export function App() {
   }
 
   if (frictionTarget && config) {
+    const af = activeFriction(config, new Date().getHours());
     return (
       <FrictionGuard
         title={frictionTarget.title}
-        countdownSeconds={activeFriction(config, new Date().getHours()).countdownSeconds}
-        clickCount={activeFriction(config, new Date().getHours()).clickCount}
+        countdownSeconds={af.countdownSeconds}
+        clickCount={af.clickCount}
+        locked={af.locked}
         onCancel={() => setFrictionTarget(null)}
         onSuccess={async () => {
           const run = frictionTarget.run;

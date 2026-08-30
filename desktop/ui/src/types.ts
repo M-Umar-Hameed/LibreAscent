@@ -54,34 +54,36 @@ export type DesktopStatus = {
 export function activeFriction(
   config: DesktopConfig,
   hour: number,
-): { countdownSeconds: number; clickCount: number; source: "base" | "window" | "none" } {
+): { countdownSeconds: number; clickCount: number; locked: boolean; source: "base" | "window" | "none" } {
   switch (config.frictionMode) {
     case "timer":
       return {
         countdownSeconds: config.friction.countdownSeconds,
         clickCount: 0,
+        locked: false,
         source: "base",
       };
     case "clicks":
       return {
         countdownSeconds: 0,
         clickCount: config.friction.clickCount,
+        locked: false,
         source: "base",
       };
     case "timeBased": {
       const w = config.frictionWindow;
-      const inWindow =
-        w.startHour !== w.endHour &&
-        (w.startHour < w.endHour
-          ? hour >= w.startHour && hour < w.endHour
-          : hour >= w.startHour || hour < w.endHour);
-      return inWindow
-        ? {
-            countdownSeconds: w.countdownSeconds,
-            clickCount: w.clickCount,
-            source: "window",
-          }
-        : { countdownSeconds: 0, clickCount: 0, source: "none" };
+      const locked =
+        w.startHour === w.endHour
+          ? true
+          : w.startHour < w.endHour
+            ? hour >= w.startHour && hour < w.endHour
+            : hour >= w.startHour || hour < w.endHour;
+      return {
+        countdownSeconds: 0,
+        clickCount: 0,
+        locked,
+        source: locked ? "window" : "none",
+      };
     }
   }
 }

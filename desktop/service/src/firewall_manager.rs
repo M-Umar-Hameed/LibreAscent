@@ -9,7 +9,11 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-const FIREWALL_GROUP: &str = "LibreAscent";
+// Rules are identified by their DisplayName prefix, not a firewall group:
+// `netsh advfirewall firewall add rule` has no group= parameter, and passing
+// one makes netsh reject the entire command with exit code 1.
+// reset_firewall_protection matches on this prefix for the same reason.
+const FIREWALL_NAME_PREFIX: &str = "LibreAscent ";
 
 // Public resolver IPs users commonly point apps/browsers at to bypass the local
 // proxy. Quad9 is our own DoT upstream (see dns.rs), so it is kept reachable on
@@ -148,7 +152,6 @@ fn app_rule_for_path(path: &Path) -> FirewallRuleSpec {
             "add".to_string(),
             "rule".to_string(),
             format!("name={name}"),
-            format!("group={FIREWALL_GROUP}"),
             "dir=out".to_string(),
             "action=block".to_string(),
             "profile=any".to_string(),
@@ -171,7 +174,6 @@ fn dns_block_rule(
         "add".to_string(),
         "rule".to_string(),
         format!("name={name}"),
-        format!("group={FIREWALL_GROUP}"),
         "dir=out".to_string(),
         "action=block".to_string(),
         "profile=any".to_string(),
@@ -279,6 +281,30 @@ mod tests {
         let rules = dns_bypass_block_rules();
         let names: Vec<&str> = rules.iter().map(|rule| rule.name.as_str()).collect();
         assert_eq!(names, super::DNS_BYPASS_RULE_NAMES.to_vec());
+    }
+
+    #[test]
+    fn no_rule_passes_group_to_netsh() {
+        // `netsh advfirewall firewall add rule` has no group= parameter. Passing
+        // one makes netsh reject the whole command with exit code 1, which sets
+        // firewall_enforcement_failed and disables every rule until restart. That
+        // shipped, so the bypass guard read Missing on every run and no app rule
+        // was ever created either.
+        let mut specs = dns_bypass_block_rules();
+        specs.push(app_rule_for_path(Path::new(r"C:\app.exe")));
+
+        for spec in specs {
+            assert!(
+                !spec.args.iter().any(|arg| arg.starts_with("group=")),
+                "rule {} passes group= to netsh, which rejects it",
+                spec.name
+            );
+            assert!(
+                spec.name.starts_with(FIREWALL_NAME_PREFIX),
+                "rule {} must carry the prefix reset_firewall_protection matches on",
+                spec.name
+            );
+        }
     }
 
     #[test]

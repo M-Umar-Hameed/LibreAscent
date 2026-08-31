@@ -181,10 +181,37 @@ pub fn save(path: &std::path::Path, config: &DesktopConfig) -> serde_json::Resul
     Ok(())
 }
 
+/// Hostnames browsers use to reach a DoH resolver. Blocking these stops a
+/// browser bootstrapping DoH by name, as a second layer behind the policy keys
+/// in the service's browser_policy module. It is not sufficient alone, since
+/// browsers ship hardcoded bootstrap IPs, which is why the policy exists.
+///
+/// The proxy's own upstream is unaffected: it dials Quad9 at 9.9.9.9:853 by IP
+/// and never resolves these names.
+pub const DOH_BOOTSTRAP_HOSTS: [&str; 16] = [
+    "mozilla.cloudflare-dns.com",
+    "chrome.cloudflare-dns.com",
+    "cloudflare-dns.com",
+    "one.one.one.one",
+    "dns.google",
+    "dns64.dns.google",
+    "dns.quad9.net",
+    "dns10.quad9.net",
+    "dns11.quad9.net",
+    "doh.opendns.com",
+    "dns.adguard.com",
+    "dns.adguard-dns.com",
+    "doh.cleanbrowsing.org",
+    "dns.nextdns.io",
+    "doh.dns.sb",
+    "doh.pub",
+];
+
 pub fn load_blocklist(config_path: &std::path::Path) -> crate::blocklist::DomainBlocklist {
     let config = load_or_create(config_path).unwrap_or_else(|_| default_config());
     let mut blocklist = crate::blocklist::DomainBlocklist::new(config.included_domains, config.excluded_domains);
     blocklist.extend_keywords(config.keywords);
+    blocklist.extend_blocked(DOH_BOOTSTRAP_HOSTS.iter().map(|host| host.to_string()));
 
     let cached_path = config_path.parent().unwrap().join("blocklist.txt");
     if cached_path.exists() {
@@ -505,5 +532,28 @@ mod tests {
             .expect("clock should work")
             .as_nanos();
         std::env::temp_dir().join(format!("libreascent-{suffix}-{name}"))
+    }
+}
+
+#[cfg(test)]
+mod doh_bootstrap_tests {
+    use super::*;
+
+    #[test]
+    fn doh_bootstrap_hosts_are_blocked_by_a_loaded_blocklist() {
+        // The proxy blocks by suffix, so a subdomain of a DoH host is covered too.
+        let mut blocklist = crate::blocklist::DomainBlocklist::new(Vec::new(), Vec::new());
+        blocklist.extend_blocked(DOH_BOOTSTRAP_HOSTS.iter().map(|h| h.to_string()));
+
+        for host in DOH_BOOTSTRAP_HOSTS {
+            assert!(
+                blocklist.is_blocked(host),
+                "DoH bootstrap host {host} must be blocked"
+            );
+        }
+        // Firefox's default endpoint, the one that made this necessary.
+        assert!(blocklist.is_blocked("mozilla.cloudflare-dns.com"));
+        // An unrelated domain must still resolve.
+        assert!(!blocklist.is_blocked("example.com"));
     }
 }

@@ -35,13 +35,20 @@ class BankingAppGuardTest {
     }
 
     @Test
-    fun bankingWindowIsOpenOnlyUntilItsDeadline() {
-        val now = 1_000_000L
-        assertTrue(BankingAppGuard.isBankingActive(now + 1, now))
-        assertFalse(BankingAppGuard.isBankingActive(now, now), "deadline itself is closed")
-        assertFalse(BankingAppGuard.isBankingActive(now - 1, now))
-        // 0 is the cleared/never-started state written by BankingModeManager.
-        assertFalse(BankingAppGuard.isBankingActive(0L, now))
+    fun windowStaysGuardedUntilRestoreClearsTheKey() {
+        // Regression for a 90s gap seen on device: the restore alarm is
+        // inexact and fired well after the deadline, but the guard keyed on
+        // the clock and stopped at the deadline while the accessibility
+        // service was still dead. Any nonzero deadline means restore() has
+        // not run yet, so the guard must stay on regardless of the time.
+        val deadline = 1_000_000L
+        assertTrue(BankingAppGuard.isWindowPending(deadline), "before deadline")
+        assertTrue(
+            BankingAppGuard.isWindowPending(deadline),
+            "past the deadline but not yet restored: still unguarded otherwise"
+        )
+        // 0 is what restore() leaves behind, and the never-started state.
+        assertFalse(BankingAppGuard.isWindowPending(0L))
     }
 
     @Test

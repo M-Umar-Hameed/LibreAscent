@@ -68,7 +68,7 @@ class BankingAppGuard(private val context: Context) {
         val until = context
             .getSharedPreferences(BANKING_PREFS, Context.MODE_PRIVATE)
             .getLong(KEY_BANKING_UNTIL, 0L)
-        if (!isBankingActive(until, System.currentTimeMillis())) return false
+        if (!isWindowPending(until)) return false
 
         if (!hasUsageStatsPermission(context)) {
             // Nothing this guard can do; surfaced to the user by the settings
@@ -135,7 +135,15 @@ class BankingAppGuard(private val context: Context) {
         private const val ACTIVE_POLL_MS = 1_000L
         private const val EVENT_LOOKBACK_MS = 10_000L
 
-        fun isBankingActive(until: Long, now: Long): Boolean = until > now
+        /**
+         * The window is open until BankingModeManager.restore() runs, which is
+         * when it removes the key. The deadline itself is not the signal: the
+         * restore alarm is inexact (setAndAllowWhileIdle), and on device it
+         * fired 90 seconds late, leaving the accessibility service dead well
+         * past the deadline. Keying on the clock would drop the guard during
+         * exactly that gap.
+         */
+        fun isWindowPending(until: Long): Boolean = until != 0L
 
         fun nextDelayMs(bankingActive: Boolean): Long =
             if (bankingActive) ACTIVE_POLL_MS else IDLE_POLL_MS

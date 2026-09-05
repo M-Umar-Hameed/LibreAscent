@@ -9,7 +9,11 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-const FIREWALL_GROUP: &str = "LibreAscent";
+// Rules are identified by their DisplayName prefix, not a firewall group:
+// `netsh advfirewall firewall add rule` has no group= parameter, and passing
+// one makes netsh reject the entire command with exit code 1.
+// reset_firewall_protection matches on this prefix for the same reason.
+const FIREWALL_NAME_PREFIX: &str = "LibreAscent ";
 
 // Public resolver IPs users commonly point apps/browsers at to bypass the local
 // proxy. Quad9 is our own DoT upstream (see dns.rs), so it is kept reachable on
@@ -61,18 +65,23 @@ pub fn ensure_firewall_protection(
     Ok(())
 }
 
+/// PowerShell used to remove every LibreAscent rule. Extracted so the string is
+/// testable: a stray escape here silently breaks cleanup with no error surfaced,
+/// since the caller ignores the exit status.
+fn reset_command() -> String {
+    format!(
+        "Get-NetFirewallRule -DisplayName '{FIREWALL_NAME_PREFIX}*' -ErrorAction SilentlyContinue |          Remove-NetFirewallRule -ErrorAction SilentlyContinue"
+    )
+}
+
 pub fn reset_firewall_protection() -> Result<()> {
     // netsh `delete rule` has no group= filter, and netsh's group= does not
     // populate the RuleGroup that `Remove-NetFirewallRule -Group` matches. The
     // reliable key is the DisplayName (netsh name=), which every rule prefixes
     // with "LibreAscent ", so match that and remove the whole set at once.
     let mut command = Command::new("powershell");
-    command.args([
-        "-NoProfile",
-        "-Command",
-        "Get-NetFirewallRule -DisplayName 'LibreAscent*' -ErrorAction SilentlyContinue | \
-         Remove-NetFirewallRule -ErrorAction SilentlyContinue",
-    ]);
+    let remove = reset_command();
+    command.args(["-NoProfile", "-Command", &remove]);
 
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
@@ -138,7 +147,7 @@ fn app_rule_from_config(rule: &BlockedAppRule) -> Option<FirewallRuleSpec> {
 
 fn app_rule_for_path(path: &Path) -> FirewallRuleSpec {
     let program = path.to_string_lossy().to_string();
-    let name = format!("LibreAscent Block App {}", stable_rule_key(&program));
+    let name = format!("{FIREWALL_NAME_PREFIX}Block App {}", stable_rule_key(&program));
 
     FirewallRuleSpec {
         name: name.clone(),
@@ -148,7 +157,6 @@ fn app_rule_for_path(path: &Path) -> FirewallRuleSpec {
             "add".to_string(),
             "rule".to_string(),
             format!("name={name}"),
-            format!("group={FIREWALL_GROUP}"),
             "dir=out".to_string(),
             "action=block".to_string(),
             "profile=any".to_string(),
@@ -171,7 +179,6 @@ fn dns_block_rule(
         "add".to_string(),
         "rule".to_string(),
         format!("name={name}"),
-        format!("group={FIREWALL_GROUP}"),
         "dir=out".to_string(),
         "action=block".to_string(),
         "profile=any".to_string(),
@@ -279,6 +286,42 @@ mod tests {
         let rules = dns_bypass_block_rules();
         let names: Vec<&str> = rules.iter().map(|rule| rule.name.as_str()).collect();
         assert_eq!(names, super::DNS_BYPASS_RULE_NAMES.to_vec());
+    }
+
+    #[test]
+    fn reset_command_is_well_formed_powershell() {
+        let cmd = reset_command();
+        assert!(
+            !cmd.contains('\\'),
+            "a literal backslash breaks the PowerShell command: {cmd}"
+        );
+        assert!(cmd.contains("Get-NetFirewallRule -DisplayName 'LibreAscent *'"));
+        assert!(cmd.contains("| "), "pipe must survive the line continuation: {cmd}");
+        assert!(cmd.contains("Remove-NetFirewallRule"));
+    }
+
+    #[test]
+    fn no_rule_passes_group_to_netsh() {
+        // `netsh advfirewall firewall add rule` has no group= parameter. Passing
+        // one makes netsh reject the whole command with exit code 1, which sets
+        // firewall_enforcement_failed and disables every rule until restart. That
+        // shipped, so the bypass guard read Missing on every run and no app rule
+        // was ever created either.
+        let mut specs = dns_bypass_block_rules();
+        specs.push(app_rule_for_path(Path::new(r"C:\app.exe")));
+
+        for spec in specs {
+            assert!(
+                !spec.args.iter().any(|arg| arg.starts_with("group=")),
+                "rule {} passes group= to netsh, which rejects it",
+                spec.name
+            );
+            assert!(
+                spec.name.starts_with(FIREWALL_NAME_PREFIX),
+                "rule {} must carry the prefix reset_firewall_protection matches on",
+                spec.name
+            );
+        }
     }
 
     #[test]

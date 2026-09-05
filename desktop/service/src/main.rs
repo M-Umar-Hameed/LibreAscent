@@ -3,6 +3,7 @@ mod dns;
 mod updater;
 mod service_manager;
 mod dns_manager;
+mod browser_policy;
 mod firewall_manager;
 mod process_manager;
 

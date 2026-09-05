@@ -12,6 +12,37 @@ import java.util.concurrent.ConcurrentHashMap
  * observe either the previous or the next complete set.
  */
 class DomainBlocklist {
+    companion object {
+        /**
+         * Hostnames browsers use to reach a DoH resolver. The tunnel only routes
+         * the plaintext resolver IPs, so a browser that upgrades to DoH escapes it
+         * entirely: Chrome maps a 1.1.1.1 system resolver to
+         * chrome.cloudflare-dns.com, which lives on a CDN range this tunnel never
+         * sees. The upgrade needs that hostname resolved first, and that lookup
+         * does come through here, so refusing it keeps the browser on plain DNS.
+         * Browsers with hardcoded bootstrap IPs still escape; that is a known hole.
+         * Mirrors DOH_BOOTSTRAP_HOSTS in desktop/shared/src/config.rs; keep in sync.
+         */
+        val DOH_BOOTSTRAP_HOSTS: Set<String> = setOf(
+            "mozilla.cloudflare-dns.com",
+            "chrome.cloudflare-dns.com",
+            "cloudflare-dns.com",
+            "one.one.one.one",
+            "dns.google",
+            "dns64.dns.google",
+            "dns.quad9.net",
+            "dns10.quad9.net",
+            "dns11.quad9.net",
+            "doh.opendns.com",
+            "dns.adguard.com",
+            "dns.adguard-dns.com",
+            "doh.cleanbrowsing.org",
+            "dns.nextdns.io",
+            "doh.dns.sb",
+            "doh.pub",
+        )
+    }
+
 
     // Main blocklist — stores normalized domains
     @Volatile
@@ -45,6 +76,12 @@ class DomainBlocklist {
         if (normalized.isEmpty()) return false
 
         val candidates = parentChain(normalized)
+
+        // DoH bootstrap hostnames are blocked ahead of the whitelist on purpose:
+        // a browser that can resolve its DoH endpoint resolves everything else
+        // over HTTPS and never sends this proxy another query. Letting a user
+        // whitelist one would reopen the bypass.
+        if (matchesList(candidates, DOH_BOOTSTRAP_HOSTS)) return true
 
         // Check whitelist first (exact + suffix)
         if (matchesList(candidates, whitelist)) return false

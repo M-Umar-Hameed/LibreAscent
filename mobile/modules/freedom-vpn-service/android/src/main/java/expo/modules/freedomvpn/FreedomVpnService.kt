@@ -97,6 +97,11 @@ class FreedomVpnService : VpnService() {
         private const val IPV4_HEADER_MIN_SIZE = 20
         private const val IPV6_HEADER_SIZE = 40
         private const val PROTOCOL_UDP = 17
+        private const val PROTOCOL_TCP = 6
+        private const val TCP_HEADER_SIZE = 20
+        private const val TCP_FLAG_SYN = 0x02
+        private const val TCP_FLAG_RST = 0x04
+        private const val TCP_FLAG_ACK = 0x10
 
         /** IP and UDP header fields needed to answer a captured DNS query. */
         internal class UdpPacket(
@@ -322,6 +327,126 @@ class FreedomVpnService : VpnService() {
         /**
          * Calculate a one's-complement checksum (RFC 1071).
          */
+        internal data class TcpSyn(
+            val srcIp: ByteArray,
+            val dstIp: ByteArray,
+            val srcPort: Int,
+            val dstPort: Int,
+            val seq: Long
+        )
+
+        /** A TCP segment with SYN set and ACK clear, i.e. a connection attempt. Anything else is null. */
+        internal fun parseTcpSyn(data: ByteArray, length: Int): TcpSyn? {
+            if (length < IPV4_HEADER_MIN_SIZE) return null
+            val srcIp: ByteArray
+            val dstIp: ByteArray
+            val tcpOffset: Int
+            when ((data[0].toInt() and 0xFF) shr 4) {
+                4 -> {
+                    if ((data[9].toInt() and 0xFF) != PROTOCOL_TCP) return null
+                    srcIp = data.copyOfRange(12, 16)
+                    dstIp = data.copyOfRange(16, 20)
+                    tcpOffset = (data[0].toInt() and 0xF) * 4
+                }
+                6 -> {
+                    if (length < IPV6_HEADER_SIZE) return null
+                    if ((data[6].toInt() and 0xFF) != PROTOCOL_TCP) return null
+                    srcIp = data.copyOfRange(8, 24)
+                    dstIp = data.copyOfRange(24, 40)
+                    tcpOffset = IPV6_HEADER_SIZE
+                }
+                else -> return null
+            }
+            if (length < tcpOffset + TCP_HEADER_SIZE) return null
+            val flags = data[tcpOffset + 13].toInt() and 0xFF
+            if (flags and TCP_FLAG_SYN == 0 || flags and TCP_FLAG_ACK != 0) return null
+            val seq = ((data[tcpOffset + 4].toLong() and 0xFF) shl 24) or
+                ((data[tcpOffset + 5].toLong() and 0xFF) shl 16) or
+                ((data[tcpOffset + 6].toLong() and 0xFF) shl 8) or
+                (data[tcpOffset + 7].toLong() and 0xFF)
+            return TcpSyn(
+                srcIp,
+                dstIp,
+                ((data[tcpOffset].toInt() and 0xFF) shl 8) or (data[tcpOffset + 1].toInt() and 0xFF),
+                ((data[tcpOffset + 2].toInt() and 0xFF) shl 8) or (data[tcpOffset + 3].toInt() and 0xFF),
+                seq
+            )
+        }
+
+        /** RST|ACK back to the client: seq 0, ack = syn.seq + 1, ports and addresses swapped. */
+        internal fun buildTcpRstPacket(syn: TcpSyn): ByteArray {
+            val v6 = syn.srcIp.size == 16
+            val ipHeader = if (v6) IPV6_HEADER_SIZE else 20
+            val packet = ByteArray(ipHeader + TCP_HEADER_SIZE)
+            if (v6) {
+                packet[0] = 0x60.toByte()
+                packet[4] = (TCP_HEADER_SIZE shr 8).toByte()
+                packet[5] = (TCP_HEADER_SIZE and 0xFF).toByte()
+                packet[6] = PROTOCOL_TCP.toByte()
+                packet[7] = 0x40.toByte()
+                System.arraycopy(syn.dstIp, 0, packet, 8, 16)
+                System.arraycopy(syn.srcIp, 0, packet, 24, 16)
+            } else {
+                packet[0] = 0x45.toByte()
+                packet[2] = (packet.size shr 8).toByte()
+                packet[3] = (packet.size and 0xFF).toByte()
+                packet[6] = 0x40.toByte()
+                packet[8] = 0x40.toByte()
+                packet[9] = PROTOCOL_TCP.toByte()
+                System.arraycopy(syn.dstIp, 0, packet, 12, 4)
+                System.arraycopy(syn.srcIp, 0, packet, 16, 4)
+                val ipChecksum = calculateChecksum(packet, 0, 20)
+                packet[10] = (ipChecksum shr 8).toByte()
+                packet[11] = (ipChecksum and 0xFF).toByte()
+            }
+            val t = ipHeader
+            packet[t] = (syn.dstPort shr 8).toByte()
+            packet[t + 1] = (syn.dstPort and 0xFF).toByte()
+            packet[t + 2] = (syn.srcPort shr 8).toByte()
+            packet[t + 3] = (syn.srcPort and 0xFF).toByte()
+            val ack = (syn.seq + 1) and 0xFFFFFFFFL
+            packet[t + 8] = (ack shr 24).toByte()
+            packet[t + 9] = (ack shr 16).toByte()
+            packet[t + 10] = (ack shr 8).toByte()
+            packet[t + 11] = ack.toByte()
+            packet[t + 12] = 0x50.toByte()
+            packet[t + 13] = (TCP_FLAG_RST or TCP_FLAG_ACK).toByte()
+            val checksum = transportChecksum(packet, t, TCP_HEADER_SIZE, syn.dstIp, syn.srcIp, PROTOCOL_TCP)
+            packet[t + 16] = (checksum shr 8).toByte()
+            packet[t + 17] = (checksum and 0xFF).toByte()
+            return packet
+        }
+
+        /** One's-complement checksum over the IPv4 or IPv6 pseudo-header plus the transport segment. */
+        internal fun transportChecksum(
+            packet: ByteArray,
+            offset: Int,
+            length: Int,
+            srcIp: ByteArray,
+            dstIp: ByteArray,
+            protocol: Int
+        ): Int {
+            val pseudo: ByteArray
+            if (srcIp.size == 16) {
+                pseudo = ByteArray(40 + length)
+                System.arraycopy(srcIp, 0, pseudo, 0, 16)
+                System.arraycopy(dstIp, 0, pseudo, 16, 16)
+                pseudo[34] = (length ushr 8).toByte()
+                pseudo[35] = (length and 0xFF).toByte()
+                pseudo[39] = protocol.toByte()
+                System.arraycopy(packet, offset, pseudo, 40, length)
+            } else {
+                pseudo = ByteArray(12 + length)
+                System.arraycopy(srcIp, 0, pseudo, 0, 4)
+                System.arraycopy(dstIp, 0, pseudo, 4, 4)
+                pseudo[9] = protocol.toByte()
+                pseudo[10] = (length ushr 8).toByte()
+                pseudo[11] = (length and 0xFF).toByte()
+                System.arraycopy(packet, offset, pseudo, 12, length)
+            }
+            return calculateChecksum(pseudo, 0, pseudo.size)
+        }
+
         private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Int {
             var sum = 0L
             var i = offset
@@ -517,9 +642,8 @@ class FreedomVpnService : VpnService() {
      *
      * We only care about UDP packets to port 53 (DNS), over IPv4 or IPv6.
      *
-     * ponytail: DNS over TCP is routed into the tunnel and silently dropped
-     * here, and DoH/DoT bypasses the tunnel entirely. Both are known remaining
-     * holes, tracked separately.
+     * ponytail: DoH/DoT bypass the tunnel entirely. DoH bootstrap hostnames
+     * are refused by DomainBlocklist; hardcoded-IP resolvers remain a hole.
      */
     private fun processIpPacket(
         packet: ByteBuffer,
@@ -527,7 +651,22 @@ class FreedomVpnService : VpnService() {
     ) {
         val rawData = packet.array()
 
-        val ip = parseUdpPacket(rawData, length) ?: return
+        val ip = parseUdpPacket(rawData, length)
+        if (ip == null) {
+            // Everything addressed to the resolver /32s enters this tunnel, but
+            // only UDP DNS is served. A TCP SYN here is either a DNS-over-TCP
+            // fallback or Android's opportunistic Private DNS probing DoT on
+            // :853; dropping it left the client hanging until its timeout on
+            // every network change. Answer with RST so it fails in milliseconds
+            // and the resolver falls back to UDP, which is filtered.
+            // ponytail: RST, not a relay. Serving TCP DNS would mean a userspace
+            // TCP stack; add one only if a truncated (TC) answer ever matters.
+            parseTcpSyn(rawData, length)?.let { syn ->
+                Log.d(TAG, "TCP SYN to :${syn.dstPort} in tunnel, replying RST")
+                writeToTun(buildTcpRstPacket(syn))
+            }
+            return
+        }
         val srcIp = ip.srcIp
         val dstIp = ip.dstIp
         val srcPort = ip.srcPort

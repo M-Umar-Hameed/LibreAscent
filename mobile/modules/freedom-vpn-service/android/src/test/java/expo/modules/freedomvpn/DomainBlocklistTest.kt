@@ -80,6 +80,24 @@ class DomainBlocklistTest {
     }
 
     @Test
+    fun dohBootstrapHostsAreBlockedEvenWhenWhitelisted() {
+        val list = DomainBlocklist()
+        for (host in DomainBlocklist.DOH_BOOTSTRAP_HOSTS) {
+            assertTrue(list.isBlocked(host), "$host must be blocked out of the box")
+            assertTrue(list.isBlocked("edge.$host"), "subdomains of $host must be blocked too")
+        }
+        // Firefox's default endpoint, the one that reopened the bypass on desktop.
+        assertTrue(list.isBlocked("mozilla.cloudflare-dns.com"))
+        // Whitelisting must not reopen the bypass.
+        list.setWhitelist(setOf("cloudflare-dns.com", "dns.google"))
+        assertTrue(list.isBlocked("chrome.cloudflare-dns.com"), "whitelist cannot override the DoH block")
+        assertTrue(list.isBlocked("dns.google"), "whitelist cannot override the DoH block")
+        // Unrelated names are untouched.
+        assertFalse(list.isBlocked("example.com"))
+        assertFalse(list.isBlocked("cloudflare.com"), "the CDN itself is not a DoH endpoint")
+    }
+
+    @Test
     fun bareTldEntriesCannotEnterAnyList() {
         // normalize() drops anything without a dot, so a bare TLD can never be
         // stored and the top-level probe in the parent chain can never match.

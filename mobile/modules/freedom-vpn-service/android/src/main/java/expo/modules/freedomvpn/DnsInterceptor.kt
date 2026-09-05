@@ -160,9 +160,9 @@ class DnsInterceptor(private val blocklist: DomainBlocklist) {
         response.write(0x00)
         response.write(0x00)
 
-        // NSCOUNT = 0
+        // NSCOUNT = 1: the SOA below
         response.write(0x00)
-        response.write(0x00)
+        response.write(0x01)
 
         // ARCOUNT = 0
         response.write(0x00)
@@ -174,10 +174,64 @@ class DnsInterceptor(private val blocklist: DomainBlocklist) {
             response.write(queryPacket, DNS_HEADER_SIZE, queryLength - DNS_HEADER_SIZE)
         }
 
+        // Authority section: one SOA so resolvers negative-cache this answer
+        // (RFC 2308). Without it a client cannot cache NXDOMAIN and re-asks on
+        // every lookup; on device the same blocked name was queried eight times
+        // in 55 ms. The owner is a compression pointer to the question name,
+        // and MINIMUM carries the negative TTL.
+        writeSoaAuthority(response)
+
         return response.toByteArray()
     }
 
+    private fun writeSoaAuthority(out: ByteArrayOutputStream) {
+        // NAME: pointer to the query name at offset 12 (0xC00C)
+        out.write(0xC0)
+        out.write(0x0C)
+        // TYPE SOA, CLASS IN
+        writeUInt16(out, 6)
+        writeUInt16(out, 1)
+        writeUInt32(out, NEGATIVE_CACHE_TTL_SECONDS)
+        writeUInt16(out, SOA_RDLENGTH)
+        // RDATA
+        writeName(out, SOA_MNAME)
+        writeName(out, SOA_RNAME)
+        writeUInt32(out, 1L)          // SERIAL
+        writeUInt32(out, 3600L)       // REFRESH
+        writeUInt32(out, 900L)        // RETRY
+        writeUInt32(out, 604800L)     // EXPIRE
+        writeUInt32(out, NEGATIVE_CACHE_TTL_SECONDS) // MINIMUM: negative TTL
+    }
+
+    private fun writeName(out: ByteArrayOutputStream, name: String) {
+        for (label in name.split('.')) {
+            val bytes = label.toByteArray(Charsets.US_ASCII)
+            out.write(bytes.size)
+            out.write(bytes, 0, bytes.size)
+        }
+        out.write(0)
+    }
+
+    private fun writeUInt16(out: ByteArrayOutputStream, value: Int) {
+        out.write(value shr 8 and 0xFF)
+        out.write(value and 0xFF)
+    }
+
+    private fun writeUInt32(out: ByteArrayOutputStream, value: Long) {
+        out.write((value shr 24 and 0xFF).toInt())
+        out.write((value shr 16 and 0xFF).toInt())
+        out.write((value shr 8 and 0xFF).toInt())
+        out.write((value and 0xFF).toInt())
+    }
+
     companion object {
+        /** Negative-cache lifetime advertised in the NXDOMAIN SOA. Bounds the retry storm; an unblock takes effect within this window. */
+        const val NEGATIVE_CACHE_TTL_SECONDS = 300L
+        // .invalid is reserved (RFC 2606), so these can never collide with a real zone.
+        const val SOA_MNAME = "blocked.invalid"
+        const val SOA_RNAME = "hostmaster.invalid"
+        // wire(MNAME) + wire(RNAME) + five 32-bit fields
+        const val SOA_RDLENGTH = (1 + 7 + 1 + 7 + 1) + (1 + 10 + 1 + 7 + 1) + 20
         const val DNS_HEADER_SIZE = 12
         const val DNS_PORT = 53
     }

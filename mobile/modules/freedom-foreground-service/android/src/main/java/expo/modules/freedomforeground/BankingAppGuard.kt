@@ -37,6 +37,7 @@ class BankingAppGuard(private val context: Context) {
     private val handler = Handler(Looper.getMainLooper())
     private var running = false
     private var restoreRequested = false
+    private var grantWarned = false
 
     private val tick = object : Runnable {
         override fun run() {
@@ -71,6 +72,7 @@ class BankingAppGuard(private val context: Context) {
             .getLong(KEY_BANKING_UNTIL, 0L)
         if (!isWindowPending(until)) {
             restoreRequested = false
+            grantWarned = false
             return false
         }
 
@@ -80,6 +82,7 @@ class BankingAppGuard(private val context: Context) {
         // loop already ticks every second inside the window, so ask for the
         // restore ourselves the moment the deadline passes; the alarm stays as
         // a backstop. Same-package broadcast reaches the non-exported receiver.
+        // This needs no permission, so it runs before the usage-stats check.
         if (shouldRequestRestore(until, System.currentTimeMillis(), restoreRequested)) {
             restoreRequested = true
             Log.i(TAG, "Banking deadline passed, requesting restore now")
@@ -89,8 +92,12 @@ class BankingAppGuard(private val context: Context) {
         }
 
         if (!hasUsageStatsPermission(context)) {
-            // Nothing this guard can do; surfaced to the user by the settings
-            // screen before banking can be started.
+            // Blocked apps are unguarded for this window. A reinstall resets
+            // the grant, so this is reachable even after it was once given.
+            if (!grantWarned) {
+                grantWarned = true
+                Log.w(TAG, "Usage access not granted; blocked apps are unguarded during banking")
+            }
             return true
         }
 

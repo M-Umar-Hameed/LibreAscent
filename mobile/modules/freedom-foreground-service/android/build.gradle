@@ -6,6 +6,13 @@ group = 'expo.modules.freedomforeground'
 version = '0.1.0'
 
 android {
+    // android.util.Log is not mocked in JVM unit tests. The guard logs on the
+    // malformed-store path deliberately, since a parse failure during a banking
+    // window is worth knowing about, so let the stub return defaults instead of
+    // dropping the log.
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
     namespace "expo.modules.freedomforeground"
     compileSdkVersion safeExtGet("compileSdkVersion", 34)
 
@@ -29,6 +36,8 @@ dependencies {
     implementation "androidx.core:core-ktx:1.12.0"
     implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:${safeExtGet('kotlinVersion', '1.9.24')}"
+    testImplementation "org.jetbrains.kotlin:kotlin-test:${safeExtGet('kotlinVersion', '1.9.24')}"
+    testImplementation "org.json:json:20240303"
 }
 
 def safeExtGet(prop, fallback) {

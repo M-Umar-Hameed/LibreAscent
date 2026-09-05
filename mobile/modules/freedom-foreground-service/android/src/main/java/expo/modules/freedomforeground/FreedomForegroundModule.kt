@@ -86,6 +86,35 @@ class FreedomForegroundModule : Module() {
             }
         }
 
+        // Banking mode switches the accessibility service off, so the usage-stats
+        // guard is the only thing blocking apps during that window. Settings uses
+        // this to refuse starting banking while the grant is missing.
+        AsyncFunction("hasUsageStatsPermission") { promise: Promise ->
+            val context = appContext.reactContext
+            if (context == null) {
+                promise.resolve(false)
+                return@AsyncFunction
+            }
+            promise.resolve(BankingAppGuard.hasUsageStatsPermission(context))
+        }
+
+        AsyncFunction("openUsageStatsSettings") { promise: Promise ->
+            val context = appContext.reactContext
+            if (context == null) {
+                promise.reject("NO_CONTEXT", "React context unavailable", null)
+                return@AsyncFunction
+            }
+            try {
+                val intent = android.content.Intent(
+                    android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS
+                ).apply { flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK }
+                context.startActivity(intent)
+                promise.resolve(null)
+            } catch (e: Exception) {
+                promise.reject("OPEN_FAILED", e.message, e)
+            }
+        }
+
         AsyncFunction("isAutoStartEnabled") { promise: Promise ->
             try {
                 val context = appContext.reactContext

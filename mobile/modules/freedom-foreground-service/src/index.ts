@@ -7,6 +7,8 @@ interface FreedomForegroundModuleInterface {
   updateNotification(title?: string, text?: string): Promise<void>;
   setAutoStart(enabled: boolean): Promise<void>;
   isAutoStartEnabled(): Promise<boolean>;
+  hasUsageStatsPermission(): Promise<boolean>;
+  openUsageStatsSettings(): Promise<void>;
 }
 
 let FreedomForegroundNative: FreedomForegroundModuleInterface | null = null;
@@ -51,4 +53,19 @@ export async function setAutoStart(enabled: boolean): Promise<void> {
 export async function isAutoStartEnabled(): Promise<boolean> {
   if (!FreedomForegroundNative) return true;
   return FreedomForegroundNative.isAutoStartEnabled();
+}
+
+export async function hasUsageStatsPermission(): Promise<boolean> {
+  if (!FreedomForegroundNative) {
+    return false;
+  }
+  return FreedomForegroundNative.hasUsageStatsPermission();
+}
+
+export async function openUsageStatsSettings(): Promise<void> {
+  if (!FreedomForegroundNative) {
+    console.warn("[FreedomForeground] Native module not available");
+    return;
+  }
+  return FreedomForegroundNative.openUsageStatsSettings();
 }

@@ -23,6 +23,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       "FOREGROUND_SERVICE",
       "FOREGROUND_SERVICE_SPECIAL_USE",
       "SYSTEM_ALERT_WINDOW",
+      // Lets the foreground service read the foreground app while banking mode
+      // has the accessibility service switched off. Granted by the user in
+      // Settings; it is not a runtime permission.
+      "PACKAGE_USAGE_STATS",
       "RECEIVE_BOOT_COMPLETED",
       "POST_NOTIFICATIONS",
       "BIND_ACCESSIBILITY_SERVICE",

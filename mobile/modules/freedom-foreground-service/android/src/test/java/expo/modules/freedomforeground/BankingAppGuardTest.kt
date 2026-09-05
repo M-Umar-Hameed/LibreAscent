@@ -52,6 +52,20 @@ class BankingAppGuardTest {
     }
 
     @Test
+    fun requestsRestoreExactlyOnceAfterTheDeadline() {
+        // The alarm is inexact (observed 90s late), so the guard triggers the
+        // restore itself. It must fire at the deadline, not before, and only
+        // once per window even though the loop keeps ticking until restore()
+        // clears the key.
+        val deadline = 1_000_000L
+        assertFalse(BankingAppGuard.shouldRequestRestore(deadline, deadline - 1, false), "before deadline")
+        assertTrue(BankingAppGuard.shouldRequestRestore(deadline, deadline, false), "at deadline")
+        assertTrue(BankingAppGuard.shouldRequestRestore(deadline, deadline + 90_000, false), "late")
+        assertFalse(BankingAppGuard.shouldRequestRestore(deadline, deadline + 1, true), "already requested")
+        assertFalse(BankingAppGuard.shouldRequestRestore(0L, deadline + 1, false), "no window")
+    }
+
+    @Test
     fun pollsFasterWhileTheWindowIsOpen() {
         val active = BankingAppGuard.nextDelayMs(true)
         val idle = BankingAppGuard.nextDelayMs(false)

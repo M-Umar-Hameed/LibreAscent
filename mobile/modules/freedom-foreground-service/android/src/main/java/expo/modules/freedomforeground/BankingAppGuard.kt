@@ -36,6 +36,7 @@ class BankingAppGuard(private val context: Context) {
 
     private val handler = Handler(Looper.getMainLooper())
     private var running = false
+    private var restoreRequested = false
 
     private val tick = object : Runnable {
         override fun run() {
@@ -68,7 +69,24 @@ class BankingAppGuard(private val context: Context) {
         val until = context
             .getSharedPreferences(BANKING_PREFS, Context.MODE_PRIVATE)
             .getLong(KEY_BANKING_UNTIL, 0L)
-        if (!isWindowPending(until)) return false
+        if (!isWindowPending(until)) {
+            restoreRequested = false
+            return false
+        }
+
+        // The restore alarm is inexact and fired 90 seconds late on device,
+        // three times out of three. Keyword and URL blocking have no fallback
+        // during that gap, since they need the accessibility service back. This
+        // loop already ticks every second inside the window, so ask for the
+        // restore ourselves the moment the deadline passes; the alarm stays as
+        // a backstop. Same-package broadcast reaches the non-exported receiver.
+        if (shouldRequestRestore(until, System.currentTimeMillis(), restoreRequested)) {
+            restoreRequested = true
+            Log.i(TAG, "Banking deadline passed, requesting restore now")
+            context.sendBroadcast(
+                Intent(ACTION_BANKING_RESTORE).setPackage(context.packageName)
+            )
+        }
 
         if (!hasUsageStatsPermission(context)) {
             // Nothing this guard can do; surfaced to the user by the settings
@@ -131,6 +149,11 @@ class BankingAppGuard(private val context: Context) {
         private const val MATCHER_PREFS = "freedom_matcher_data"
         private const val KEY_PACKAGES = "blocked_packages"
 
+        // Handled by BankingRestoreReceiver in the accessibility module, which
+        // is what the restore alarm targets too.
+        private const val ACTION_BANKING_RESTORE =
+            "expo.modules.freedomaccessibility.BANKING_RESTORE"
+
         private const val IDLE_POLL_MS = 5_000L
         private const val ACTIVE_POLL_MS = 1_000L
         private const val EVENT_LOOKBACK_MS = 10_000L
@@ -144,6 +167,10 @@ class BankingAppGuard(private val context: Context) {
          * exactly that gap.
          */
         fun isWindowPending(until: Long): Boolean = until != 0L
+
+        /** Once per window: the deadline has passed and restore has not yet cleared the key. */
+        fun shouldRequestRestore(until: Long, now: Long, alreadyRequested: Boolean): Boolean =
+            until != 0L && now >= until && !alreadyRequested
 
         fun nextDelayMs(bankingActive: Boolean): Long =
             if (bankingActive) ACTIVE_POLL_MS else IDLE_POLL_MS

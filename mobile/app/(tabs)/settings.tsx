@@ -10,6 +10,7 @@ import {
 } from "@/stores/useBlockingStore";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import * as FreedomDeviceAdmin from "@/modules/freedom-device-admin/src";
+import * as FreedomForeground from "@/modules/freedom-foreground-service/src";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import * as Crypto from "expo-crypto";
@@ -105,6 +106,34 @@ export default function SettingsScreen(): ReactNode {
 
   const startBanking = async (): Promise<void> => {
     setPendingAction(null);
+
+    // Banking mode switches the accessibility service off, and app blocking
+    // lives inside it. Without usage-stats access the foreground guard cannot
+    // see what is on screen, so every blocked app would open freely for the
+    // whole window. Refuse rather than hand out an unguarded window.
+    const isDeviceOwner = await FreedomDeviceAdmin.isDeviceOwner().catch(
+      () => false,
+    );
+    if (
+      !isDeviceOwner &&
+      !(await FreedomForeground.hasUsageStatsPermission())
+    ) {
+      Alert.alert(
+        "Usage access required",
+        "Banking mode turns off the accessibility service, so LibreAscent needs usage access to keep blocked apps blocked during that time. Without it, blocked apps would open freely.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Grant access",
+            onPress: () => {
+              void FreedomForeground.openUsageStatsSettings();
+            },
+          },
+        ],
+      );
+      return;
+    }
+
     try {
       try {
         await FreedomDeviceAdmin.setSelfUninstallBlocked(true);

@@ -61,10 +61,16 @@ class FreedomForegroundService : Service() {
             private set
     }
 
+    private val bankingGuard by lazy { BankingAppGuard(this) }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         registerBlockedReceiver()
+        // Blocked apps are otherwise unguarded while banking mode has the
+        // accessibility service switched off. Hosted here so it survives that
+        // service being destroyed and the app process being swiped away.
+        bankingGuard.start()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -180,6 +186,7 @@ class FreedomForegroundService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        bankingGuard.stop()
         notifyHandler.removeCallbacks(trailingNotify)
         blockedDomainReceiver?.let {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(it)

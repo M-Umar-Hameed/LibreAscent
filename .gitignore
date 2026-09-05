@@ -23,6 +23,11 @@ desktop/target/
 .kotlin/
 *.orig.*
 *.jks
+# Release signing keys must never be committed. debug.keystore is already
+# tracked and stays so; this only guards new ones. A release keystore belongs
+# outside the repo entirely, with its base64 in ANDROID_KEYSTORE_BASE64.
+*.keystore
+!mobile/android/app/debug.keystore
 *.p8
 *.p12
 *.key

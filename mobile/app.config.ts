@@ -100,6 +100,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     "expo-image",
     "expo-sharing",
     "expo-web-browser",
+    "./plugins/withReleaseSigning",
     "./plugins/withAndroidPackageFix",
     "./plugins/withJvmTarget17",
     "./plugins/withArm64Only",

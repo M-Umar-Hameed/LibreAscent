@@ -7,7 +7,11 @@ import android.os.Build
 import android.util.Log
 
 /**
- * Boot receiver — starts the foreground service when the device boots.
+ * Boot receiver — starts the foreground service when the device boots, and
+ * again after the app is updated. An update stops every service the app had
+ * running and Android forbids background foreground-service starts, so nothing
+ * comes back until the app is next opened. ACTION_MY_PACKAGE_REPLACED is a
+ * documented exemption from that restriction, alongside boot.
  *
  * For this to work, the user must have enabled "auto-start" in the app settings.
  * The auto-start preference is stored in SharedPreferences.
@@ -21,7 +25,12 @@ class BootReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        val action = intent.action
+        if (action != Intent.ACTION_BOOT_COMPLETED &&
+            action != Intent.ACTION_MY_PACKAGE_REPLACED
+        ) {
+            return
+        }
 
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val autoStartEnabled = prefs.getBoolean(KEY_AUTO_START, true) // Default: on
@@ -31,7 +40,7 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
-        Log.i(TAG, "Boot completed — starting Freedom foreground service")
+        Log.i(TAG, "$action — starting Freedom foreground service")
 
         try {
             val serviceIntent = Intent(context, FreedomForegroundService::class.java)

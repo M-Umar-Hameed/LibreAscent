@@ -91,7 +91,15 @@ pub fn reset_system_dns() -> Result<()> {
 
     let _ = ps_command.status();
 
-    // Flush DNS cache
+    flush_dns_cache();
+
+    Ok(())
+}
+
+/// Windows answers from its own cache without asking the proxy, so a domain
+/// already visited stays reachable after it becomes blocked. Best effort: a
+/// failed flush is not worth failing the caller over.
+pub fn flush_dns_cache() {
     let mut flush_command = Command::new("ipconfig");
     flush_command.arg("/flushdns");
 
@@ -99,8 +107,6 @@ pub fn reset_system_dns() -> Result<()> {
     flush_command.creation_flags(CREATE_NO_WINDOW);
 
     let _ = flush_command.status();
-
-    Ok(())
 }
 
 pub fn is_dns_set_correctly(addr: &str) -> Result<bool> {

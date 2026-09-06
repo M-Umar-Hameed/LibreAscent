@@ -77,6 +77,8 @@ async fn watch_blocklist_file(config_path: PathBuf, blocklist: Arc<RwLock<Domain
         match blocklist.write() {
             Ok(mut guard) => {
                 *guard = reloaded;
+                drop(guard);
+                crate::dns_manager::flush_dns_cache();
                 crate::dns_manager::log_tamper_event("Blocklist reloaded after update.");
             }
             Err(_) => return,

@@ -11,6 +11,7 @@ import {
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import * as FreedomDeviceAdmin from "@/modules/freedom-device-admin/src";
 import * as FreedomForeground from "@/modules/freedom-foreground-service/src";
+import * as FreedomVpn from "@/modules/freedom-vpn-service/src";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import * as Crypto from "expo-crypto";
@@ -241,12 +242,22 @@ export default function SettingsScreen(): ReactNode {
         if (!hasCachedDomains("ads")) {
           throw new Error("No ad domains synced");
         }
+        // Ads are VPN-only, so cached domains block nothing while the tunnel
+        // is down, which it is after any app update.
+        if (!(await FreedomVpn.isVpnActive())) {
+          if (!(await FreedomVpn.isVpnPrepared())) {
+            throw new Error("VPN permission not granted");
+          }
+          await FreedomVpn.startVpn();
+        }
       } catch (e) {
         console.error("[Settings] Ad-block enable failed:", e);
         toggleCategory("ads"); // revert the optimistic flip
-        // A dead upstream URL and a dead connection look identical to the user
-        // unless the real reason is shown; the last one hid a 404 for weeks.
-        const reason = BlocklistService.lastFetchErrors[0];
+        // A dead upstream URL and a dead connection are indistinguishable to the
+        // user unless the real reason is shown.
+        const reason =
+          BlocklistService.lastFetchErrors[0] ??
+          (e instanceof Error ? e.message : undefined);
         Alert.alert(
           "Couldn't enable ad blocking",
           reason

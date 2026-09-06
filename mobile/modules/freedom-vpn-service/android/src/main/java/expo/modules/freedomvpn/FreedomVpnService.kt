@@ -3,11 +3,13 @@ package expo.modules.freedomvpn
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
@@ -93,6 +95,36 @@ class FreedomVpnService : VpnService() {
             "com.whatsapp",
             "com.whatsapp.w4b"
         )
+
+        // Settings.Secure.ALWAYS_ON_VPN_APP is @hide, so name it directly.
+        private const val ALWAYS_ON_VPN_APP = "always_on_vpn_app"
+
+        /**
+         * Every blocked domain becomes reachable the moment this VPN stops, and
+         * stopping it takes one tap in quick settings. Android restarts an
+         * always-on VPN whenever it goes down, which closes that. Setting it
+         * normally belongs to the Settings app or a Device Owner; this app can
+         * do it because it holds WRITE_SECURE_SETTINGS, granted over adb during
+         * setup. Verified on device: writing the key started the service
+         * immediately, with no reboot and no consent dialog.
+         *
+         * always_on_vpn_lockdown is deliberately left alone. It would drop all
+         * traffic whenever the tunnel is down — including when it fails to
+         * establish, which leaves the phone with no way to reach anything.
+         */
+        fun setAlwaysOn(context: Context, enabled: Boolean) {
+            try {
+                Settings.Secure.putString(
+                    context.contentResolver,
+                    ALWAYS_ON_VPN_APP,
+                    if (enabled) context.packageName else null
+                )
+            } catch (e: SecurityException) {
+                // WRITE_SECURE_SETTINGS was never granted. The VPN still works,
+                // it just no longer survives being switched off.
+                Log.w(TAG, "Cannot change always-on VPN: ${e.message}")
+            }
+        }
 
         private const val IPV4_HEADER_MIN_SIZE = 20
         private const val IPV6_HEADER_SIZE = 40
@@ -507,6 +539,8 @@ class FreedomVpnService : VpnService() {
         // Broadcast status change
         broadcastVpnStatus(true)
 
+        setAlwaysOn(this, true)
+
         return START_STICKY
     }
 
@@ -550,7 +584,9 @@ class FreedomVpnService : VpnService() {
                 // Set our own DNS servers (these trigger DNS through the tunnel)
                 .addDnsServer(DNS_PRIMARY)
                 .addDnsServer(DNS_SECONDARY)
-                // Block connections without VPN if tunnel goes down
+                // Blocking reads on the tun descriptor, not lockdown: this does
+                // nothing about traffic while the tunnel is down. That is what
+                // setAlwaysOn covers.
                 .setBlocking(true)
 
             if (withIpv6) {

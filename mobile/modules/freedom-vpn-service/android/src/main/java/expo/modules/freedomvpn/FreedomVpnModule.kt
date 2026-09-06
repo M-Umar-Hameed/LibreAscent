@@ -100,6 +100,11 @@ class FreedomVpnModule : Module() {
                         promise.reject("ERR_NO_CONTEXT", "No React context", null)
                         return@AsyncFunction
                     }
+                // Clear always-on first, or Android restarts the service we are
+                // about to stop. This is the one deliberate off switch; the
+                // service does not clear it on destroy, so a crash or a kill
+                // still gets restarted.
+                FreedomVpnService.setAlwaysOn(context, false)
                 val intent = Intent(context, FreedomVpnService::class.java)
                 context.stopService(intent)
                 promise.resolve(null)

@@ -4,6 +4,7 @@ import { checkpointWal, flushBlockedStats } from "@/db/database";
 import { AppThemeProvider } from "@/providers/ThemeProvider";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import { LaunchRecoveryService } from "@/services/LaunchRecoveryService";
+import { BlocklistService } from "@/services/BlocklistService";
 import { ProtectionService } from "@/services/ProtectionService";
 import { useAppStore } from "@/stores/useAppStore";
 import { useBlockingStore } from "@/stores/useBlockingStore";
@@ -234,6 +235,15 @@ export default function RootLayout(): ReactNode {
         setLaunchRecoveryComplete(true);
       });
   }, [isMounted, storesHydrated, isOnboarded, launchRecoveryComplete]);
+
+  // After recovery, so the tunnel is up and the fetch goes through it. Nothing
+  // else ever refetched the lists; they were frozen at the first fetch.
+  useEffect(() => {
+    if (!launchRecoveryComplete) return;
+    void BlocklistService.refreshIfStale().catch((e: unknown) => {
+      console.warn("[Layout] Blocklist refresh failed:", e);
+    });
+  }, [launchRecoveryComplete]);
 
   useEffect(() => {
     void FreedomAccessibility.enforceBankingExpiry().catch(() => {

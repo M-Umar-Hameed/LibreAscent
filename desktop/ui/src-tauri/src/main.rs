@@ -478,6 +478,13 @@ fn repair_service(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "start")
 }
 
+/// The service fetches on start when the list is stale, and reloads the file
+/// while running, so this needs no restart.
+#[tauri::command]
+fn update_blocklists(handle: tauri::AppHandle) -> Result<(), String> {
+    run_service_command(&handle, "update-sources")
+}
+
 #[tauri::command]
 fn test_domain(domain: String) -> bool {
     let blocklist = libreascent_shared::config::load_blocklist(&default_config_path());
@@ -609,6 +616,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             test_domain,
+            update_blocklists,
             install_service,
             uninstall_service,
             start_service,

@@ -94,6 +94,16 @@ fn run_service_loop() -> anyhow::Result<()> {
 
         let mut enforce_task = None;
         let dns_proxy_ready = matches!(ready_rx.await, Ok(Ok(())));
+
+        // Only once the proxy answers: fetching the sources needs DNS, and
+        // system DNS is this proxy. The file watcher in dns picks the result up.
+        if dns_proxy_ready {
+            tokio::spawn(async {
+                let path = libreascent_shared::config::default_config_path();
+                crate::updater::update_if_stale(&path).await;
+            });
+        }
+
         if dns_proxy_ready {
             let config_path = libreascent_shared::config::default_config_path();
             if let Ok(config) = libreascent_shared::config::load_or_create(&config_path) {

@@ -53,4 +53,25 @@ class BrowserUrlBarFallbackTest {
     fun noIdWithTextYieldsNull() {
         assertNull(BrowserUrlMonitor.firstUrlBarMatch(ids) { null })
     }
+
+    @Test
+    fun readsTheUrlOutOfFirefoxComposeAddressBarDescription() {
+        // Captured from Firefox 155 on device: the Compose address bar has no
+        // text, and the URL sits in the content description ahead of a hint.
+        // Browsing there was unblocked until this was read.
+        assertEquals(
+            "en.wikipedia.org/wiki/Android_version_history",
+            BrowserUrlMonitor.urlFromNodeDescription(
+                " en.wikipedia.org/wiki/Android_version_history. Search or enter address"
+            )
+        )
+        assertEquals(
+            "example.com",
+            BrowserUrlMonitor.urlFromNodeDescription(" example.com. Search or enter address")
+        )
+        // A hint with no URL in front of it must not be mistaken for one.
+        assertNull(BrowserUrlMonitor.urlFromNodeDescription("Search or enter address"))
+        assertNull(BrowserUrlMonitor.urlFromNodeDescription(""))
+        assertNull(BrowserUrlMonitor.urlFromNodeDescription(null))
+    }
 }

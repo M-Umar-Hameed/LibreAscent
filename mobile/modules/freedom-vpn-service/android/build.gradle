@@ -6,6 +6,11 @@ group = 'expo.modules.freedomvpn'
 version = '0.1.0'
 
 android {
+    // android.util.Log throws "not mocked" in plain JVM tests otherwise, which
+    // fails any test whose code path logs.
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
     namespace "expo.modules.freedomvpn"
     compileSdkVersion safeExtGet("compileSdkVersion", 34)
 

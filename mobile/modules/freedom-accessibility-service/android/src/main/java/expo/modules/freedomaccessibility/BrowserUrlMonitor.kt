@@ -504,8 +504,15 @@ class BrowserUrlMonitor {
     ): String? {
         if (rootNode == null) return null
 
-        val fullResourceId = if (urlBarId.contains(":")) urlBarId else "$packageName:id/$urlBarId"
+        // A Compose toolbar reports its test tag as the view id, with no package
+        // prefix, so try the raw id as well as the prefixed one.
+        val resourceIds = if (urlBarId.contains(":")) {
+            listOf(urlBarId)
+        } else {
+            listOf("$packageName:id/$urlBarId", urlBarId)
+        }
 
+        for (fullResourceId in resourceIds) {
         try {
             val nodes = rootNode.findAccessibilityNodeInfosByViewId(fullResourceId)
             if (nodes != null && nodes.isNotEmpty()) {
@@ -515,7 +522,13 @@ class BrowserUrlMonitor {
                     nodes.forEach { it.recycle() }
                     return text
                 }
-                
+
+                val described = urlFromNodeDescription(urlNode.contentDescription?.toString())
+                if (described != null) {
+                    nodes.forEach { it.recycle() }
+                    return described
+                }
+
                 // Log if we found the ID but it has no text (pruning check)
                 Log.d(TAG, "Found resource ID $fullResourceId but text was null or too short: [$text]")
 
@@ -543,6 +556,7 @@ class BrowserUrlMonitor {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error finding URL bar: ${e.message}")
+        }
         }
 
         return null
@@ -825,8 +839,27 @@ class BrowserUrlMonitor {
             return null
         }
 
+        private val DESCRIPTION_WHITESPACE = Regex("\\s+")
+
+        /**
+         * Firefox 155's Compose address bar carries no text; the URL is only in
+         * the content description, as " en.wikipedia.org/wiki/Foo. Search or
+         * enter address". A URL cannot contain whitespace, so the first token is
+         * all of it, and the trailing period is the description's punctuation.
+         */
+        internal fun urlFromNodeDescription(description: String?): String? {
+            val token = description
+                ?.trim()
+                ?.split(DESCRIPTION_WHITESPACE)
+                ?.firstOrNull()
+                ?.trimEnd('.')
+            // An empty bar reads as the hint alone, whose first word is not a URL.
+            return if (token != null && token.length >= 3 && token.contains('.')) token else null
+        }
+
         // Firefox has changed URL bar IDs across versions
         private val FIREFOX_URL_BAR_FALLBACKS = listOf(
+            "ADDRESSBAR_URL_BOX", // Compose toolbar, Firefox 155+
             "mozac_browser_toolbar_url_view",
             "url_bar_title",
             "mozac_browser_toolbar_edit_url_view",

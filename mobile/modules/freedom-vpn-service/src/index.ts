@@ -8,6 +8,8 @@ interface FreedomVpnModuleInterface {
   stopVpn(): Promise<void>;
   isVpnActive(): Promise<boolean>;
   isVpnPrepared(): Promise<boolean>;
+  isAlwaysOnVpnEnabled(): Promise<boolean>;
+  openVpnSettings(): Promise<void>;
   prepareVpn(): Promise<boolean>;
   updateBlocklist(domains: string[]): Promise<void>;
   addCategory(name: string, domains: string[], replace: boolean): Promise<void>;
@@ -48,6 +50,16 @@ export async function isVpnActive(): Promise<boolean> {
 export async function isVpnPrepared(): Promise<boolean> {
   if (!FreedomVpnNative) return false;
   return FreedomVpnNative.isVpnPrepared();
+}
+
+export async function isAlwaysOnVpnEnabled(): Promise<boolean> {
+  if (!FreedomVpnNative) return false;
+  return FreedomVpnNative.isAlwaysOnVpnEnabled();
+}
+
+export async function openVpnSettings(): Promise<void> {
+  if (!FreedomVpnNative) return;
+  return FreedomVpnNative.openVpnSettings();
 }
 
 export async function prepareVpn(): Promise<boolean> {

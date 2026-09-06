@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -100,6 +101,11 @@ class FreedomVpnModule : Module() {
                         promise.reject("ERR_NO_CONTEXT", "No React context", null)
                         return@AsyncFunction
                     }
+                // The one deliberate off switch: clear the intent first or
+                // VpnWatchdog restarts what we are about to stop. A crash does
+                // not clear it, so a crash still gets restarted.
+                FreedomVpnService.setVpnWanted(context, false)
+                FreedomVpnService.setAlwaysOn(context, false)
                 val intent = Intent(context, FreedomVpnService::class.java)
                 context.stopService(intent)
                 promise.resolve(null)
@@ -121,9 +127,41 @@ class FreedomVpnModule : Module() {
             promise.resolve(VpnService.prepare(context) == null)
         }
 
+        // Always-on restarts the tunnel before any app gets a packet out, which
+        // the watchdog cannot. Only the Settings app can turn it on.
+        AsyncFunction("isAlwaysOnVpnEnabled") { promise: Promise ->
+            val context = appContext.reactContext
+                ?: run {
+                    promise.resolve(false)
+                    return@AsyncFunction
+                }
+            val current = Settings.Secure.getString(
+                context.contentResolver,
+                "always_on_vpn_app"
+            )
+            promise.resolve(current == context.packageName)
+        }
+
+        AsyncFunction("openVpnSettings") { promise: Promise ->
+            val context = appContext.reactContext
+                ?: run {
+                    promise.reject("ERR_NO_CONTEXT", "No React context", null)
+                    return@AsyncFunction
+                }
+            try {
+                context.startActivity(
+                    Intent("android.net.vpn.SETTINGS").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                promise.resolve(null)
+            } catch (e: Exception) {
+                promise.reject("ERR_VPN_SETTINGS", e.message, e)
+            }
+        }
+
         AsyncFunction("updateBlocklist") { domains: List<String>, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.setDomains(domains)
+                appContext.reactContext?.let { BlocklistPersistence.saveUserDomains(it, domains) }
                 promise.resolve(null)
             } catch (e: Exception) {
                 promise.reject("ERR_VPN_BLOCKLIST", e.message, e)
@@ -133,6 +171,9 @@ class FreedomVpnModule : Module() {
         AsyncFunction("addCategory") { name: String, domains: List<String>, replace: Boolean, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.addCategory(name, domains, replace)
+                appContext.reactContext?.let {
+                    BlocklistPersistence.saveCategory(it, name, domains, replace)
+                }
                 promise.resolve(null)
             } catch (e: Exception) {
                 promise.reject("ERR_VPN_CATEGORY", e.message, e)
@@ -142,6 +183,7 @@ class FreedomVpnModule : Module() {
         AsyncFunction("removeCategory") { name: String, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.removeCategory(name)
+                appContext.reactContext?.let { BlocklistPersistence.deleteCategory(it, name) }
                 promise.resolve(null)
             } catch (e: Exception) {
                 promise.reject("ERR_VPN_CATEGORY_REMOVE", e.message, e)
@@ -151,6 +193,7 @@ class FreedomVpnModule : Module() {
         AsyncFunction("setWhitelist") { domains: List<String>, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.setWhitelist(domains)
+                appContext.reactContext?.let { BlocklistPersistence.saveWhitelist(it, domains) }
                 promise.resolve(null)
             } catch (e: Exception) {
                 promise.reject("ERR_VPN_WHITELIST", e.message, e)

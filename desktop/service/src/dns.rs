@@ -8,7 +8,7 @@ use hickory_resolver::net::{DnsError, NetError};
 use libreascent_shared::blocklist::DomainBlocklist;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
@@ -16,6 +16,7 @@ use tokio::time::{timeout, Duration};
 use crate::config_loader;
 
 const LOCAL_PROXY_TIMEOUT: Duration = Duration::from_secs(5);
+const RELOAD_POLL_SECS: u64 = 60;
 
 /// Upstream resolver. Forwards over DNS-over-TLS to Quad9 (9.9.9.9:853). The
 /// firewall (firewall_manager) seals plaintext :53 and DoH/DoT to every other
@@ -57,6 +58,36 @@ pub struct BlockedDnsResponse {
     pub response: Vec<u8>,
 }
 
+/// The blocklist file is rewritten by `update-sources`, which runs while the
+/// proxy is already up: the fetch needs DNS, and system DNS is this proxy.
+/// Without this the new domains would not apply until the service restarted.
+async fn watch_blocklist_file(config_path: PathBuf, blocklist: Arc<RwLock<DomainBlocklist>>) {
+    let path = config_path.parent().unwrap_or(&config_path).join("blocklist.txt");
+    let mut last = modified_at(&path);
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(RELOAD_POLL_SECS)).await;
+        let current = modified_at(&path);
+        if current == last {
+            continue;
+        }
+        last = current;
+
+        let reloaded = config_loader::load_blocklist(&config_path);
+        match blocklist.write() {
+            Ok(mut guard) => {
+                *guard = reloaded;
+                crate::dns_manager::log_tamper_event("Blocklist reloaded after update.");
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+fn modified_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
 pub async fn run_local_dns_proxy(config_path: PathBuf, bind_addr: &str) -> Result<()> {
     run_local_dns_proxy_with_ready(config_path, bind_addr, None).await
 }
@@ -87,9 +118,10 @@ pub async fn run_local_dns_proxy_with_ready(
     };
     let broadcast_socket = UdpSocket::bind("127.0.0.1:0").await.ok();
     let mut buffer = vec![0_u8; 4096];
-    let blocklist = Arc::new(config_loader::load_blocklist(&config_path));
+    let blocklist = Arc::new(RwLock::new(config_loader::load_blocklist(&config_path)));
     let resolver = Arc::new(build_upstream_resolver()?);
     crate::dns_manager::log_tamper_event("DNS proxy started. Blocklist loaded.");
+    tokio::spawn(watch_blocklist_file(config_path.clone(), Arc::clone(&blocklist)));
 
     loop {
         let (size, peer) = match socket.recv_from(&mut buffer).await {
@@ -103,7 +135,11 @@ pub async fn run_local_dns_proxy_with_ready(
         let request = buffer[..size].to_vec();
         let request_id = get_request_id(&request);
 
-        match build_block_response_if_needed(&request, &blocklist) {
+        let verdict = {
+            let list = blocklist.read().expect("blocklist lock poisoned");
+            build_block_response_if_needed(&request, &list)
+        };
+        match verdict {
             Ok(Some(blocked)) => {
                 crate::dns_manager::log_tamper_event(&format!(
                     "Blocked DNS: {domain} ({request_id:04x})",

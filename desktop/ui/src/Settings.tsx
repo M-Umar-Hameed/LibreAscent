@@ -106,6 +106,13 @@ export function Settings({
           >
             Reset DNS
           </button>
+          <button
+            disabled={loading || !status?.serviceRunning}
+            className="btn-secondary"
+            onClick={() => onAction("update_blocklists")}
+          >
+            Update Blocklists
+          </button>
           <button disabled={loading} onClick={() => invoke("show_overlay")}>
             Preview Overlay
           </button>

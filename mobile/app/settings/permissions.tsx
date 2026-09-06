@@ -22,6 +22,7 @@ export default function PermissionsScreen(): ReactNode {
     null,
   );
   const [vpnPrepared, setVpnPrepared] = useState(false);
+  const [alwaysOnVpn, setAlwaysOnVpn] = useState(false);
   const [accessibilityPermission, setAccessibilityPermission] = useState(false);
 
   useFocusEffect(
@@ -34,6 +35,7 @@ export default function PermissionsScreen(): ReactNode {
           accessibilityRunning,
           overlay,
           deviceAdmin,
+          alwaysOn,
         ] = await Promise.all([
           FreedomVpn.isVpnPrepared(),
           FreedomVpn.isVpnActive(),
@@ -41,6 +43,7 @@ export default function PermissionsScreen(): ReactNode {
           FreedomAccessibility.isServiceRunning(),
           FreedomOverlay.hasOverlayPermission(),
           FreedomDeviceAdmin.isAdminActive(),
+          FreedomVpn.isAlwaysOnVpnEnabled(),
         ]);
 
         setProtection({
@@ -50,6 +53,7 @@ export default function PermissionsScreen(): ReactNode {
           deviceAdmin,
         });
         setVpnPrepared(vpnPermissionReady);
+        setAlwaysOnVpn(alwaysOn);
         setAccessibilityPermission(accessibilityEnabled);
       };
 
@@ -70,6 +74,14 @@ export default function PermissionsScreen(): ReactNode {
       description: "Required for system-wide content blocking",
       status: vpnPrepared,
       icon: "shield-checkmark-outline",
+    },
+    {
+      id: "alwaysOnVpn",
+      title: "Always-on VPN",
+      description:
+        "Blocking stops the moment the VPN is switched off. Turn this on in Android's VPN settings.",
+      status: alwaysOnVpn,
+      icon: "lock-closed-outline",
     },
     {
       id: "accessibility",
@@ -115,6 +127,10 @@ export default function PermissionsScreen(): ReactNode {
       switch (id) {
         case "vpn":
           await FreedomVpn.prepareVpn();
+          break;
+        case "alwaysOnVpn":
+          // Only the Settings app can set this; the app can just point at it.
+          await FreedomVpn.openVpnSettings();
           break;
         case "accessibility":
           await FreedomAccessibility.openAccessibilitySettings();

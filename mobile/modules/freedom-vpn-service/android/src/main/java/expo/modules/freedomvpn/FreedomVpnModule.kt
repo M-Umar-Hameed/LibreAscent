@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -100,10 +101,11 @@ class FreedomVpnModule : Module() {
                         promise.reject("ERR_NO_CONTEXT", "No React context", null)
                         return@AsyncFunction
                     }
-                // Clear always-on first, or Android restarts the service we are
-                // about to stop. This is the one deliberate off switch; the
-                // service does not clear it on destroy, so a crash or a kill
-                // still gets restarted.
+                // The one deliberate off switch. Clear the intent first or
+                // VpnWatchdog restarts the service we are about to stop; the
+                // service itself never clears it, so a crash or a kill still
+                // gets restarted.
+                FreedomVpnService.setVpnWanted(context, false)
                 FreedomVpnService.setAlwaysOn(context, false)
                 val intent = Intent(context, FreedomVpnService::class.java)
                 context.stopService(intent)
@@ -124,6 +126,39 @@ class FreedomVpnModule : Module() {
                     return@AsyncFunction
                 }
             promise.resolve(VpnService.prepare(context) == null)
+        }
+
+        // Android's always-on VPN restarts the tunnel and, unlike the watchdog,
+        // does it before any app gets a packet out. Only the Settings app can
+        // turn it on — the system API behind it is signature-permission — so
+        // the app can report its state and send the user there, nothing more.
+        AsyncFunction("isAlwaysOnVpnEnabled") { promise: Promise ->
+            val context = appContext.reactContext
+                ?: run {
+                    promise.resolve(false)
+                    return@AsyncFunction
+                }
+            val current = Settings.Secure.getString(
+                context.contentResolver,
+                "always_on_vpn_app"
+            )
+            promise.resolve(current == context.packageName)
+        }
+
+        AsyncFunction("openVpnSettings") { promise: Promise ->
+            val context = appContext.reactContext
+                ?: run {
+                    promise.reject("ERR_NO_CONTEXT", "No React context", null)
+                    return@AsyncFunction
+                }
+            try {
+                context.startActivity(
+                    Intent("android.net.vpn.SETTINGS").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                promise.resolve(null)
+            } catch (e: Exception) {
+                promise.reject("ERR_VPN_SETTINGS", e.message, e)
+            }
         }
 
         AsyncFunction("updateBlocklist") { domains: List<String>, promise: Promise ->

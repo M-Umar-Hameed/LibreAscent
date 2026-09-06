@@ -62,6 +62,7 @@ class FreedomForegroundService : Service() {
     }
 
     private val bankingGuard by lazy { BankingAppGuard(this) }
+    private val vpnWatchdog by lazy { VpnWatchdog(this) }
 
     override fun onCreate() {
         super.onCreate()
@@ -71,6 +72,10 @@ class FreedomForegroundService : Service() {
         // accessibility service switched off. Hosted here so it survives that
         // service being destroyed and the app process being swiped away.
         bankingGuard.start()
+        // The DNS tunnel is otherwise off until something explicitly starts it,
+        // which includes after every app update and after the user switches it
+        // off. Hosted here for the same reason as the banking guard.
+        vpnWatchdog.start()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -187,6 +192,7 @@ class FreedomForegroundService : Service() {
     override fun onDestroy() {
         isRunning = false
         bankingGuard.stop()
+        vpnWatchdog.stop()
         notifyHandler.removeCallbacks(trailingNotify)
         blockedDomainReceiver?.let {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(it)

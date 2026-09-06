@@ -99,6 +99,19 @@ class FreedomVpnService : VpnService() {
         // Settings.Secure.ALWAYS_ON_VPN_APP is @hide, so name it directly.
         private const val ALWAYS_ON_VPN_APP = "always_on_vpn_app"
 
+        // Read by VpnWatchdog in the foreground service, which restarts the
+        // tunnel while this is set. Plain SharedPreferences so neither module
+        // has to depend on the other.
+        private const val VPN_PREFS = "freedom_vpn_state"
+        private const val KEY_WANTED = "vpn_wanted"
+
+        fun setVpnWanted(context: Context, wanted: Boolean) {
+            context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_WANTED, wanted)
+                .apply()
+        }
+
         /**
          * Every blocked domain becomes reachable the moment this VPN stops, and
          * stopping it takes one tap in quick settings. Android restarts an
@@ -539,6 +552,7 @@ class FreedomVpnService : VpnService() {
         // Broadcast status change
         broadcastVpnStatus(true)
 
+        setVpnWanted(this, true)
         setAlwaysOn(this, true)
 
         return START_STICKY

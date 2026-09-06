@@ -31,6 +31,29 @@ import {
 export const VPN_ONLY_CATEGORIES = new Set<string>(["ads"]);
 
 /**
+ * A real blocklist is tens of thousands of domains. Anything smaller is a
+ * failure that answered 200 — a GitHub "404: Not Found" body, a captive-portal
+ * page — which would otherwise be hashed and ETag-cached, leaving the source
+ * answering 304 forever against a category that blocks nothing.
+ */
+const MIN_PLAUSIBLE_DOMAINS = 100;
+
+/**
+ * jsDelivr serves the same file from a different host, so it survives a
+ * raw.githubusercontent.com outage or rate limit. A path rename 404s both;
+ * MIN_PLAUSIBLE_DOMAINS and lastFetchErrors cover that.
+ */
+function githubRawMirror(url: string): string | null {
+  const m =
+    /^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\/([^/]+)\/(.+)$/.exec(
+      url,
+    );
+  if (!m) return null;
+  const [, owner, repo, ref, path] = m;
+  return `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${path}`;
+}
+
+/**
  * BlocklistService — Manages domain blocklists on the JS side.
  */
 export const BlocklistService = {
@@ -552,26 +575,7 @@ export const BlocklistService = {
         headers["If-Modified-Since"] = cached.lastModified;
     }
 
-    let content: string;
-    let etag = "";
-    let lastModified = "";
-
-    if (isSimpleUrl) {
-      const response = await fetch(url, { headers });
-      if (response.status === 304) {
-        return {
-          changed: false,
-          list: [],
-          etag: cached?.etag ?? "",
-          lastModified: cached?.lastModified ?? "",
-          hash: cached?.contentHash ?? "",
-        };
-      }
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      content = await response.text();
-      etag = response.headers.get("etag") ?? "";
-      lastModified = response.headers.get("last-modified") ?? "";
-    } else {
+    if (!isSimpleUrl) {
       // Complex URL — fetch normally via existing helper
       const list = await BlocklistService.fetchRemoteList(url, format);
       // Can't get raw content for hash, use list length + sample as proxy
@@ -582,17 +586,63 @@ export const BlocklistService = {
       return { changed: true, list, etag: "", lastModified: "", hash };
     }
 
-    const hash = contentFingerprint(content);
-    if (cacheUsable && cached?.contentHash === hash) {
-      return { changed: false, list: [], etag, lastModified, hash };
+    const mirror = githubRawMirror(url);
+    const candidates = mirror ? [url, mirror] : [url];
+    // The primary's failure is the one worth reporting; jsDelivr 403s some
+    // files of its own accord.
+    let primaryError = "";
+
+    for (const candidate of candidates) {
+      try {
+        const response = await fetch(candidate, { headers });
+        if (response.status === 304) {
+          return {
+            changed: false,
+            list: [],
+            etag: cached?.etag ?? "",
+            lastModified: cached?.lastModified ?? "",
+            hash: cached?.contentHash ?? "",
+          };
+        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const content = await response.text();
+        const hash = contentFingerprint(content);
+        if (cacheUsable && cached?.contentHash === hash) {
+          return {
+            changed: false,
+            list: [],
+            etag: response.headers.get("etag") ?? "",
+            lastModified: response.headers.get("last-modified") ?? "",
+            hash,
+          };
+        }
+
+        const list =
+          format === "keywords"
+            ? BlocklistService.parseKeywordList(content)
+            : BlocklistService.parseDomainList(content);
+        // Keyword lists are legitimately short; domain lists are not.
+        if (format !== "keywords" && list.length < MIN_PLAUSIBLE_DOMAINS) {
+          throw new Error(`only ${list.length} domains parsed`);
+        }
+
+        return {
+          changed: true,
+          list,
+          etag: response.headers.get("etag") ?? "",
+          lastModified: response.headers.get("last-modified") ?? "",
+          hash,
+        };
+      } catch (e) {
+        if (!primaryError) {
+          primaryError = `${new URL(candidate).host}: ${e instanceof Error ? e.message : String(e)}`;
+        }
+        console.warn(`[BlocklistService] ${candidate} failed:`, e);
+      }
     }
 
-    const list =
-      format === "keywords"
-        ? BlocklistService.parseKeywordList(content)
-        : BlocklistService.parseDomainList(content);
-
-    return { changed: true, list, etag, lastModified, hash };
+    throw new Error(primaryError);
   },
 
   /**
@@ -713,9 +763,17 @@ export const BlocklistService = {
    * to skip sources that haven't changed since the last update.
    * Only categories with at least one changed source are re-synced to native.
    */
+  /**
+   * Why the last updateBlocklists run failed, per source. Fetch errors are
+   * swallowed so one dead source cannot abort the others, which also hid a
+   * renamed upstream path behind "check your connection".
+   */
+  lastFetchErrors: [] as string[],
+
   updateBlocklists: async (
     onProgress?: (progress: number, total: number, name: string) => void,
   ): Promise<boolean> => {
+    BlocklistService.lastFetchErrors = [];
     try {
       const state = useBlockingStore.getState();
       const enabledSources = state.sources.filter((s) => s.enabled);
@@ -774,6 +832,9 @@ export const BlocklistService = {
             `[BlocklistService] ${source.name}: ${result.list.length} domains cached`,
           );
         } catch (e) {
+          BlocklistService.lastFetchErrors.push(
+            `${source.name} — ${e instanceof Error ? e.message : String(e)}`,
+          );
           console.warn(`[BlocklistService] Failed to fetch ${source.name}:`, e);
         }
       }

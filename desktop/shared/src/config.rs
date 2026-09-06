@@ -188,7 +188,7 @@ pub fn save(path: &std::path::Path, config: &DesktopConfig) -> serde_json::Resul
 ///
 /// The proxy's own upstream is unaffected: it dials Quad9 at 9.9.9.9:853 by IP
 /// and never resolves these names.
-pub const DOH_BOOTSTRAP_HOSTS: [&str; 16] = [
+pub const DOH_BOOTSTRAP_HOSTS: [&str; 17] = [
     "mozilla.cloudflare-dns.com",
     "chrome.cloudflare-dns.com",
     "cloudflare-dns.com",
@@ -205,6 +205,9 @@ pub const DOH_BOOTSTRAP_HOSTS: [&str; 16] = [
     "dns.nextdns.io",
     "doh.dns.sb",
     "doh.pub",
+    // Not a resolver. Firefox looks this up before enabling its DoH rollout and
+    // turns DoH off entirely when the answer is NXDOMAIN.
+    "use-application-dns.net",
 ];
 
 pub fn load_blocklist(config_path: &std::path::Path) -> crate::blocklist::DomainBlocklist {

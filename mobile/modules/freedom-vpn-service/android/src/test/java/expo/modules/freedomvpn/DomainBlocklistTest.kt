@@ -88,6 +88,9 @@ class DomainBlocklistTest {
         }
         // Firefox's default endpoint, the one that reopened the bypass on desktop.
         assertTrue(list.isBlocked("mozilla.cloudflare-dns.com"))
+        // The canary: an answer here is what keeps Firefox's DoH rollout on, so
+        // it has to be NXDOMAIN like the rest. Observed resolving on device.
+        assertTrue(list.isBlocked("use-application-dns.net"))
         // Whitelisting must not reopen the bypass.
         list.setWhitelist(setOf("cloudflare-dns.com", "dns.google"))
         assertTrue(list.isBlocked("chrome.cloudflare-dns.com"), "whitelist cannot override the DoH block")

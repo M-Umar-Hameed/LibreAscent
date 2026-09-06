@@ -40,6 +40,11 @@ class DomainBlocklist {
             "dns.nextdns.io",
             "doh.dns.sb",
             "doh.pub",
+            // Not a resolver. Firefox looks this up before enabling its DoH
+            // rollout and turns DoH off entirely when the answer is NXDOMAIN.
+            // Refusing the bootstrap hostname above only makes Firefox retry
+            // and time out on every lookup; this makes it stop asking.
+            "use-application-dns.net",
         )
     }
 

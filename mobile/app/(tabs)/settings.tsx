@@ -244,9 +244,14 @@ export default function SettingsScreen(): ReactNode {
       } catch (e) {
         console.error("[Settings] Ad-block enable failed:", e);
         toggleCategory("ads"); // revert the optimistic flip
+        // A dead upstream URL and a dead connection look identical to the user
+        // unless the real reason is shown; the last one hid a 404 for weeks.
+        const reason = BlocklistService.lastFetchErrors[0];
         Alert.alert(
           "Couldn't enable ad blocking",
-          "Check your connection and try again.",
+          reason
+            ? `${reason}\n\nCheck your connection and try again.`
+            : "Check your connection and try again.",
         );
       } finally {
         setAdBlockLoading(false);

@@ -9,22 +9,12 @@ import android.os.Looper
 import android.util.Log
 
 /**
- * Restarts the DNS tunnel whenever it is meant to be up and is not.
+ * Restarts the DNS tunnel whenever it is meant to be up and is not: after an app
+ * update, and after the user switches it off. Android's always-on VPN would
+ * cover this, but setting it needs a system API a normal app cannot call.
  *
- * Every blocked domain becomes reachable the moment the VPN stops, and stopping
- * it takes one tap in quick settings. It is also down after every app update,
- * and LaunchRecoveryService only starts it on a fresh process, so relaunching
- * an already-running app does not bring it back.
- *
- * Android's own always-on VPN would cover this, but setting it needs a system
- * API (setAlwaysOnVpnPackageForUser) that a normal app cannot call — writing
- * Settings.Secure.always_on_vpn_app directly was tried on device and did not
- * start the tunnel. So the app watches for itself.
- *
- * It lives in the foreground service, like BankingAppGuard, so it survives the
- * VPN service dying and the app process being swiped away. It talks to the VPN
- * module through plain SharedPreferences and an explicit component name, so
- * there is no cross-module code dependency.
+ * Hosted in the foreground service, like BankingAppGuard, so it survives the VPN
+ * service dying and the app process being swiped away.
  */
 class VpnWatchdog(private val context: Context) {
 
@@ -61,9 +51,7 @@ class VpnWatchdog(private val context: Context) {
             return
         }
 
-        // Null means consent is granted and no other VPN holds the slot. When
-        // another VPN app is active this is non-null, and starting ours would
-        // be a fight we cannot win silently — leave it alone.
+        // Non-null means another VPN holds the slot, or consent is gone.
         if (VpnService.prepare(context) != null) {
             if (!blockedWarned) {
                 blockedWarned = true
@@ -73,10 +61,8 @@ class VpnWatchdog(private val context: Context) {
         }
         blockedWarned = false
 
-        // onStartCommand returns early when the tunnel is already up, so this
-        // is a no-op in the common case and needs no liveness check of its own.
-        // A liveness flag would be worse: a hard kill leaves it stale at
-        // "running", which is exactly when the restart is needed.
+        // onStartCommand returns early when the tunnel is already up. No liveness
+        // flag: a hard kill leaves one stale exactly when the restart is needed.
         context.startForegroundService(
             Intent().setComponent(ComponentName(context.packageName, VPN_SERVICE))
         )
@@ -85,17 +71,12 @@ class VpnWatchdog(private val context: Context) {
     companion object {
         private const val TAG = "VpnWatchdog"
 
-        // Written by FreedomVpnService once the tunnel is up, and cleared by
-        // FreedomVpnModule.stopVpn, which is the one deliberate off switch.
+        // Written by FreedomVpnService, cleared by FreedomVpnModule.stopVpn.
         private const val VPN_PREFS = "freedom_vpn_state"
         private const val KEY_WANTED = "vpn_wanted"
 
         private const val VPN_SERVICE = "expo.modules.freedomvpn.FreedomVpnService"
 
-        /**
-         * Long enough that the restart costs nothing on an idle device, short
-         * enough that switching the VPN off buys well under a minute.
-         */
         private const val POLL_MS = 30_000L
 
         fun isVpnWanted(context: Context): Boolean = context

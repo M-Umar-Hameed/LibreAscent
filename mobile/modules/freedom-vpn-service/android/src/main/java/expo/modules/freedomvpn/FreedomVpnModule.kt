@@ -101,10 +101,9 @@ class FreedomVpnModule : Module() {
                         promise.reject("ERR_NO_CONTEXT", "No React context", null)
                         return@AsyncFunction
                     }
-                // The one deliberate off switch. Clear the intent first or
-                // VpnWatchdog restarts the service we are about to stop; the
-                // service itself never clears it, so a crash or a kill still
-                // gets restarted.
+                // The one deliberate off switch: clear the intent first or
+                // VpnWatchdog restarts what we are about to stop. A crash does
+                // not clear it, so a crash still gets restarted.
                 FreedomVpnService.setVpnWanted(context, false)
                 FreedomVpnService.setAlwaysOn(context, false)
                 val intent = Intent(context, FreedomVpnService::class.java)
@@ -128,10 +127,8 @@ class FreedomVpnModule : Module() {
             promise.resolve(VpnService.prepare(context) == null)
         }
 
-        // Android's always-on VPN restarts the tunnel and, unlike the watchdog,
-        // does it before any app gets a packet out. Only the Settings app can
-        // turn it on — the system API behind it is signature-permission — so
-        // the app can report its state and send the user there, nothing more.
+        // Always-on restarts the tunnel before any app gets a packet out, which
+        // the watchdog cannot. Only the Settings app can turn it on.
         AsyncFunction("isAlwaysOnVpnEnabled") { promise: Promise ->
             val context = appContext.reactContext
                 ?: run {
@@ -164,6 +161,7 @@ class FreedomVpnModule : Module() {
         AsyncFunction("updateBlocklist") { domains: List<String>, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.setDomains(domains)
+                appContext.reactContext?.let { BlocklistPersistence.saveUserDomains(it, domains) }
                 promise.resolve(null)
             } catch (e: Exception) {
                 promise.reject("ERR_VPN_BLOCKLIST", e.message, e)
@@ -173,6 +171,9 @@ class FreedomVpnModule : Module() {
         AsyncFunction("addCategory") { name: String, domains: List<String>, replace: Boolean, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.addCategory(name, domains, replace)
+                appContext.reactContext?.let {
+                    BlocklistPersistence.saveCategory(it, name, domains, replace)
+                }
                 promise.resolve(null)
             } catch (e: Exception) {
                 promise.reject("ERR_VPN_CATEGORY", e.message, e)
@@ -182,6 +183,7 @@ class FreedomVpnModule : Module() {
         AsyncFunction("removeCategory") { name: String, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.removeCategory(name)
+                appContext.reactContext?.let { BlocklistPersistence.deleteCategory(it, name) }
                 promise.resolve(null)
             } catch (e: Exception) {
                 promise.reject("ERR_VPN_CATEGORY_REMOVE", e.message, e)
@@ -191,6 +193,7 @@ class FreedomVpnModule : Module() {
         AsyncFunction("setWhitelist") { domains: List<String>, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.setWhitelist(domains)
+                appContext.reactContext?.let { BlocklistPersistence.saveWhitelist(it, domains) }
                 promise.resolve(null)
             } catch (e: Exception) {
                 promise.reject("ERR_VPN_WHITELIST", e.message, e)

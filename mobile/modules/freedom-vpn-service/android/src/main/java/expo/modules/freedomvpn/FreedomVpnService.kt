@@ -99,9 +99,7 @@ class FreedomVpnService : VpnService() {
         // Settings.Secure.ALWAYS_ON_VPN_APP is @hide, so name it directly.
         private const val ALWAYS_ON_VPN_APP = "always_on_vpn_app"
 
-        // Read by VpnWatchdog in the foreground service, which restarts the
-        // tunnel while this is set. Plain SharedPreferences so neither module
-        // has to depend on the other.
+        // Read by VpnWatchdog, which restarts the tunnel while this is set.
         private const val VPN_PREFS = "freedom_vpn_state"
         private const val KEY_WANTED = "vpn_wanted"
 
@@ -113,17 +111,11 @@ class FreedomVpnService : VpnService() {
         }
 
         /**
-         * Every blocked domain becomes reachable the moment this VPN stops, and
-         * stopping it takes one tap in quick settings. Android restarts an
-         * always-on VPN whenever it goes down, which closes that. Setting it
-         * normally belongs to the Settings app or a Device Owner; this app can
-         * do it because it holds WRITE_SECURE_SETTINGS, granted over adb during
-         * setup. Verified on device: writing the key started the service
-         * immediately, with no reboot and no consent dialog.
-         *
-         * always_on_vpn_lockdown is deliberately left alone. It would drop all
-         * traffic whenever the tunnel is down — including when it fails to
-         * establish, which leaves the phone with no way to reach anything.
+         * Reports always-on state to Settings. Android takes always-on through a
+         * system API this app cannot call, so writing the key alone did not start
+         * the tunnel on device; VpnWatchdog is what restarts it.
+         * always_on_vpn_lockdown is left alone: it would drop all traffic while
+         * the tunnel is down, including when it fails to establish.
          */
         fun setAlwaysOn(context: Context, enabled: Boolean) {
             try {
@@ -133,8 +125,6 @@ class FreedomVpnService : VpnService() {
                     if (enabled) context.packageName else null
                 )
             } catch (e: SecurityException) {
-                // WRITE_SECURE_SETTINGS was never granted. The VPN still works,
-                // it just no longer survives being switched off.
                 Log.w(TAG, "Cannot change always-on VPN: ${e.message}")
             }
         }
@@ -532,6 +522,12 @@ class FreedomVpnService : VpnService() {
         }
 
         Log.i(TAG, "Starting Freedom VPN Service")
+
+        // Before the tunnel exists: a watchdog or boot start has no JS behind it
+        // to fill the list.
+        if (blocklist.size() == 0) {
+            BlocklistPersistence.load(this, blocklist)
+        }
 
         // Show foreground notification
         startForeground(NOTIFICATION_ID, createNotification())

@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   contentFingerprint,
   getCachedDomainCount,
+  getLastBlocklistUpdate,
   getSourceCache,
   hasCachedDomains,
   hasSourceDomains,
@@ -37,6 +38,9 @@ export const VPN_ONLY_CATEGORIES = new Set<string>(["ads"]);
  * answering 304 forever against a category that blocks nothing.
  */
 const MIN_PLAUSIBLE_DOMAINS = 100;
+
+/** Matches updateIntervalDays in data/sources.json, which nothing else reads. */
+const UPDATE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * jsDelivr serves the same file from a different host, so it survives a
@@ -769,6 +773,20 @@ export const BlocklistService = {
    * renamed upstream path behind "check your connection".
    */
   lastFetchErrors: [] as string[],
+
+  /**
+   * Refetch the enabled sources when the last fetch is older than
+   * UPDATE_INTERVAL_MS. Only lists that have been fetched before: the first
+   * fetch stays where it is, on enabling a category. Without this the phone
+   * blocked from whatever the first fetch returned, indefinitely — omg.porn
+   * was added to oisd in mid 2026 and a phone that fetched before that never
+   * learned of it.
+   */
+  refreshIfStale: async (): Promise<boolean> => {
+    const last = getLastBlocklistUpdate();
+    if (last === 0 || Date.now() - last < UPDATE_INTERVAL_MS) return false;
+    return BlocklistService.updateBlocklists();
+  },
 
   updateBlocklists: async (
     onProgress?: (progress: number, total: number, name: string) => void,

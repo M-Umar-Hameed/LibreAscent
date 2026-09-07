@@ -32,6 +32,15 @@ class BrowserUrlMonitor {
     private val browsers = ConcurrentHashMap<String, BrowserConfig>()
     private var lastDetectedUrl: String = ""
 
+    // Per-call scan budget. Every tree walk and every cross-process lookup
+    // checks it, so a browser that stops answering costs at most one in-flight
+    // call past the deadline instead of minutes of them.
+    @Volatile private var deadline = Long.MAX_VALUE
+    private fun overBudget() = android.os.SystemClock.uptimeMillis() > deadline
+    private fun beginBudget() {
+        deadline = android.os.SystemClock.uptimeMillis() + SCAN_BUDGET_MS
+    }
+
     // Shared compiled patterns for URL text scanning below.
     private val invisibleCharsPattern = Regex("[\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]")
     private val whitespacePattern = Regex("\\s+")
@@ -229,6 +238,7 @@ class BrowserUrlMonitor {
             "com.sec.android.app.sbrowser:id/header_text"
         )
         for (id in toolbarIds) {
+            if (overBudget()) break
             try {
                 val nodes = root.findAccessibilityNodeInfosByViewId(id)
                 nodes?.forEach { node ->
@@ -240,6 +250,7 @@ class BrowserUrlMonitor {
     }
 
     private fun collectAllTextInBranch(node: AccessibilityNodeInfo, candidates: MutableSet<String>): String {
+        if (overBudget()) return ""
         val branchText = java.lang.StringBuilder()
         
         node.text?.toString()?.let { 
@@ -284,6 +295,7 @@ class BrowserUrlMonitor {
         activeRoot: AccessibilityNodeInfo?,
         targetPackageName: String
     ): Set<String>? {
+        beginBudget()
         val candidates = mutableSetOf<String>()
         
         // 1. Try standard extraction on active root provided by the service.
@@ -293,7 +305,7 @@ class BrowserUrlMonitor {
 
         // 2. Only if that found nothing, retry on the event source, which is the
         // narrower detached-toolbar / separate-window case.
-        if (candidates.isEmpty()) {
+        if (candidates.isEmpty() && !overBudget()) {
             val eventRoot = event.source
             if (eventRoot != null && eventRoot != activeRoot) {
                 extractUrlCandidates(event, eventRoot, targetPackageName)?.forEach { candidates.add(it) }
@@ -302,9 +314,10 @@ class BrowserUrlMonitor {
         }
 
         // 2. If empty, scavenge ALL windows
-        val windows = if (candidates.isEmpty()) windowsProvider() else null
+        val windows = if (candidates.isEmpty() && !overBudget()) windowsProvider() else null
         if (windows != null) {
             for (window in windows) {
+                if (overBudget()) break
                 try {
                     val root = window.root ?: continue
                     val winPkg = root.packageName?.toString() ?: ""
@@ -366,7 +379,7 @@ class BrowserUrlMonitor {
 
         // 1. Recursive scan (will catch native components and exposed WebViews)
         fun scanNodes(node: AccessibilityNodeInfo, depth: Int, maxDepth: Int) {
-            if (depth > maxDepth) return
+            if (depth > maxDepth || overBudget()) return
             
             val text = node.text?.toString()
             if (text != null && text.length in 3..254) {
@@ -421,6 +434,7 @@ class BrowserUrlMonitor {
         ) + keywords.toList() // Search for custom keywords directly via IPC
         
         for (indicator in searchIndicators) {
+            if (overBudget()) break
             if (indicator.length < 3) continue 
             try {
                 val nodes = rootNode.findAccessibilityNodeInfosByText(indicator)
@@ -474,6 +488,7 @@ class BrowserUrlMonitor {
         val fallbacks = FIREFOX_URL_BAR_FALLBACKS.filter { it != primaryId }
         if (!isMozillaBased(packageName)) return null
         for (id in fallbacks) {
+            if (overBudget()) break
             val result = findUrlByResourceId(rootNode, packageName, id)
             if (result != null) return result
         }
@@ -490,7 +505,7 @@ class BrowserUrlMonitor {
     ): String? {
         if (rootNode == null) return null
         return firstUrlBarMatch(UNIVERSAL_URL_BAR_FALLBACKS) { id ->
-            findUrlByResourceId(rootNode, packageName, id)
+            if (overBudget()) null else findUrlByResourceId(rootNode, packageName, id)
         }
     }
 
@@ -504,12 +519,15 @@ class BrowserUrlMonitor {
     ): String? {
         if (rootNode == null) return null
 
-        // A Compose toolbar reports its test tag as the view id, with no package
-        // prefix, so try the raw id as well as the prefixed one.
+        // Firefox's Compose toolbar reports its test tag as the view id, with no
+        // package prefix, so Mozilla browsers try the raw id too. Other browsers
+        // do not; the retry only doubles their cross-process lookups.
         val resourceIds = if (urlBarId.contains(":")) {
             listOf(urlBarId)
-        } else {
+        } else if (isMozillaBased(packageName)) {
             listOf("$packageName:id/$urlBarId", urlBarId)
+        } else {
+            listOf("$packageName:id/$urlBarId")
         }
 
         for (fullResourceId in resourceIds) {
@@ -651,7 +669,7 @@ class BrowserUrlMonitor {
      * Recursively scan node tree for contentDescription containing a URL.
      */
     private fun scanNodeForUrl(node: AccessibilityNodeInfo, depth: Int, maxDepth: Int): String? {
-        if (depth > maxDepth) return null
+        if (depth > maxDepth || overBudget()) return null
 
         val desc = node.contentDescription?.toString()
         if (desc != null) {
@@ -679,7 +697,7 @@ class BrowserUrlMonitor {
     private fun findByClassName(rootNode: AccessibilityNodeInfo?, classMarker: String): String? {
         if (rootNode == null) return null
         fun scan(node: AccessibilityNodeInfo, depth: Int): String? {
-            if (depth > 60) return null
+            if (depth > 60 || overBudget()) return null
             val cls = node.className?.toString() ?: ""
             if (cls.contains(classMarker, ignoreCase = true)) {
                 val text = node.text?.toString()
@@ -698,6 +716,7 @@ class BrowserUrlMonitor {
     }
 
     private fun collectUrlCandidates(node: AccessibilityNodeInfo, depth: Int, maxDepth: Int, output: MutableList<String>) {
+        if (depth > maxDepth || overBudget()) return
 
         val text = node.text?.toString()
         if (text != null && text.length in 4..254 && looksLikeUrl(text)) {
@@ -720,10 +739,11 @@ class BrowserUrlMonitor {
 
     fun extractAllText(rootNode: AccessibilityNodeInfo?): String {
         if (rootNode == null) return ""
+        beginBudget()
         val sb = StringBuilder()
         
         fun traverse(node: AccessibilityNodeInfo, depth: Int) {
-            if (depth > 60) return
+            if (depth > 60 || overBudget()) return
             val t = node.text?.toString()
             if (!t.isNullOrBlank()) {
                 sb.append(t).append(" ")
@@ -820,6 +840,7 @@ class BrowserUrlMonitor {
         // shallow tree costs the same as before. A node budget once there is a
         // measurement to size one against.
         private const val MAX_SCAN_DEPTH = 60
+        private const val SCAN_BUDGET_MS = 800L
 
         /**
          * First id in [ids] whose [lookup] yields text. An id that is present but

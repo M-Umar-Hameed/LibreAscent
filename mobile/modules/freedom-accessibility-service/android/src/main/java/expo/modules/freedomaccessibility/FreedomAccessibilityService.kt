@@ -11,6 +11,7 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.widget.ImageView
 import android.util.Log
@@ -19,6 +20,7 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import java.util.concurrent.atomic.AtomicBoolean
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -47,16 +49,32 @@ class FreedomAccessibilityService : AccessibilityService() {
     private var isInstantOverlayShowing = false
     private var reelsOverlayPackage: String? = null
     private val handler = Handler(Looper.getMainLooper())
+
+    // Browser URL extraction walks the remote node tree and makes cross-process
+    // lookups that each wait up to 5s; on the main thread that produced 20s
+    // service-start ANRs. It runs here, one event at a time: a burst arriving
+    // while a scan is in flight coalesces into the trailing full scan.
+    private val scanThread = HandlerThread("FreedomA11yScan").apply { start() }
+    private val scanHandler = Handler(scanThread.looper)
+    private val browserScanInFlight = AtomicBoolean(false)
+
+    // The newest event dropped while a scan was in flight. It gets a full
+    // handleBrowserEvent pass once the scan finishes, so the whitelist is
+    // computed from the page; a trailing full scan without that context blocked
+    // a whitelisted site on a keyword in its body text.
+    @Volatile private var pendingBrowserEvent: AccessibilityEvent? = null
+    @Volatile private var pendingBrowserPackage = ""
+    @Volatile private var pendingScopeUpgraded = false
     private var packageAddedReceiver: PackageAddedReceiver? = null
-    private var lastUrlCheckTime: Long = 0
-    private var consecutiveBlockCount = 0
-    private var lastCheckUrl: String = ""
-    private var blockCooldownUntil: Long = 0
-    private var lastFullScanAt: Long = 0
-    private var fullScanPending = false
+    @Volatile private var lastUrlCheckTime: Long = 0
+    @Volatile private var consecutiveBlockCount = 0
+    @Volatile private var lastCheckUrl: String = ""
+    @Volatile private var blockCooldownUntil: Long = 0
+    @Volatile private var lastFullScanAt: Long = 0
+    @Volatile private var fullScanPending = false
     // Remember the last whitelisted domain per browser, so text-only events still get context
-    private var lastWhitelistedDomain: String? = null
-    private var lastWhitelistedPackage: String? = null
+    @Volatile private var lastWhitelistedDomain: String? = null
+    @Volatile private var lastWhitelistedPackage: String? = null
     // True while the expensive event/flag set is subscribed. Guards setServiceInfo
     // so it runs on scope transitions only, never per event.
     private var deepInspectionEnabled = false
@@ -376,7 +394,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 consecutiveBlockCount = 0
                 // A scan for the previous app must not rate limit the new one's first.
                 lastFullScanAt = 0
-                handler.removeCallbacksAndMessages(FULL_SCAN_TOKEN)
+                scanHandler.removeCallbacksAndMessages(FULL_SCAN_TOKEN)
                 fullScanPending = false
                 // Dismiss any lingering overlay - but never dismiss a reels
                 // overlay here. The reels overlay is dismissed only by the
@@ -408,6 +426,7 @@ class FreedomAccessibilityService : AccessibilityService() {
 
         try {
             val rootNode = rootInActiveWindow
+            var handedOff = false
 
             // Check Device Admin activity by class name (doesn't need rootNode)
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
@@ -437,7 +456,16 @@ class FreedomAccessibilityService : AccessibilityService() {
                     }
                 }
                 shouldHandleAsBrowser -> {
-                    handleBrowserEvent(event, rootNode, packageName)
+                    // The system recycles the event once this returns.
+                    val eventCopy = AccessibilityEvent.obtain(event)
+                    if (browserScanInFlight.compareAndSet(false, true)) {
+                        handedOff = true
+                        postBrowserScan(eventCopy, rootNode, packageName, scopeUpgradedThisEvent)
+                    } else {
+                        pendingBrowserEvent = eventCopy
+                        pendingBrowserPackage = packageName
+                        pendingScopeUpgraded = scopeUpgradedThisEvent
+                    }
                 }
                 reelsDetector.isReelsApp(packageName) -> {
                     handleReelsEvent(event, rootNode, packageName)
@@ -450,7 +478,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 }
             }
 
-            rootNode?.recycle()
+            if (!handedOff) rootNode?.recycle()
         } catch (e: Exception) {
             Log.w(TAG, "Error processing accessibility event: ${e.message}")
         }
@@ -469,6 +497,36 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Runs one extraction on the scan thread. On completion, if a burst left an
+     * event pending, that one runs next against the current root without ever
+     * releasing the in-flight flag, so the newest event always gets a full pass
+     * and nothing queues beyond it.
+     */
+    private fun postBrowserScan(
+        event: AccessibilityEvent,
+        root: android.view.accessibility.AccessibilityNodeInfo?,
+        packageName: String,
+        scopeUpgraded: Boolean
+    ) {
+        scanHandler.post {
+            try {
+                handleBrowserEvent(event, root, packageName, scopeUpgraded)
+            } catch (e: Exception) {
+                Log.w(TAG, "Browser scan failed: ${e.message}")
+            } finally {
+                root?.recycle()
+                val next = pendingBrowserEvent
+                if (next != null) {
+                    pendingBrowserEvent = null
+                    postBrowserScan(next, rootInActiveWindow, pendingBrowserPackage, pendingScopeUpgraded)
+                } else {
+                    browserScanInFlight.set(false)
+                }
+            }
+        }
+    }
+
+    /**
      * Handle a browser event - extract URLs and check for blocked content.
      * Scans ALL windows belonging to the browser (not just the active window)
      * to catch AMP bars, secondary URL indicators, etc.
@@ -476,7 +534,8 @@ class FreedomAccessibilityService : AccessibilityService() {
     private fun handleBrowserEvent(
         event: AccessibilityEvent,
         rootNode: android.view.accessibility.AccessibilityNodeInfo?,
-        packageName: String
+        packageName: String,
+        scopeUpgraded: Boolean
     ) {
         // After a block, suppress further checks for 3s to let the Home action complete
         // and prevent background CONTENT_CHANGED events from re-triggering the block
@@ -495,7 +554,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             // emit nothing further to retry on, so queue one pass for once they
             // are live. Null package: the WebView's events carry a different
             // package than the window that hosts it.
-            if (scopeUpgradedThisEvent) scheduleTrailingFullScan(null, null, false)
+            if (scopeUpgraded) scheduleTrailingFullScan(null, null, false)
             return
         }
 
@@ -692,7 +751,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     ) {
         if (fullScanPending) return
         fullScanPending = true
-        handler.postAtTime({
+        scanHandler.postAtTime({
             fullScanPending = false
             if (System.currentTimeMillis() < blockCooldownUntil) return@postAtTime
             val root = rootInActiveWindow ?: return@postAtTime
@@ -1314,6 +1373,8 @@ class FreedomAccessibilityService : AccessibilityService() {
         isRunning = false
         hideInstantOverlay()
         handler.removeCallbacksAndMessages(null)
+        scanHandler.removeCallbacksAndMessages(null)
+        scanThread.quitSafely()
         packageAddedReceiver?.let {
             try {
                 unregisterReceiver(it)

@@ -23,7 +23,6 @@ object BlocklistPersistence {
     private const val USER_FILE = "user_domains.txt"
     private const val WHITELIST_FILE = "whitelist.txt"
 
-    private const val LOAD_CHUNK = 50_000
 
     private fun dir(context: Context): File =
         File(context.filesDir, DIR).apply { if (!exists()) mkdirs() }
@@ -98,22 +97,15 @@ object BlocklistPersistence {
         }
     }
 
+    // Built off to the side and installed in one step, never appended into the
+    // live set: a JS push can start mid-read, and it must win.
     private fun loadCategory(file: File, category: String, blocklist: DomainBlocklist) {
-        var first = true
-        val chunk = ArrayList<String>(LOAD_CHUNK)
+        val domains = ArrayList<String>()
         file.bufferedReader().useLines { lines ->
-            lines.forEach { line ->
-                if (line.isNotBlank()) chunk.add(line)
-                if (chunk.size >= LOAD_CHUNK) {
-                    blocklist.addCategory(category, chunk, first)
-                    first = false
-                    chunk.clear()
-                }
-            }
+            lines.forEach { line -> if (line.isNotBlank()) domains.add(line) }
         }
-        // An empty file still replaces, or a cleared category lingers in memory.
-        if (chunk.isNotEmpty() || first) {
-            blocklist.addCategory(category, chunk, first)
+        if (!blocklist.putCategoryIfAbsent(category, domains)) {
+            Log.i(TAG, "Category $category already pushed; skipping disk copy")
         }
     }
 

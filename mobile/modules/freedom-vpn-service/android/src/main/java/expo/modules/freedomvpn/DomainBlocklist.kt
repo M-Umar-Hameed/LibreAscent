@@ -168,6 +168,22 @@ class DomainBlocklist {
     }
 
     /**
+     * Install a category only if nothing has created it yet. The disk loader
+     * uses this so a JS push that starts while the file is being read wins
+     * outright: both used to replace-then-append into the live set, and the
+     * second replace wiped the first writer's earlier batches, leaving the
+     * tunnel with a third of the list.
+     */
+    fun putCategoryIfAbsent(name: String, domains: Collection<String>): Boolean {
+        val set = ConcurrentHashMap.newKeySet<String>()
+        domains.forEach { domain ->
+            val normalized = normalize(domain)
+            if (normalized.isNotEmpty()) set.add(normalized)
+        }
+        return categories.putIfAbsent(name, set) == null
+    }
+
+    /**
      * Remove a category and its domains from the blocklist.
      * Only removes domains that aren't in other active categories.
      */

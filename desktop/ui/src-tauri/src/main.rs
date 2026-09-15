@@ -153,6 +153,7 @@ fn get_service_path(handle: &tauri::AppHandle) -> PathBuf {
             &service_path,
             &copied_service_path,
             &|source, destination| std::fs::copy(source, destination),
+            &|from, to| std::fs::rename(from, to),
             &|candidate| is_runnable_windows_executable(candidate),
         );
     }
@@ -160,26 +161,59 @@ fn get_service_path(handle: &tauri::AppHandle) -> PathBuf {
     service_path
 }
 
-fn materialize_service_path<C, F>(
+fn materialize_service_path<C, R, F>(
     service_path: &Path,
     copied_service_path: &Path,
     copy: &C,
+    rename: &R,
     is_runnable_candidate: &F,
 ) -> PathBuf
 where
     C: Fn(&Path, &Path) -> std::io::Result<u64>,
+    R: Fn(&Path, &Path) -> std::io::Result<()>,
     F: Fn(&Path) -> bool,
 {
     if service_path.extension().and_then(|ext| ext.to_str()) != Some("bin") {
         return service_path.to_path_buf();
     }
 
-    if copy(service_path, copied_service_path).is_ok() || is_runnable_candidate(copied_service_path)
+    if copy(service_path, copied_service_path).is_ok()
+        || replace_running_copy(service_path, copied_service_path, copy, rename)
+        || is_runnable_candidate(copied_service_path)
     {
         return copied_service_path.to_path_buf();
     }
 
     copied_service_path.to_path_buf()
+}
+
+/// The installed service locks its exe against overwrite, so the plain copy
+/// always failed while it ran and every command kept using the exe from the
+/// first install. Windows does allow renaming a running exe, so move it aside
+/// and copy the bundled one into its place.
+///
+/// ponytail: the running service keeps the old image until it restarts
+/// (Repair Service or reboot); restarting it here would need UAC and would
+/// sidestep the stop-service friction.
+fn replace_running_copy<C, R>(
+    service_path: &Path,
+    copied_service_path: &Path,
+    copy: &C,
+    rename: &R,
+) -> bool
+where
+    C: Fn(&Path, &Path) -> std::io::Result<u64>,
+    R: Fn(&Path, &Path) -> std::io::Result<()>,
+{
+    let aside = copied_service_path.with_extension("exe.old");
+    if rename(copied_service_path, &aside).is_err() {
+        return false;
+    }
+    if copy(service_path, copied_service_path).is_ok() {
+        return true;
+    }
+    let _ = rename(&aside, copied_service_path);
+    false
 }
 
 fn resolve_service_path_from_candidates<F>(
@@ -306,11 +340,75 @@ mod tests {
                 "service exe is locked",
             ))
         };
+        let rename = |_from: &Path, _to: &Path| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "cannot move service exe",
+            ))
+        };
         let is_runnable = |path: &Path| path == copied.as_path();
 
-        let path = materialize_service_path(&bundled, &copied, &copy, &is_runnable);
+        let path = materialize_service_path(&bundled, &copied, &copy, &rename, &is_runnable);
 
         assert_eq!(path, copied);
+    }
+
+    #[test]
+    fn swaps_in_bundled_service_when_installed_copy_is_running() {
+        // A running exe refuses overwrite but allows rename. Without the swap
+        // the UI kept running the first-installed service, which predated the
+        // blocklist reload watcher, so updated lists never took effect.
+        let bundled = PathBuf::from(r"C:\app\bin\libreascent-service.bin");
+        let copied = PathBuf::from(r"C:\ProgramData\LibreAscent\libreascent-service.exe");
+        let locked = std::cell::Cell::new(true);
+        let copy = |_source: &Path, _destination: &Path| {
+            if locked.get() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "service exe is locked",
+                ))
+            } else {
+                Ok(1)
+            }
+        };
+        let renames = std::cell::RefCell::new(Vec::new());
+        let rename = |from: &Path, to: &Path| {
+            renames.borrow_mut().push((from.to_path_buf(), to.to_path_buf()));
+            locked.set(false);
+            Ok(())
+        };
+
+        let path = materialize_service_path(&bundled, &copied, &copy, &rename, &|_| false);
+
+        assert_eq!(path, copied);
+        assert_eq!(
+            *renames.borrow(),
+            vec![(copied.clone(), copied.with_extension("exe.old"))]
+        );
+    }
+
+    #[test]
+    fn restores_installed_service_when_swap_copy_fails() {
+        // Moving the exe aside and then failing the copy must put it back, or
+        // the service has no exe to start on the next boot.
+        let bundled = PathBuf::from(r"C:\app\bin\libreascent-service.bin");
+        let copied = PathBuf::from(r"C:\ProgramData\LibreAscent\libreascent-service.exe");
+        let aside = copied.with_extension("exe.old");
+        let copy = |_source: &Path, _destination: &Path| {
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "disk full"))
+        };
+        let renames = std::cell::RefCell::new(Vec::new());
+        let rename = |from: &Path, to: &Path| {
+            renames.borrow_mut().push((from.to_path_buf(), to.to_path_buf()));
+            Ok(())
+        };
+
+        materialize_service_path(&bundled, &copied, &copy, &rename, &|_| true);
+
+        assert_eq!(
+            *renames.borrow(),
+            vec![(copied.clone(), aside.clone()), (aside, copied)]
+        );
     }
 
     #[test]
@@ -470,12 +568,12 @@ fn reset_dns(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "reset-dns")
 }
 
+/// Restarts in place rather than reinstalling, because it runs without friction
+/// in every mode and uninstall resets DNS and firewall: a failed reinstall left
+/// protection off. The restart also loads the exe swapped in by get_service_path.
 #[tauri::command]
 fn repair_service(handle: tauri::AppHandle) -> Result<(), String> {
-    let _ = run_service_command(&handle, "stop");
-    let _ = run_service_command(&handle, "uninstall");
-    run_service_command(&handle, "install")?;
-    run_service_command(&handle, "start")
+    run_service_command(&handle, "restart")
 }
 
 /// The service fetches on start when the list is stale, and reloads the file

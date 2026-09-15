@@ -66,6 +66,28 @@ class BankingAppGuardTest {
     }
 
     @Test
+    fun settingsAndInstallerAreTamperSurfaces() {
+        // The uninstall path during a banking window is Settings > Security >
+        // Device admin apps > Deactivate, then the installer's confirm dialog.
+        // SettingsProtector normally guards both, but it dies with the
+        // accessibility service, so the guard has to cover them itself.
+        assertTrue(BankingAppGuard.isTamperSurface("com.android.settings"))
+        assertTrue(BankingAppGuard.isTamperSurface("com.google.android.settings.intelligence"))
+        assertTrue(BankingAppGuard.isTamperSurface("com.android.packageinstaller"))
+        assertTrue(BankingAppGuard.isTamperSurface("com.google.android.packageinstaller"))
+        assertTrue(BankingAppGuard.isTamperSurface("com.samsung.android.packageinstaller"))
+    }
+
+    @Test
+    fun banksAndLaunchersAreNotTamperSurfaces() {
+        // The whole point of the window is that the banking app runs, and the
+        // launcher has to stay reachable or sendHome would loop forever.
+        assertFalse(BankingAppGuard.isTamperSurface("com.chase.sig.android"))
+        assertFalse(BankingAppGuard.isTamperSurface("com.google.android.apps.nexuslauncher"))
+        assertFalse(BankingAppGuard.isTamperSurface("com.libreascent.app"))
+    }
+
+    @Test
     fun pollsFasterWhileTheWindowIsOpen() {
         val active = BankingAppGuard.nextDelayMs(true)
         val idle = BankingAppGuard.nextDelayMs(false)

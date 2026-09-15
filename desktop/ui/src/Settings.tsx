@@ -84,7 +84,7 @@ export function Settings({
               <button
                 disabled={loading}
                 className="btn-secondary"
-                onClick={() => onAction("repair_service", "Repair Protection Service")}
+                onClick={() => onAction("repair_service")}
               >
                 Repair Service
               </button>

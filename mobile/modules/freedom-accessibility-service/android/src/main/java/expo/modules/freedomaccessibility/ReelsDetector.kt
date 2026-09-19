@@ -1,8 +1,11 @@
 package expo.modules.freedomaccessibility
 
+import android.content.Context
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -30,13 +33,39 @@ class ReelsDetector {
     /**
      * Update the list of monitored reels apps.
      */
-    fun updateConfigs(configs: List<ReelsAppConfig>) {
+    fun updateConfigs(configs: List<ReelsAppConfig>, context: Context? = null) {
         // Drop-then-add would leave a window where a reader sees no reels apps at all.
         reelsApps.keys.retainAll(configs.map { it.packageName }.toSet())
         configs.forEach { config ->
             reelsApps[config.packageName] = config
         }
         Log.i(TAG, "Updated reels configs: ${reelsApps.keys}")
+        context?.let { persistConfigs(it, configs) }
+    }
+
+    /** Restore after a service restart; Android destroys this service on app update. */
+    fun loadPersistedConfigs(context: Context) {
+        val stored = try {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_REELS_CONFIGS, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read reels configs: ${e.message}")
+            null
+        }
+        val configs = parseConfigs(stored)
+        if (configs.isEmpty()) return
+        configs.forEach { config -> reelsApps[config.packageName] = config }
+        Log.i(TAG, "Restored reels configs: ${reelsApps.keys}")
+    }
+
+    private fun persistConfigs(context: Context, configs: List<ReelsAppConfig>) {
+        try {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_REELS_CONFIGS, serializeConfigs(configs))
+                .apply()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to persist reels configs: ${e.message}")
+        }
     }
 
     /**
@@ -208,6 +237,52 @@ class ReelsDetector {
 
     companion object {
         private const val TAG = "ReelsDetector"
+        private const val PREFS_NAME = "freedom_settings"
+        private const val KEY_REELS_CONFIGS = "reels_configs"
+
+        fun serializeConfigs(configs: List<ReelsAppConfig>): String {
+            val array = JSONArray()
+            configs.forEach { config ->
+                array.put(
+                    JSONObject().apply {
+                        put("name", config.name)
+                        put("packageName", config.packageName)
+                        put("detectionNodes", JSONArray(config.detectionNodes))
+                    }
+                )
+            }
+            return array.toString()
+        }
+
+        fun parseConfigs(json: String?): List<ReelsAppConfig> {
+            if (json.isNullOrBlank()) return emptyList()
+            return try {
+                val array = JSONArray(json)
+                val out = ArrayList<ReelsAppConfig>(array.length())
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val packageName = obj.optString("packageName")
+                    if (packageName.isNullOrBlank()) continue
+                    val nodes = obj.optJSONArray("detectionNodes")
+                    val detectionNodes = if (nodes == null) {
+                        emptyList()
+                    } else {
+                        (0 until nodes.length()).mapNotNull { nodes.optString(it).takeIf { s -> s.isNotBlank() } }
+                    }
+                    out.add(
+                        ReelsAppConfig(
+                            name = obj.optString("name"),
+                            packageName = packageName,
+                            detectionNodes = detectionNodes,
+                        )
+                    )
+                }
+                out
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to parse reels configs: ${e.message}")
+                emptyList()
+            }
+        }
 
         // Fallback keywords for reels detection
         private val REELS_KEYWORDS = listOf(

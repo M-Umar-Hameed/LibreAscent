@@ -161,8 +161,15 @@ class FreedomAccessibilityModule : Module() {
                     )
                 }
 
-                // Update the running service's detector
-                FreedomAccessibilityService.sharedReelsDetector?.updateConfigs(reelsConfigs)
+                val context = appContext.reactContext
+                val detector = FreedomAccessibilityService.sharedReelsDetector
+                if (detector != null) {
+                    // Update the running service's detector
+                    detector.updateConfigs(reelsConfigs, context)
+                } else if (context != null) {
+                    // Service not running, persist directly
+                    ReelsDetector().updateConfigs(reelsConfigs, context)
+                }
 
                 promise.resolve(null)
             } catch (e: Exception) {

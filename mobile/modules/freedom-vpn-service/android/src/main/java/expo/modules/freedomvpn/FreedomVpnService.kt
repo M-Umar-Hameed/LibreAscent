@@ -524,10 +524,11 @@ class FreedomVpnService : VpnService() {
         Log.i(TAG, "Starting Freedom VPN Service")
 
         // Before the tunnel exists: a watchdog or boot start has no JS behind it
-        // to fill the list.
-        if (blocklist.size() == 0) {
-            BlocklistPersistence.load(this, blocklist)
-        }
+        // to fill the list. Unconditional because size() counts user domains too,
+        // so gating on it cost this tunnel every category whenever JS had pushed
+        // a single URL first. The *IfAbsent installers inside load() are what
+        // keep a live JS push from being overwritten.
+        BlocklistPersistence.load(this, blocklist)
 
         // Show foreground notification
         startForeground(NOTIFICATION_ID, createNotification())

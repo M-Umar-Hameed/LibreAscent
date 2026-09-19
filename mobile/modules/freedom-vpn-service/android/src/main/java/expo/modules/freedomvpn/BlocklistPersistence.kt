@@ -20,6 +20,7 @@ object BlocklistPersistence {
     private const val DIR = "vpn_blocklist"
     private const val CATEGORY_PREFIX = "category_"
     private const val CATEGORY_SUFFIX = ".txt"
+    private const val INDEX_SUFFIX = ".idx"
     private const val USER_FILE = "user_domains.txt"
     private const val WHITELIST_FILE = "whitelist.txt"
 
@@ -29,6 +30,14 @@ object BlocklistPersistence {
 
     private fun categoryFile(dir: File, name: String): File =
         File(dir, "$CATEGORY_PREFIX$name$CATEGORY_SUFFIX")
+
+    /**
+     * Sorted-hash index built from the text file above. Held off the Java heap
+     * through a read-only mapping; see MappedDomainIndex. Skipped by [load]'s
+     * directory scan, which only matches the .txt suffix.
+     */
+    private fun indexFile(dir: File, name: String): File =
+        File(dir, "$CATEGORY_PREFIX$name$INDEX_SUFFIX")
 
     /** Mirrors DomainBlocklist.addCategory: [replace] truncates, otherwise appends. */
     fun saveCategory(context: Context, name: String, domains: List<String>, replace: Boolean) =
@@ -42,6 +51,11 @@ object BlocklistPersistence {
                     writer.newLine()
                 }
             }
+            // The text file just changed, so any index built from it is stale.
+            // It is rebuilt on the next load rather than here: a sync arrives in
+            // batches, and rebuilding per batch would sort the whole category
+            // over and over.
+            indexFile(dir, name).delete()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to save category $name: ${e.message}")
         }
@@ -50,6 +64,7 @@ object BlocklistPersistence {
     fun deleteCategory(context: Context, name: String) {
         try {
             categoryFile(dir(context), name).delete()
+            indexFile(dir(context), name).delete()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to delete category $name: ${e.message}")
         }
@@ -88,8 +103,16 @@ object BlocklistPersistence {
                             .removeSuffix(CATEGORY_SUFFIX)
                         loadCategory(file, category, blocklist)
                     }
-                    name == USER_FILE -> blocklist.setDomains(readLines(file))
-                    name == WHITELIST_FILE -> blocklist.setWhitelist(readLines(file))
+                    name == USER_FILE -> {
+                        if (!blocklist.setDomainsIfAbsent(readLines(file))) {
+                            Log.i(TAG, "User domains already pushed; skipping disk copy")
+                        }
+                    }
+                    name == WHITELIST_FILE -> {
+                        if (!blocklist.setWhitelistIfAbsent(readLines(file))) {
+                            Log.i(TAG, "Whitelist already pushed; skipping disk copy")
+                        }
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -100,6 +123,27 @@ object BlocklistPersistence {
     // Built off to the side and installed in one step, never appended into the
     // live set: a JS push can start mid-read, and it must win.
     private fun loadCategory(file: File, category: String, blocklist: DomainBlocklist) {
+        val parent = file.parentFile
+        val index = if (parent != null) indexFile(parent, category) else null
+
+        if (index != null) {
+            if (!index.exists()) {
+                file.bufferedReader().useLines { lines ->
+                    MappedDomainIndex.build(lines, index) { blocklist.normalizeDomain(it) }
+                }
+            }
+            val mapped = MappedDomainIndex.open(index)
+            if (mapped != null) {
+                if (!blocklist.putCategoryIfAbsent(category, mapped)) {
+                    Log.i(TAG, "Category $category already pushed; skipping disk copy")
+                }
+                return
+            }
+        }
+
+        // Index unavailable (build failed, or no parent directory): fall back to
+        // the in-heap copy rather than leaving the tunnel without the category.
+        Log.w(TAG, "Category $category falling back to an in-heap set")
         val domains = ArrayList<String>()
         file.bufferedReader().useLines { lines ->
             lines.forEach { line -> if (line.isNotBlank()) domains.add(line) }

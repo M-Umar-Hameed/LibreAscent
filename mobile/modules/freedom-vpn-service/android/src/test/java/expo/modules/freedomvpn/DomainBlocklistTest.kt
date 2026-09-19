@@ -194,4 +194,36 @@ class DomainBlocklistTest {
         assertTrue(list.isBlocked("www.mixed.com."))
         assertEquals(2, list.size())
     }
+
+    @Test
+    fun diskLoadLosesToAUserDomainPushAlreadyMade() {
+        // A VPN start racing a JS push used to replace the sites the user just
+        // added with the file's older copy, so they were never enforced.
+        val list = DomainBlocklist()
+        list.setDomains(listOf("justadded.com"))
+
+        assertFalse(list.setDomainsIfAbsent(listOf("stale.com")))
+        assertTrue(list.isBlocked("justadded.com"))
+        assertFalse(list.isBlocked("stale.com"))
+    }
+
+    @Test
+    fun diskLoadStillFillsUserDomainsWhenNoPushHappened() {
+        // The normal startup path: nothing pushed yet, so the file is the only
+        // source of the user's sites and must still load.
+        val list = DomainBlocklist()
+
+        assertTrue(list.setDomainsIfAbsent(listOf("fromdisk.com")))
+        assertTrue(list.isBlocked("fromdisk.com"))
+    }
+
+    @Test
+    fun diskLoadLosesToAWhitelistPushAlreadyMade() {
+        val list = DomainBlocklist()
+        list.setDomains(listOf("blocked.com"))
+        list.setWhitelist(listOf("blocked.com"))
+
+        assertFalse(list.setWhitelistIfAbsent(listOf("other.com")))
+        assertFalse(list.isBlocked("blocked.com"))
+    }
 }

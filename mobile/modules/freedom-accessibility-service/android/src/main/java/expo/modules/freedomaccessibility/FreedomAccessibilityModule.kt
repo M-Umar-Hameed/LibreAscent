@@ -271,15 +271,18 @@ class FreedomAccessibilityModule : Module() {
         AsyncFunction("appendCategoryDomains") { categoryId: String, domains: List<String>, promise: Promise ->
             try {
                 val matcher = FreedomAccessibilityService.sharedContentMatcher
+                // The context is what lets each batch reach the file. Without it
+                // nothing is persisted, since the hashed set cannot be read back
+                // at finalize time.
                 if (matcher != null) {
-                    matcher.appendCategoryDomains(categoryId, domains)
+                    matcher.appendCategoryDomains(categoryId, domains, appContext.reactContext)
                 } else {
                     // Service not running — use a shared fallback matcher so batched
                     // appends accumulate across calls instead of being discarded.
                     val context = appContext.reactContext
                     if (context != null) {
                         val fallback = getOrCreateFallbackMatcher(context)
-                        fallback.appendCategoryDomains(categoryId, domains)
+                        fallback.appendCategoryDomains(categoryId, domains, context)
                     }
                 }
                 promise.resolve(null)

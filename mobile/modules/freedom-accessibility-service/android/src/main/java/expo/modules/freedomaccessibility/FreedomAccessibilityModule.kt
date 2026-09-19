@@ -417,11 +417,12 @@ class FreedomAccessibilityModule : Module() {
 
         AsyncFunction("updateNsfwMonitoredApps") { packages: List<String>, promise: Promise ->
             try {
+                val context = appContext.reactContext
                 val matcher = FreedomAccessibilityService.sharedContentMatcher
                 if (matcher != null) {
-                    matcher.setNsfwMonitoredApps(packages)
-                } else {
-                    ContentMatcher().setNsfwMonitoredApps(packages)
+                    matcher.setNsfwMonitoredApps(packages, context)
+                } else if (context != null) {
+                    getOrCreateFallbackMatcher(context).setNsfwMonitoredApps(packages, context)
                 }
                 promise.resolve(null)
             } catch (e: Exception) {

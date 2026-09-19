@@ -388,12 +388,14 @@ class ContentMatcher {
 
     fun isPerCategoryMode(): Boolean = usingPerCategoryMode
 
-    fun setNsfwMonitoredApps(packages: Collection<String>) {
-        // Clear-then-add would leave a window where a reader sees no monitored apps.
+    fun setNsfwMonitoredApps(packages: Collection<String>, context: Context? = null) {
+        // Add before retaining: retaining first empties the set for an instant,
+        // which is the window the comment here used to claim it avoided.
         val normalized = packages.map { it.trim().lowercase() }.toSet()
-        nsfwMonitoredApps.retainAll(normalized)
         nsfwMonitoredApps.addAll(normalized)
+        nsfwMonitoredApps.retainAll(normalized)
         Log.i("ContentMatcher", "Updated NSFW monitored apps: ${nsfwMonitoredApps.size}")
+        context?.let { persistData(it, KEY_NSFW_APPS, nsfwMonitoredApps) }
     }
 
     fun isNsfwMonitoredApp(packageName: String): Boolean {
@@ -881,6 +883,7 @@ class ContentMatcher {
         // Try loading per-category data (new format)
         loadSet(context, KEY_ENABLED_CATEGORIES, enabledCategories)
         loadSet(context, KEY_INCLUDED_DOMAINS, includedDomains)
+        loadSet(context, KEY_NSFW_APPS, nsfwMonitoredApps)
 
         // Load per-category domain sets — try file-based first, then SharedPreferences
         var foundCategories = false
@@ -1023,5 +1026,6 @@ class ContentMatcher {
         private const val KEY_CATEGORY_PREFIX = "cat_domains_"
         private const val KEY_ENABLED_CATEGORIES = "enabled_categories"
         private const val KEY_INCLUDED_DOMAINS = "included_domains"
+        private const val KEY_NSFW_APPS = "nsfw_monitored_apps"
     }
 }

@@ -396,12 +396,16 @@ class ContentMatcherNsfwTest {
 }
 ```
 
-- [ ] **Step 2: Run it to see which assertions fail**
+- [ ] **Step 2: Run it and confirm both tests pass**
 
 Run: `cd mobile/android && ./gradlew :freedom-accessibility-service:testDebugUnitTest --tests '*ContentMatcherNsfwTest*'`
-Expected: the first test PASSES (normalization already works); `replacingTheListDropsAppsThatAreNoLongerMonitored` FAILS, because `setNsfwMonitoredApps` calls `retainAll` then `addAll` on the same normalized set, which never removes anything.
+Expected: PASS, 2 tests.
 
-If instead the run errors with "not mocked" or a missing `org.json` class, apply Task 2 Step 1 first, then re-run.
+These two are regression guards, not red tests. Normalization and replacement both work today: `setNsfwMonitoredApps` calls `retainAll(normalized)` FIRST, against the old contents, so `{com.first.app}.retainAll({com.second.app})` really does empty the set before `addAll` refills it. An earlier draft of this plan claimed removal was broken; that was wrong, and the tests exist to keep it working through Step 3's edit.
+
+The defect this task actually fixes is the missing persistence, which no JVM test can cover (it needs an Android `Context`). Task 4 Step 5 is what verifies it.
+
+If the run errors with "not mocked" or a missing `org.json` class, apply Task 2 Step 1 first, then re-run.
 
 - [ ] **Step 3: Fix the setter and persist**
 
@@ -409,9 +413,8 @@ Replace `setNsfwMonitoredApps` with:
 
 ```kotlin
     fun setNsfwMonitoredApps(packages: Collection<String>, context: Context? = null) {
-        // retainAll against the incoming set, not the old one, is what actually
-        // drops apps the user unmonitored; adding first keeps readers from ever
-        // seeing an empty set.
+        // Add before retaining: retaining first empties the set for an instant,
+        // which is the window the comment here used to claim it avoided.
         val normalized = packages.map { it.trim().lowercase() }.toSet()
         nsfwMonitoredApps.addAll(normalized)
         nsfwMonitoredApps.retainAll(normalized)
@@ -419,6 +422,8 @@ Replace `setNsfwMonitoredApps` with:
         context?.let { persistData(it, KEY_NSFW_APPS, nsfwMonitoredApps) }
     }
 ```
+
+The persistence is the point of this change. The reordering is a small extra: swapping the two calls keeps a concurrent reader on the accessibility thread from ever observing an empty set, which the original comment claimed but the original order did not deliver. Both tests from Step 1 must still pass afterwards.
 
 Add the key to the `companion object`, next to the existing keys:
 
@@ -464,11 +469,11 @@ Expected: PASS, no failures.
 
 ```bash
 git add mobile/modules/freedom-accessibility-service/android/src/main/java/expo/modules/freedomaccessibility/ContentMatcher.kt mobile/modules/freedom-accessibility-service/android/src/main/java/expo/modules/freedomaccessibility/FreedomAccessibilityModule.kt mobile/modules/freedom-accessibility-service/android/src/test/java/expo/modules/freedomaccessibility/ContentMatcherNsfwTest.kt
-git commit -m "Persist NSFW monitored apps and drop unmonitored ones
+git commit -m "Persist NSFW monitored apps across service restarts
 
 setNsfwMonitoredApps took no context and wrote nothing, so the list was
-empty after every service restart. retainAll ran against the incoming
-set, so unmonitored apps also kept matching for the life of the process."
+empty after every service restart. Also swapped retainAll and addAll so a
+concurrent reader never observes the momentarily empty set."
 ```
 
 ---

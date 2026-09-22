@@ -22,13 +22,22 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
 }
 
 dependencies {
     implementation project(':expo-modules-core')
+    // For HashedDomainSet: this matcher holds the same ~500k-domain categories
+    // the DNS tunnel does, and as string sets the two copies were most of the
+    // app's Java heap.
+    implementation project(':freedom-vpn-service')
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:${safeExtGet('kotlinVersion', '1.9.24')}"
     implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
     testImplementation "org.jetbrains.kotlin:kotlin-test:${safeExtGet('kotlinVersion', '1.9.24')}"
+    testImplementation "org.json:json:20240303"
 }
 
 def safeExtGet(prop, fallback) {

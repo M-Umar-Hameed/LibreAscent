@@ -80,6 +80,12 @@ jobs:
           fi
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
 
+      # The native modules hold the blocking logic. Without this their Kotlin
+      # tests run nowhere in CI, so a tag could ship a regression they cover.
+      - name: Run native module unit tests
+        working-directory: ./mobile/android
+        run: ./gradlew :freedom-vpn-service:testDebugUnitTest :freedom-accessibility-service:testDebugUnitTest :freedom-foreground-service:testDebugUnitTest --console=plain
+
       - name: Build release APK
         working-directory: ./mobile/android
         env:

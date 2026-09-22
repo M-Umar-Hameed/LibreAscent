@@ -199,6 +199,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         // Load persisted browser configs immediately so browsers are recognized
         // before JS has a chance to call updateBrowserConfigs
         browserMonitor.loadPersistedConfigs(this)
+        reelsDetector.loadPersistedConfigs(this)
         contentMatcher.loadPersistedData(this)
 
         sharedBrowserMonitor = browserMonitor

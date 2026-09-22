@@ -81,4 +81,20 @@ class BlocklistPersistenceTest {
         BlocklistPersistence.load(dir, restarted)
         assertEquals(0, restarted.size())
     }
+
+    @Test
+    fun categoriesStillLoadWhenUserDomainsWerePushedFirst() {
+        // The service used to skip the disk load whenever the blocklist was
+        // non-empty, so a JS push of a handful of user URLs cost it every
+        // category domain. Loading must be safe to call unconditionally.
+        BlocklistPersistence.saveCategory(dir, "adult", listOf("category-domain.com"), replace = true)
+
+        val blocklist = DomainBlocklist()
+        blocklist.setDomains(listOf("user-added.com"))
+
+        BlocklistPersistence.load(dir, blocklist)
+
+        assertTrue(blocklist.isBlocked("category-domain.com"), "category must load")
+        assertTrue(blocklist.isBlocked("user-added.com"), "JS push must survive")
+    }
 }

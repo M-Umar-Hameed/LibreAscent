@@ -101,11 +101,21 @@ class BankingAppGuard(private val context: Context) {
             return true
         }
 
-        val blocked = blockedPackages(context)
-        if (blocked.isEmpty()) return true
-
         val foreground = foregroundPackage() ?: return true
         if (foreground == context.packageName) return true
+
+        // Device admin blocks uninstall, but not the deactivation that precedes
+        // it, and SettingsProtector — the only thing that guards that screen —
+        // dies with the accessibility service. Two minutes is ample time to walk
+        // Settings > Security > Device admin apps > Deactivate > Uninstall, so
+        // keep Settings and the package installer off screen for the window.
+        if (isTamperSurface(foreground)) {
+            Log.w(TAG, "Banking window: $foreground can reach uninstall, sending home")
+            sendHome()
+            return true
+        }
+
+        val blocked = blockedPackages(context)
         if (foreground !in blocked) return true
 
         Log.w(TAG, "Banking window: $foreground is blocked, sending home")
@@ -181,6 +191,29 @@ class BankingAppGuard(private val context: Context) {
 
         fun nextDelayMs(bankingActive: Boolean): Long =
             if (bankingActive) ACTIVE_POLL_MS else IDLE_POLL_MS
+
+        /**
+         * Screens that lead to deactivating device admin or uninstalling.
+         * Matched as substrings because the OEM package names vary (Samsung
+         * ships com.samsung.android.packageinstaller, Settings intelligence
+         * shows up as com.google.android.settings.intelligence).
+         *
+         * ponytail: whole-package granularity, because UsageStatsManager only
+         * reports the foreground package, not the screen inside it. Blocking
+         * all of Settings for the 2-minute window is coarse but the user needs
+         * their banking app, not Settings. Narrowing it needs the accessibility
+         * service, which is exactly what is switched off here.
+         */
+        private val TAMPER_SURFACES = listOf(
+            "com.android.settings",
+            "com.google.android.settings",
+            "packageinstaller",
+        )
+
+        fun isTamperSurface(pkg: String): Boolean {
+            val lower = pkg.lowercase()
+            return TAMPER_SURFACES.any { lower.contains(it) }
+        }
 
         /**
          * Packages that must be pushed off screen. Mirrors

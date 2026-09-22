@@ -45,6 +45,10 @@ async fn main() -> Result<()> {
             service_manager::stop_service()?;
             println!("Service stopped.");
         }
+        Some("restart") => {
+            service_manager::restart_service()?;
+            println!("Service restarted.");
+        }
         Some("set-dns") => {
             crate::dns_manager::log_tamper_event("Manual set-dns requested.");
             if !dns::local_dns_proxy_responds().await? {

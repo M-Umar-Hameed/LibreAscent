@@ -53,8 +53,10 @@ class DomainBlocklist {
     @Volatile
     private var blockedDomains: Set<String> = emptySet()
 
-    // Per-category domain sets — for enabling/disabling categories at runtime
-    private val categories = ConcurrentHashMap<String, MutableSet<String>>()
+    // Per-category domain sets — for enabling/disabling categories at runtime.
+    // Hashed rather than string sets: these hold ~500k domains each and were
+    // the bulk of the app's Java heap. See HashedDomainSet.
+    private val categories = ConcurrentHashMap<String, DomainSet>()
 
     // Whitelist — domains explicitly allowed (takes precedence over blocklist)
     @Volatile
@@ -129,6 +131,14 @@ class DomainBlocklist {
         return false
     }
 
+    /** As above, for the hashed and memory-mapped category sets. */
+    private fun matchesList(candidates: List<String>, domainSet: DomainSet): Boolean {
+        for (candidate in candidates) {
+            if (domainSet.contains(candidate)) return true
+        }
+        return false
+    }
+
     /**
      * Replace the entire blocklist with a new set of domains.
      */
@@ -151,10 +161,13 @@ class DomainBlocklist {
      * batch only.
      */
     fun addCategory(name: String, domains: Collection<String>, replace: Boolean) {
-        val target = if (replace) {
-            ConcurrentHashMap.newKeySet<String>()
+        // A category loaded from disk is a read-only mapping, so an appending
+        // sync has to start a fresh in-memory set rather than write into it.
+        val existing = categories[name] as? HashedDomainSet
+        val target = if (replace || existing == null) {
+            HashedDomainSet(domains.size)
         } else {
-            categories.getOrPut(name) { ConcurrentHashMap.newKeySet() }
+            existing
         }
 
         domains.forEach { domain ->
@@ -164,8 +177,15 @@ class DomainBlocklist {
             }
         }
 
-        if (replace) categories[name] = target
+        categories[name] = target
     }
+
+    /** Exposed so an index is built with exactly the normalization lookups use. */
+    fun normalizeDomain(domain: String): String = normalize(domain)
+
+    /** [putCategoryIfAbsent] for a set that is already built, such as a mapped index. */
+    fun putCategoryIfAbsent(name: String, domains: DomainSet): Boolean =
+        categories.putIfAbsent(name, domains) == null
 
     /**
      * Install a category only if nothing has created it yet. The disk loader
@@ -175,7 +195,7 @@ class DomainBlocklist {
      * tunnel with a third of the list.
      */
     fun putCategoryIfAbsent(name: String, domains: Collection<String>): Boolean {
-        val set = ConcurrentHashMap.newKeySet<String>()
+        val set = HashedDomainSet(domains.size)
         domains.forEach { domain ->
             val normalized = normalize(domain)
             if (normalized.isNotEmpty()) set.add(normalized)
@@ -196,6 +216,29 @@ class DomainBlocklist {
      */
     fun setWhitelist(domains: Collection<String>) {
         whitelist = normalizedSet(domains)
+    }
+
+    /**
+     * Install user domains only if none are set yet. The disk loader uses this
+     * so a JS push wins outright, the guard categories already had via
+     * putCategoryIfAbsent: without it a service start racing a push replaced
+     * the freshly added sites with the file's older copy.
+     *
+     * ponytail: an empty set stands in for "nothing pushed yet", so a push of
+     * an empty list is refillable from disk. Tracking a pushed flag would need
+     * one more volatile for a case that only costs a stale read at startup.
+     */
+    fun setDomainsIfAbsent(domains: Collection<String>): Boolean {
+        if (blockedDomains.isNotEmpty()) return false
+        blockedDomains = normalizedSet(domains)
+        return true
+    }
+
+    /** Whitelist counterpart of [setDomainsIfAbsent]. */
+    fun setWhitelistIfAbsent(domains: Collection<String>): Boolean {
+        if (whitelist.isNotEmpty()) return false
+        whitelist = normalizedSet(domains)
+        return true
     }
 
     /**

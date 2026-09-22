@@ -2,8 +2,12 @@ package expo.modules.freedomaccessibility
 
 import android.content.Context
 import android.util.Log
+import expo.modules.freedomvpn.DomainSet
+import expo.modules.freedomvpn.HashedDomainSet
+import expo.modules.freedomvpn.MappedDomainIndex
 import org.json.JSONArray
 import java.io.File
+import java.io.FileWriter
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -39,7 +43,10 @@ class ContentMatcher {
     @Volatile private var adultBlockingEnabled = true
 
     // Per-category domain storage for instant category toggling
-    private val categoryDomains = ConcurrentHashMap<String, Set<String>>()
+    // Hashed rather than string sets: this matcher and the DNS tunnel each held
+    // a copy of the same ~500k-domain categories, which was most of the app's
+    // Java heap and got Play Services killed under memory pressure.
+    private val categoryDomains = ConcurrentHashMap<String, DomainSet>()
     private val enabledCategories = ConcurrentHashMap.newKeySet<String>()
     private val includedDomains = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var usingPerCategoryMode = false
@@ -194,6 +201,19 @@ class ContentMatcher {
      * Check exact + suffix match against a domain set.
      */
     private fun matchesDomainInSet(domain: String, domainSet: Set<String>): Boolean {
+        if (domainSet.contains(domain)) return true
+        var current = domain
+        while (true) {
+            val dotIndex = current.indexOf('.')
+            if (dotIndex < 0 || dotIndex == current.length - 1) break
+            current = current.substring(dotIndex + 1)
+            if (domainSet.contains(current)) return true
+        }
+        return false
+    }
+
+    /** As above, for the hashed and memory-mapped category sets. */
+    private fun matchesDomainInSet(domain: String, domainSet: DomainSet): Boolean {
         if (domainSet.contains(domain)) return true
         var current = domain
         while (true) {
@@ -368,12 +388,14 @@ class ContentMatcher {
 
     fun isPerCategoryMode(): Boolean = usingPerCategoryMode
 
-    fun setNsfwMonitoredApps(packages: Collection<String>) {
-        // Clear-then-add would leave a window where a reader sees no monitored apps.
+    fun setNsfwMonitoredApps(packages: Collection<String>, context: Context? = null) {
+        // Add before retaining: retaining first empties the set for an instant,
+        // which is the window the comment here used to claim it avoided.
         val normalized = packages.map { it.trim().lowercase() }.toSet()
-        nsfwMonitoredApps.retainAll(normalized)
         nsfwMonitoredApps.addAll(normalized)
+        nsfwMonitoredApps.retainAll(normalized)
         Log.i("ContentMatcher", "Updated NSFW monitored apps: ${nsfwMonitoredApps.size}")
+        context?.let { persistData(it, KEY_NSFW_APPS, nsfwMonitoredApps) }
     }
 
     fun isNsfwMonitoredApp(packageName: String): Boolean {
@@ -596,21 +618,27 @@ class ContentMatcher {
      * This is called during full sync (e.g., after updateBlocklists).
      */
     fun setCategoryDomains(categoryId: String, domains: Collection<String>, context: Context? = null) {
-        val newSet = HashSet<String>(domains.size)
+        // Kept as strings only for the write below: the hashed set cannot be
+        // read back, so whatever is persisted has to be captured on the way in.
+        val normalized = ArrayList<String>(domains.size)
         domains.forEach { d ->
-            val normalized = extractDomain(normalizeUrl(d))
-            if (normalized.isNotEmpty() && !normalized.startsWith("#")) {
-                newSet.add(normalized.removePrefix("www."))
+            val cleaned = extractDomain(normalizeUrl(d))
+            if (cleaned.isNotEmpty() && !cleaned.startsWith("#")) {
+                normalized.add(cleaned.removePrefix("www."))
             }
         }
+        val newSet = HashedDomainSet(normalized.size)
+        newSet.addAll(normalized)
         categoryDomains[categoryId] = newSet
         usingPerCategoryMode = true
         Log.i("ContentMatcher", "Updated category '$categoryId': ${newSet.size} domains")
         context?.let {
             if (newSet.size > 5000) {
-                persistCategoryToFile(it, categoryId, newSet)
+                persistCategoryToFile(it, categoryId, normalized, append = false)
+                // Single-shot write, so there is no finalize call to publish it.
+                publishCategoryFile(it, categoryId)
             } else {
-                persistData(it, "$KEY_CATEGORY_PREFIX$categoryId", newSet)
+                persistData(it, "$KEY_CATEGORY_PREFIX$categoryId", normalized.toSet())
             }
         }
         rebuildActiveDomains()
@@ -625,6 +653,10 @@ class ContentMatcher {
         Log.i("ContentMatcher", "Cleared category '$categoryId'")
         context?.let {
             try { File(it.filesDir, "category_${categoryId}.txt").delete() } catch (_: Exception) {}
+            try { File(it.filesDir, "category_${categoryId}.idx").delete() } catch (_: Exception) {}
+            // A leftover staging file from an interrupted sync must not be
+            // appended to by the next one.
+            try { File(it.filesDir, "category_${categoryId}.txt.tmp").delete() } catch (_: Exception) {}
         }
     }
 
@@ -639,14 +671,35 @@ class ContentMatcher {
      * Append domains to a category without rebuilding or persisting.
      * Call finalizeCategorySync() after all batches are done.
      */
-    fun appendCategoryDomains(categoryId: String, domains: Collection<String>) {
-        val existing = categoryDomains.getOrPut(categoryId) { HashSet() }
-        val mutableExisting = if (existing is MutableSet) existing else HashSet(existing).also { categoryDomains[categoryId] = it }
+    fun appendCategoryDomains(
+        categoryId: String,
+        domains: Collection<String>,
+        context: Context? = null,
+    ) {
+        // First batch of a sync owns the file; later batches extend it. The set
+        // is hashed and cannot be enumerated at finalize time, so each batch is
+        // written as it arrives.
+        // A category loaded from disk is a read-only mapping, so a sync that
+        // appends has to start a fresh in-memory set and rewrite the file.
+        val existing = categoryDomains[categoryId] as? HashedDomainSet
+        val target = existing ?: HashedDomainSet(domains.size).also { categoryDomains[categoryId] = it }
+
+        val normalized = if (context != null) ArrayList<String>(domains.size) else null
         domains.forEach { d ->
-            val normalized = extractDomain(normalizeUrl(d))
-            if (normalized.isNotEmpty() && !normalized.startsWith("#")) {
-                mutableExisting.add(normalized.removePrefix("www."))
+            val cleaned = extractDomain(normalizeUrl(d))
+            if (cleaned.isNotEmpty() && !cleaned.startsWith("#")) {
+                val domain = cleaned.removePrefix("www.")
+                target.add(domain)
+                normalized?.add(domain)
             }
+        }
+
+        // ponytail: a resync that never cleared the category appends its
+        // batches to the existing file, so the file can hold duplicates. They
+        // collapse on load, since the set dedupes. Truncating instead would
+        // drop the batches a concurrent first-batch writer already wrote.
+        if (context != null && normalized != null) {
+            persistCategoryToFile(context, categoryId, normalized, append = existing != null)
         }
         usingPerCategoryMode = true
     }
@@ -658,7 +711,12 @@ class ContentMatcher {
     fun finalizeCategorySync(categoryId: String, context: Context? = null) {
         val domains = categoryDomains[categoryId] ?: return
         Log.i("ContentMatcher", "Finalized category '$categoryId': ${domains.size} domains")
-        context?.let { persistCategoryToFile(it, categoryId, domains) }
+
+        // The batches are already on disk in the temp file; publishing them is a
+        // rename, so an interrupted sync leaves the previous file untouched
+        // rather than a half-written one. The index is dropped here and rebuilt
+        // on the next load, instead of being re-sorted once per batch.
+        context?.let { publishCategoryFile(it, categoryId) }
         rebuildActiveDomains()
     }
 
@@ -666,10 +724,38 @@ class ContentMatcher {
      * Persist category domains to a plain text file (one domain per line).
      * Much more memory-efficient than JSONArray for 100k+ domains.
      */
-    private fun persistCategoryToFile(context: Context, categoryId: String, domains: Set<String>) {
+    /**
+     * Move a completed staging file over the live one. The rename is atomic, so
+     * a reader either sees the whole previous category or the whole new one.
+     */
+    private fun publishCategoryFile(context: Context, categoryId: String) {
+        val staged = File(context.filesDir, "category_${categoryId}.txt.tmp")
+        if (staged.exists()) {
+            val live = File(context.filesDir, "category_${categoryId}.txt")
+            live.delete()
+            if (!staged.renameTo(live)) {
+                Log.w("ContentMatcher", "Could not publish category '$categoryId'")
+            }
+        }
+        // Rebuilt on the next load rather than per batch, which would re-sort
+        // the whole category every time.
+        File(context.filesDir, "category_${categoryId}.idx").delete()
+    }
+
+    private fun persistCategoryToFile(
+        context: Context,
+        categoryId: String,
+        domains: Collection<String>,
+        append: Boolean,
+    ) {
         try {
-            val file = File(context.filesDir, "category_${categoryId}.txt")
-            file.bufferedWriter().use { writer ->
+            // Batches land in a temp file that finalizeCategorySync renames into
+            // place. Writing the live file directly meant a kill mid-sync left a
+            // partial file that looked complete, and the next sync truncated it
+            // further: on device the category fell 546,975 -> 522,059 -> 506,433
+            // across three interrupted runs.
+            val file = File(context.filesDir, "category_${categoryId}.txt.tmp")
+            FileWriter(file, append).buffered().use { writer ->
                 domains.forEach { domain ->
                     writer.write(domain)
                     writer.newLine()
@@ -684,11 +770,29 @@ class ContentMatcher {
     /**
      * Load category domains from a plain text file.
      */
-    private fun loadCategoryFromFile(context: Context, categoryId: String): Set<String> {
+    private fun loadCategoryFromFile(context: Context, categoryId: String): DomainSet? {
         try {
             val file = File(context.filesDir, "category_${categoryId}.txt")
-            if (!file.exists()) return emptySet()
-            val domains = HashSet<String>()
+            if (!file.exists()) return null
+
+            // Prefer the mapped index: it keeps ~500k domains off the Java heap
+            // entirely, and the DNS tunnel maps the same kind of file, so the
+            // two engines stop paying for the category twice.
+            val index = File(context.filesDir, "category_${categoryId}.idx")
+            if (!index.exists()) {
+                file.bufferedReader().useLines { lines ->
+                    MappedDomainIndex.build(lines, index) { it.trim() }
+                }
+            }
+            MappedDomainIndex.open(index)?.let {
+                Log.i("ContentMatcher", "Mapped category '$categoryId': ${it.size} domains from index")
+                return it
+            }
+
+            // Index unavailable: fall back to the in-heap set rather than
+            // leaving the matcher without the category.
+            Log.w("ContentMatcher", "Category '$categoryId' falling back to an in-heap set")
+            val domains = HashedDomainSet()
             file.bufferedReader().useLines { lines ->
                 lines.forEach { line ->
                     val trimmed = line.trim()
@@ -699,7 +803,7 @@ class ContentMatcher {
             return domains
         } catch (e: Exception) {
             Log.w("ContentMatcher", "Failed to load category $categoryId from file: ${e.message}")
-            return emptySet()
+            return null
         }
     }
 
@@ -779,6 +883,7 @@ class ContentMatcher {
         // Try loading per-category data (new format)
         loadSet(context, KEY_ENABLED_CATEGORIES, enabledCategories)
         loadSet(context, KEY_INCLUDED_DOMAINS, includedDomains)
+        loadSet(context, KEY_NSFW_APPS, nsfwMonitoredApps)
 
         // Load per-category domain sets — try file-based first, then SharedPreferences
         var foundCategories = false
@@ -788,8 +893,8 @@ class ContentMatcher {
 
         for (catId in knownCategories) {
             val fileDomains = loadCategoryFromFile(context, catId)
-            if (fileDomains.isNotEmpty()) {
-                categoryDomains[catId] = HashSet(fileDomains)
+            if (fileDomains != null && fileDomains.size > 0) {
+                categoryDomains[catId] = fileDomains
                 foundCategories = true
             }
         }
@@ -800,7 +905,7 @@ class ContentMatcher {
                 if (key.startsWith(KEY_CATEGORY_PREFIX)) {
                     val catId = key.removePrefix(KEY_CATEGORY_PREFIX)
                     if (categoryDomains.containsKey(catId)) continue
-                    val catSet = HashSet<String>()
+                    val catSet = HashedDomainSet()
                     val json = prefs.getString(key, null)
                     if (json != null) {
                         try {
@@ -810,7 +915,7 @@ class ContentMatcher {
                             }
                         } catch (_: Exception) {}
                     }
-                    if (catSet.isNotEmpty()) {
+                    if (catSet.size > 0) {
                         categoryDomains[catId] = catSet
                         foundCategories = true
                     }
@@ -921,5 +1026,6 @@ class ContentMatcher {
         private const val KEY_CATEGORY_PREFIX = "cat_domains_"
         private const val KEY_ENABLED_CATEGORIES = "enabled_categories"
         private const val KEY_INCLUDED_DOMAINS = "included_domains"
+        private const val KEY_NSFW_APPS = "nsfw_monitored_apps"
     }
 }

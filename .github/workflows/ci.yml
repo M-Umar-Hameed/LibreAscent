@@ -28,6 +28,13 @@ jobs:
           cache: npm
           cache-dependency-path: mobile/package-lock.json
 
+      # Gradle reads node_modules for Expo autolinking, so this must follow npm ci.
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Install dependencies
         working-directory: ./mobile
         run: npm ci
@@ -43,6 +50,11 @@ jobs:
       - name: Self-checks
         working-directory: ./mobile
         run: npm run check
+
+      # Last because it is the slowest step; the JS checks above fail faster.
+      - name: Native module unit tests
+        working-directory: ./mobile/android
+        run: ./gradlew :freedom-vpn-service:testDebugUnitTest :freedom-accessibility-service:testDebugUnitTest :freedom-foreground-service:testDebugUnitTest --console=plain
 
   # Windows runner: libreascent-service depends on the windows_service crate,
   # so the desktop workspace does not compile on Linux.

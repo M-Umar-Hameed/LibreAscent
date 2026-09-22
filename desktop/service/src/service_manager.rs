@@ -334,3 +334,26 @@ pub fn stop_service() -> anyhow::Result<()> {
     service.stop()?;
     Ok(())
 }
+
+/// Repair runs this without friction in every mode, so it must never leave the
+/// service down: a start issued while the old process is still stopping fails.
+pub fn restart_service() -> anyhow::Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::STOP | ServiceAccess::START | ServiceAccess::QUERY_STATUS,
+    )?;
+
+    if service.query_status()?.current_state != ServiceState::Stopped {
+        let _ = service.stop();
+    }
+    for _ in 0..30 {
+        if service.query_status()?.current_state == ServiceState::Stopped {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    service.start(&Vec::<OsString>::new())?;
+    Ok(())
+}

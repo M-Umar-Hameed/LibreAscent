@@ -5,8 +5,15 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import * as LocalAuthentication from "expo-local-authentication";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useState } from "react";
-import { Modal, Pressable, Text, TextInput, View } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  AppState,
+  Modal,
+  Pressable,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 
 export function AppLockScreen({
   visible,
@@ -20,22 +27,54 @@ export function AppLockScreen({
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
 
+  // Android rejects a second prompt while one is open, so overlapping calls
+  // would lose the real one to an error.
+  const promptInFlight = useRef(false);
+
   const attemptBiometric = useCallback(async (): Promise<void> => {
-    const result = await LocalAuthentication.authenticateAsync({
-      promptMessage: "Unlock LibreAscent",
-      fallbackLabel: "Use password",
-      disableDeviceFallback: true,
-    });
-    if (result.success) {
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      onUnlock();
+    if (promptInFlight.current) return;
+    promptInFlight.current = true;
+    try {
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: "Unlock LibreAscent",
+        fallbackLabel: "Use password",
+        disableDeviceFallback: true,
+      });
+      if (result.success) {
+        void Haptics.notificationAsync(
+          Haptics.NotificationFeedbackType.Success,
+        );
+        onUnlock();
+      }
+    } finally {
+      promptInFlight.current = false;
     }
   }, [onUnlock]);
 
   useEffect(() => {
-    if (visible && appLockType === "passkey") {
+    if (!visible || appLockType !== "passkey") return;
+
+    // Re-locking happens on the way out, so this screen becomes visible while
+    // the app is already backgrounded, where no biometric prompt can appear.
+    // Prompting on `visible` alone therefore fired once into a backgrounded app
+    // and never again, leaving the lock screen sitting there with no prompt.
+    if (AppState.currentState === "active") {
       void attemptBiometric();
     }
+
+    let previous = AppState.currentState;
+    const subscription = AppState.addEventListener("change", (next) => {
+      const cameBackFromBackground =
+        previous === "background" && next === "active";
+      previous = next;
+      if (cameBackFromBackground) {
+        void attemptBiometric();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
   }, [visible, appLockType, attemptBiometric]);
 
   const handlePasswordSubmit = async (): Promise<void> => {

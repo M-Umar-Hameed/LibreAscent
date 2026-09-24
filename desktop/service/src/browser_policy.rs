@@ -152,11 +152,44 @@ pub fn vpn_extension_blocklist_values() -> Vec<PolicyValue> {
     values
 }
 
+/// Blocks every Firefox add-on.
+///
+/// Firefox is the one browser the proxy lock does not seal: an add-on's
+/// proxy.onRequest takes precedence over the locked preference, so a VPN add-on
+/// re-routes traffic no matter what the proxy policy says. Blocking add-ons
+/// outright is the only reliable answer there, and a blocked add-on that is
+/// already installed gets disabled rather than merely barred from installing.
+///
+/// This is deliberately a blanket block rather than a list of known VPN add-on
+/// ids: an id list is a race against whatever gets published next, and Firefox
+/// here exists to be locked down, not to carry an add-on set.
+pub fn firefox_extension_lockdown_values() -> Vec<PolicyValue> {
+    const BLOCK_ALL_ADDONS: &str = r#"{"*":{"installation_mode":"blocked","blocked_install_message":"Extensions are blocked while LibreAscent protection is on."}}"#;
+
+    vec![
+        PolicyValue::new(
+            r"HKLM\SOFTWARE\Policies\Mozilla\Firefox",
+            "ExtensionSettings",
+            "REG_SZ",
+            BLOCK_ALL_ADDONS,
+        ),
+        // about:config can set network.proxy.* and network.trr.* by hand, which
+        // reaches the same place a VPN add-on does without installing anything.
+        PolicyValue::new(
+            r"HKLM\SOFTWARE\Policies\Mozilla\Firefox",
+            "BlockAboutConfig",
+            "REG_DWORD",
+            "1",
+        ),
+    ]
+}
+
 /// Every policy value this service enforces.
 pub fn browser_policy_values() -> Vec<PolicyValue> {
     let mut values = doh_policy_values();
     values.extend(proxy_lock_values());
     values.extend(vpn_extension_blocklist_values());
+    values.extend(firefox_extension_lockdown_values());
     values
 }
 
@@ -314,6 +347,41 @@ mod tests {
                 "missing blocklist entry for {id}"
             );
         }
+    }
+
+    #[test]
+    fn firefox_blocks_every_addon_and_about_config() {
+        // Verified against Firefox 156 on 2026-09-24: with this policy set,
+        // installing Windscribe from addons.mozilla.org is refused with
+        // "blocked by your organization" and the message below, while the same
+        // profile without ExtensionSettings offers the install prompt, whose
+        // permissions include "Control browser proxy settings". That permission
+        // is the bypass, and Firefox honours proxy.onRequest over the locked
+        // proxy pref, so blocking the add-on is the only seal that holds here.
+        let values = firefox_extension_lockdown_values();
+
+        let settings = values
+            .iter()
+            .find(|v| v.name == "ExtensionSettings")
+            .expect("ExtensionSettings must be set");
+        assert_eq!(settings.key, r"HKLM\SOFTWARE\Policies\Mozilla\Firefox");
+        assert_eq!(settings.kind, "REG_SZ");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&settings.data).expect("Firefox reads this as JSON; it must parse");
+        assert_eq!(parsed["*"]["installation_mode"], "blocked");
+        assert!(
+            parsed["*"]["blocked_install_message"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty()),
+            "the block message is what the user sees instead of the install prompt"
+        );
+
+        let about_config = values
+            .iter()
+            .find(|v| v.name == "BlockAboutConfig")
+            .expect("about:config sets network.proxy by hand, so it must be blocked");
+        assert_eq!(about_config.data, "1");
     }
 
     #[test]

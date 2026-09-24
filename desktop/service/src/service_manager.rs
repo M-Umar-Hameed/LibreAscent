@@ -177,14 +177,15 @@ fn run_service_loop() -> anyhow::Result<()> {
                             firewall_enforcement_failed = true;
                         }
 
-                        // Browser DoH bypasses the proxy entirely and cannot be
-                        // sealed by IP, so disable it by policy whenever DNS is
-                        // enforced. Logged but not latched: unlike the firewall
-                        // this is idempotent and safe to retry each pass.
+                        // Browser DoH and VPN extensions both bypass the proxy
+                        // entirely and cannot be sealed by IP, so shut them off
+                        // by policy whenever DNS is enforced. Logged but not
+                        // latched: unlike the firewall this is idempotent and
+                        // safe to retry each pass.
                         if dns_enforced {
-                            if let Err(e) = crate::browser_policy::enforce_doh_disabled() {
+                            if let Err(e) = crate::browser_policy::enforce_browser_policy() {
                                 crate::dns_manager::log_tamper_event(&format!(
-                                    "Failed to disable browser DoH by policy: {e}"
+                                    "Failed to apply browser lockdown policy: {e}"
                                 ));
                             }
                         }
@@ -228,7 +229,7 @@ fn run_service_loop() -> anyhow::Result<()> {
         if !is_hardcore {
             let _ = crate::dns_manager::reset_system_dns();
             let _ = crate::firewall_manager::reset_firewall_protection();
-            crate::browser_policy::reset_doh_policy();
+            crate::browser_policy::reset_browser_policy();
         } else if matches!(event, Some(ServiceEvent::DnsProxyStopped)) {
             crate::dns_manager::log_tamper_event(
                 "DNS proxy stopped in Hardcore mode. DNS NOT reset.",
@@ -297,7 +298,7 @@ pub fn uninstall_service() -> anyhow::Result<()> {
     let _ = crate::dns_manager::reset_system_dns();
     let _ = crate::firewall_manager::reset_firewall_protection();
     // Leaving DoH disabled machine-wide after uninstall would be a surprise.
-    crate::browser_policy::reset_doh_policy();
+    crate::browser_policy::reset_browser_policy();
 
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
     let service = manager.open_service(

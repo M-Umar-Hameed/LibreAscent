@@ -8,12 +8,15 @@ export type PersistedAppState = Omit<
   stats: Pick<BlockingStats, "cleanSince" | "daysClean">;
 };
 
-/** Bumps the blocked counters for one blocked event. */
-export function incrementBlockedStats(stats: BlockingStats): BlockingStats {
+/** Bumps the blocked counters by count blocked events. */
+export function incrementBlockedStats(
+  stats: BlockingStats,
+  count = 1,
+): BlockingStats {
   return {
     ...stats,
-    blockedToday: stats.blockedToday + 1,
-    totalBlocked: stats.totalBlocked + 1,
+    blockedToday: stats.blockedToday + count,
+    totalBlocked: stats.totalBlocked + count,
     lastBlockedAt: new Date().toISOString(),
   };
 }

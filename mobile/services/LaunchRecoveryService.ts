@@ -173,9 +173,9 @@ export const LaunchRecoveryService = {
       }),
     );
     ProtectionService.snapshotCategoryContent();
-    await safeVoidPhase("sync-lightweight-after-cache", startedAt, () =>
-      ProtectionService.syncAllConfigs({ skipResync: true }),
-    );
+    // The config went out before the cache restore; the layout's sync effect
+    // fires as recovery completes and only needs to send what changed since.
+    ProtectionService.skipNextSyncIfUnchanged();
     const accessibilitySnapshotAfter = await safePhase(
       "accessibility-snapshot-after",
       startedAt,

@@ -53,7 +53,7 @@ export interface AppState {
   // Actions
   setProtection: (status: Partial<ProtectionStatus>) => void;
   setProtectionProblems: (problems: string[]) => void;
-  incrementBlocked: () => void;
+  incrementBlocked: (count?: number) => void;
   resetCleanStreak: () => void;
   setAutoStart: (value: boolean) => void;
   setAppThemeId: (id: string) => void;
@@ -109,10 +109,16 @@ export const useAppStore = create<AppState>()(
       surveillance: { type: "none", value: 0, startHour: 0, endHour: 0 },
       isOnboarded: false,
 
+      // Returning the same state skips notifying every subscriber; the
+      // permissions screen polls this every 2 s.
       setProtection: (status) =>
-        set((state) => ({
-          protection: { ...state.protection, ...status },
-        })),
+        set((state) =>
+          (Object.keys(status) as (keyof ProtectionStatus)[]).every(
+            (k) => state.protection[k] === status[k],
+          )
+            ? state
+            : { protection: { ...state.protection, ...status } },
+        ),
 
       setProtectionProblems: (problems) =>
         set((state) =>
@@ -121,8 +127,8 @@ export const useAppStore = create<AppState>()(
             : { protectionProblems: problems },
         ),
 
-      incrementBlocked: () =>
-        set((state) => ({ stats: incrementBlockedStats(state.stats) })),
+      incrementBlocked: (count = 1) =>
+        set((state) => ({ stats: incrementBlockedStats(state.stats, count) })),
 
       resetCleanStreak: () =>
         set((state) => ({

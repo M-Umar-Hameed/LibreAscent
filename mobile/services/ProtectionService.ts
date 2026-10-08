@@ -15,6 +15,32 @@ import {
   useBlockingStore,
 } from "@/stores/useBlockingStore";
 import { BlocklistService } from "./BlocklistService";
+import { createBlockedEventCoalescer } from "./blockedEventCoalescer";
+
+const recordBlocked = createBlockedEventCoalescer((count) => {
+  useAppStore.getState().incrementBlocked(count);
+});
+
+/** What syncAllConfigs pushes, by reference; zustand replaces a slice when it changes. */
+function configSlices(): unknown[] {
+  const b = useBlockingStore.getState();
+  const a = useAppStore.getState();
+  return [
+    b.categories,
+    b.adultBlockingEnabled,
+    b.includedUrls,
+    b.excludedUrls,
+    b.keywords,
+    b.blockedApps,
+    b.enabledReelsApps,
+    b.enabledNsfwApps,
+    a.appThemeId,
+    a.customTheme,
+    a.overlayCustomImage,
+    a.overlayTexts,
+    a.controlMode,
+  ];
+}
 
 /**
  * ProtectionService — High-level bridge to native protection modules.
@@ -93,6 +119,17 @@ export const ProtectionService = {
   _syncChain: Promise.resolve(),
   _lastUrlContent: "" as string, // Hash of last synced URLs
   _lastCategoryContent: "" as string, // Hash of last synced category config
+  _syncedSlices: [] as unknown[],
+  _skipNextIfUnchanged: false,
+
+  /**
+   * Launch recovery has just pushed the config, and the layout's sync effect
+   * fires again the moment recovery completes. Let that next sync through only
+   * if something changed since the last completed one.
+   */
+  skipNextSyncIfUnchanged: (): void => {
+    ProtectionService._skipNextIfUnchanged = true;
+  },
 
   /**
    * Snapshot the current category content so syncAllConfigs doesn't
@@ -125,11 +162,9 @@ export const ProtectionService = {
           async () => {
             try {
               const state = useBlockingStore.getState();
+              const slices = configSlices();
 
-              // 1. INSTANT: Sync master flag + per-category enabled flags (no domain transfer)
-              await BlocklistService.syncCategoryFlagsToNative();
-
-              // 2. Check what changed — avoid resending 100k+ category domains on every URL add
+              // Check what changed — avoid resending 100k+ category domains on every URL add
               const activeIncluded = getActiveIncludedUrls();
               const activeExcluded = getActiveExcludedUrls();
 
@@ -150,6 +185,22 @@ export const ProtectionService = {
               const categoriesChanged =
                 currentCategoryContent !==
                 ProtectionService._lastCategoryContent;
+
+              const skipIfUnchanged = ProtectionService._skipNextIfUnchanged;
+              ProtectionService._skipNextIfUnchanged = false;
+              if (
+                skipIfUnchanged &&
+                !urlsChanged &&
+                !categoriesChanged &&
+                slices.every(
+                  (slice, i) => slice === ProtectionService._syncedSlices[i],
+                )
+              ) {
+                return;
+              }
+
+              // 1. INSTANT: Sync master flag + per-category enabled flags (no domain transfer)
+              await BlocklistService.syncCategoryFlagsToNative();
 
               if (categoriesChanged && !options?.skipResync) {
                 // Full domain sync — categories changed (after updateBlocklists)
@@ -198,6 +249,7 @@ export const ProtectionService = {
               await FreedomAccessibility.updateHardcoreMode(
                 controlMode === "hardcore",
               );
+              ProtectionService._syncedSlices = slices;
               // eslint-disable-next-line no-console
               console.log("[ProtectionService] Synced configs", {
                 includedUrls: activeIncluded.length,
@@ -278,7 +330,7 @@ export const ProtectionService = {
   ): { remove: () => void } => {
     return FreedomVpn.onDomainBlocked((event) => {
       accumulateBlockedCount();
-      useAppStore.getState().incrementBlocked();
+      recordBlocked();
       listener(event);
     });
   },
@@ -297,7 +349,7 @@ export const ProtectionService = {
   ): { remove: () => void } => {
     return FreedomAccessibility.onUrlBlocked((event) => {
       accumulateBlockedCount();
-      useAppStore.getState().incrementBlocked();
+      recordBlocked();
       listener(event);
     });
   },

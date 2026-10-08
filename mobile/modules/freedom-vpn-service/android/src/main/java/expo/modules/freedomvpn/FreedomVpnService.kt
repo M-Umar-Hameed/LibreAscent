@@ -167,6 +167,9 @@ class FreedomVpnService : VpnService() {
                 .apply()
         }
 
+        @Volatile
+        private var instance: FreedomVpnService? = null
+
         private fun pausedUntil(context: Context): Long =
             context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
                 .getLong(KEY_PAUSED_UNTIL, 0L)
@@ -185,9 +188,20 @@ class FreedomVpnService : VpnService() {
                 .edit()
                 .putLong(KEY_PAUSED_UNTIL, System.currentTimeMillis() + durationMs)
                 .commit()
-            app.stopService(Intent(app, FreedomVpnService::class.java))
-            android.os.Handler(android.os.Looper.getMainLooper())
-                .postDelayed({ resume(app) }, durationMs)
+            val main = android.os.Handler(android.os.Looper.getMainLooper())
+            // stopService alone left the tunnel up: the system stays bound to an
+            // established VpnService, so it is never destroyed. Closing the TUN is
+            // what takes the VPN down.
+            val running = instance
+            if (running != null) {
+                main.post {
+                    running.closeTunnel()
+                    running.stopSelf()
+                }
+            } else {
+                app.stopService(Intent(app, FreedomVpnService::class.java))
+            }
+            main.postDelayed({ resume(app) }, durationMs)
             Log.i(TAG, "VPN paused for ${durationMs / 1000}s")
         }
 
@@ -608,6 +622,7 @@ class FreedomVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         dnsInterceptor = DnsInterceptor(blocklist)
         createNotificationChannel()
     }
@@ -1066,7 +1081,19 @@ class FreedomVpnService : VpnService() {
 
     override fun onDestroy() {
         Log.i(TAG, "Stopping Freedom VPN Service")
-        running.set(false)
+        closeTunnel()
+        if (instance === this) instance = null
+        super.onDestroy()
+    }
+
+    override fun onRevoke() {
+        Log.w(TAG, "VPN permission revoked")
+        closeTunnel()
+        stopSelf()
+    }
+
+    private fun closeTunnel() {
+        if (!running.getAndSet(false) && vpnInterface == null) return
         isRunning = false
 
         // Interrupt the processing thread
@@ -1083,25 +1110,5 @@ class FreedomVpnService : VpnService() {
         vpnInterface = null
 
         broadcastVpnStatus(false)
-        super.onDestroy()
-    }
-
-    override fun onRevoke() {
-        Log.w(TAG, "VPN permission revoked")
-        running.set(false)
-        isRunning = false
-
-        vpnThread?.interrupt()
-        vpnThread = null
-
-        dnsExecutor?.shutdownNow()
-        dnsExecutor = null
-        tunOutput = null
-
-        vpnInterface?.close()
-        vpnInterface = null
-
-        broadcastVpnStatus(false)
-        stopSelf()
     }
 }

@@ -32,12 +32,14 @@ class BrowserUrlMonitor {
     private val browsers = ConcurrentHashMap<String, BrowserConfig>()
     private var lastDetectedUrl: String = ""
 
-    // Per-call scan budget. Every tree walk and every cross-process lookup
+    // Per-event scan budget. Every tree walk and every cross-process lookup
     // checks it, so a browser that stops answering costs at most one in-flight
-    // call past the deadline instead of minutes of them.
+    // call past the deadline instead of minutes of them. URL extraction starts
+    // it; the full-screen fallback in the same event shares it, and a trailing
+    // fallback with no extraction before it starts its own.
     @Volatile private var deadline = Long.MAX_VALUE
     private fun overBudget() = android.os.SystemClock.uptimeMillis() > deadline
-    private fun beginBudget() {
+    fun beginBudget() {
         deadline = android.os.SystemClock.uptimeMillis() + SCAN_BUDGET_MS
     }
 
@@ -739,7 +741,6 @@ class BrowserUrlMonitor {
 
     fun extractAllText(rootNode: AccessibilityNodeInfo?): String {
         if (rootNode == null) return ""
-        beginBudget()
         val sb = StringBuilder()
         
         fun traverse(node: AccessibilityNodeInfo, depth: Int) {

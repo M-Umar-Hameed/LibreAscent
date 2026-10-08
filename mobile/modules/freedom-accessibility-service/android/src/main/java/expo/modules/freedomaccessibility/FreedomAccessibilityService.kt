@@ -759,6 +759,8 @@ class FreedomAccessibilityService : AccessibilityService() {
             val livePackage = root.packageName?.toString()
             if (livePackage != null && (packageName == null || livePackage == packageName)) {
                 lastFullScanAt = System.currentTimeMillis()
+                // No extraction ran before this scan, so it starts its own budget.
+                browserMonitor.beginBudget()
                 scanFullScreenForBlock(root, livePackage, contextDomain, pageWhitelisted)?.let {
                     applyBlock(livePackage, it.second, it.first)
                 }

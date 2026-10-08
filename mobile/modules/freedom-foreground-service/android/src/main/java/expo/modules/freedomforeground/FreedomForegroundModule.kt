@@ -74,7 +74,11 @@ class FreedomForegroundModule : Module() {
                 promise.resolve(emptyList<String>())
                 return@AsyncFunction
             }
-            promise.resolve(ProtectionCheck.evaluate(context))
+            try {
+                promise.resolve(ProtectionCheck.evaluate(context))
+            } catch (e: Exception) {
+                promise.reject("ERR_PROTECTION_CHECK", e.message, e)
+            }
         }
 
         AsyncFunction("setAutoStart") { enabled: Boolean, promise: Promise ->

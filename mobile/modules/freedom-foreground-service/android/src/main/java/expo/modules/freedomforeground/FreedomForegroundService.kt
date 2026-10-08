@@ -76,6 +76,8 @@ class FreedomForegroundService : Service() {
     private fun problemText(code: String): String = when {
         code == ProtectionCheck.ACCESSIBILITY_OFF ->
             "Content protection is off: accessibility service is disabled"
+        code == ProtectionCheck.VPN_TAKEN ->
+            "DNS protection is off: another VPN app holds the VPN slot"
         code.startsWith(ProtectionCheck.VPN_TAKEN) -> {
             val pkg = code.removePrefix(ProtectionCheck.VPN_TAKEN)
             val label = try {
@@ -88,21 +90,24 @@ class FreedomForegroundService : Service() {
         else -> "DNS protection is off: the VPN is not running"
     }
 
-    private fun settingsIntent(code: String): PendingIntent {
-        val action = if (code == ProtectionCheck.ACCESSIBILITY_OFF) {
+    private fun settingsAction(code: String): String =
+        if (code == ProtectionCheck.ACCESSIBILITY_OFF) {
             Settings.ACTION_ACCESSIBILITY_SETTINGS
         } else {
             Settings.ACTION_VPN_SETTINGS
         }
+
+    private fun settingsIntent(code: String): PendingIntent {
+        val action = settingsAction(code)
         return PendingIntent.getActivity(
-            this, 1, Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            this, action.hashCode(), Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
     }
 
     private fun alertNotification(): Notification {
         val first = problems.first()
-        return NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle("Protection is off")
             .setContentText(problemText(first))
             .setStyle(NotificationCompat.BigTextStyle().bigText(problems.joinToString("\n") { problemText(it) }))
@@ -111,7 +116,11 @@ class FreedomForegroundService : Service() {
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(settingsIntent(first))
-            .build()
+        problems.distinctBy { settingsAction(it) }.forEach {
+            val label = if (it == ProtectionCheck.ACCESSIBILITY_OFF) "Accessibility settings" else "VPN settings"
+            builder.addAction(0, label, settingsIntent(it))
+        }
+        return builder.build()
     }
 
     override fun onCreate() {
@@ -140,7 +149,12 @@ class FreedomForegroundService : Service() {
             return START_STICKY
         }
 
-        // Normal start — show notification
+        // Normal start — show notification. Evaluated now so the first text is honest.
+        try {
+            problems = ProtectionCheck.evaluate(this)
+        } catch (e: Exception) {
+            Log.w(TAG, "Initial protection check failed: ${e.message}")
+        }
         startForeground(NOTIFICATION_ID, createNotification())
         Log.i(TAG, "Foreground service started")
 

@@ -1,6 +1,7 @@
 package expo.modules.freedomforeground
 
 import android.content.Context
+import android.net.VpnService
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -21,19 +22,32 @@ object ProtectionCheck {
         vpnPaused: Boolean,
         tunnelUp: Boolean,
         alwaysOnApp: String?,
+        vpnSlotLost: Boolean,
         ownPackage: String,
         accessibilityEnabled: Boolean,
         bankingActive: Boolean
     ): List<String> {
         val problems = mutableListOf<String>()
         if (vpnWanted && !vpnPaused && !tunnelUp) problems += VPN_DOWN
-        if (!alwaysOnApp.isNullOrEmpty() && alwaysOnApp != ownPackage) problems += VPN_TAKEN + alwaysOnApp
+        if (!alwaysOnApp.isNullOrEmpty()) {
+            if (alwaysOnApp != ownPackage) problems += VPN_TAKEN + alwaysOnApp
+        } else if (vpnWanted && vpnSlotLost) {
+            // always_on_vpn_app is hidden and may be unreadable; the lost slot is the evidence.
+            problems += VPN_TAKEN
+        }
         if (!accessibilityEnabled && !bankingActive) problems += ACCESSIBILITY_OFF
         return problems
     }
 
+    // The system may store "pkg/.Cls" for "pkg/pkg.Cls".
+    private fun normalize(entry: String): String {
+        val slash = entry.indexOf('/')
+        if (slash <= 0 || !entry.startsWith(".", slash + 1)) return entry.lowercase()
+        return (entry.substring(0, slash) + "/" + entry.substring(0, slash) + entry.substring(slash + 1)).lowercase()
+    }
+
     fun listContains(enabled: String?, component: String): Boolean =
-        !enabled.isNullOrEmpty() && enabled.split(':').any { it.equals(component, ignoreCase = true) }
+        !enabled.isNullOrEmpty() && enabled.split(':').any { normalize(it) == normalize(component) }
 
     fun listWith(enabled: String?, component: String): String =
         if (enabled.isNullOrEmpty()) component else "$enabled:$component"
@@ -63,7 +77,12 @@ object ProtectionCheck {
             vpnWanted = VpnWatchdog.isVpnWanted(context),
             vpnPaused = now < VpnWatchdog.pausedUntil(context),
             tunnelUp = isTunnelUp(context),
-            alwaysOnApp = Settings.Secure.getString(context.contentResolver, "always_on_vpn_app"),
+            alwaysOnApp = try {
+                Settings.Secure.getString(context.contentResolver, "always_on_vpn_app")
+            } catch (e: SecurityException) {
+                null
+            },
+            vpnSlotLost = VpnService.prepare(context) != null,
             ownPackage = context.packageName,
             accessibilityEnabled = isAccessibilityEnabled(context),
             bankingActive = now < context.getSharedPreferences("freedom_settings", Context.MODE_PRIVATE)

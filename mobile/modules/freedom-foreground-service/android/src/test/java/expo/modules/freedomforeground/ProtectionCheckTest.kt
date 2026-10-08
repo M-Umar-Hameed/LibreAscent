@@ -13,8 +13,9 @@ class ProtectionCheckTest {
         up: Boolean = true,
         alwaysOn: String? = null,
         a11y: Boolean = true,
-        banking: Boolean = false
-    ) = ProtectionCheck.decide(wanted, paused, up, alwaysOn, "com.me", a11y, banking)
+        banking: Boolean = false,
+        slotLost: Boolean = false
+    ) = ProtectionCheck.decide(wanted, paused, up, alwaysOn, slotLost, "com.me", a11y, banking)
 
     @Test
     fun healthyHasNoProblems() {
@@ -36,6 +37,14 @@ class ProtectionCheckTest {
     }
 
     @Test
+    fun unreadableAlwaysOnKeyFallsBackToLostSlot() {
+        assertEquals(listOf("vpn_down", "vpn_taken:"), decide(up = false, slotLost = true))
+        assertEquals(listOf("vpn_taken:"), decide(slotLost = true))
+        assertEquals(emptyList(), decide(wanted = false, slotLost = true))
+        assertEquals(listOf("vpn_taken:ch.protonvpn"), decide(alwaysOn = "ch.protonvpn", slotLost = true))
+    }
+
+    @Test
     fun accessibilityMissingIsForgivenInsideBankingWindow() {
         assertEquals(listOf("accessibility_off"), decide(a11y = false))
         assertEquals(emptyList(), decide(a11y = false, banking = true))
@@ -47,6 +56,8 @@ class ProtectionCheckTest {
         assertFalse(ProtectionCheck.listContains(null, c))
         assertFalse(ProtectionCheck.listContains("com.other/x.Svc", c))
         assertTrue(ProtectionCheck.listContains("com.other/x.Svc:$c", c))
+        assertTrue(ProtectionCheck.listContains("com.me/.Svc", "com.me/com.me.Svc"))
+        assertTrue(ProtectionCheck.listContains("COM.ME/com.me.svc", "com.me/.Svc"))
         assertEquals(c, ProtectionCheck.listWith("", c))
         assertEquals("com.other/x.Svc:$c", ProtectionCheck.listWith("com.other/x.Svc", c))
     }

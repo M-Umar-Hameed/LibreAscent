@@ -53,8 +53,17 @@ class VpnWatchdog(
     }
 
     private fun pollOnce() {
-        repairAccessibility()
-        onProblems(ProtectionCheck.evaluate(context))
+        // Reporting must never be able to disable the tunnel restart below.
+        try {
+            repairAccessibility()
+        } catch (e: Exception) {
+            Log.w(TAG, "Accessibility repair failed: ${e.message}")
+        }
+        try {
+            onProblems(ProtectionCheck.evaluate(context))
+        } catch (e: Exception) {
+            Log.w(TAG, "Protection report failed: ${e.message}")
+        }
         if (!isVpnWanted(context)) {
             blockedWarned = false
             return

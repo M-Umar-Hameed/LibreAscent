@@ -1,7 +1,7 @@
 // Shipped defaults for the keyword layer. Every entry is 4+ characters except
-// "xxx" (exact-token match only) and none is a substring of an ordinary word,
-// so ContentMatcher's short-keyword and 15-character-token rules cannot
-// misfire on them.
+// "xxx", which ContentMatcher only matches as an exact token. None is a
+// substring of a common English word; rare proper nouns that contain an entry
+// (for example Pornichet) can still match.
 export const DEFAULT_ADULT_KEYWORDS: string[] = [
   "porn",
   "porno",

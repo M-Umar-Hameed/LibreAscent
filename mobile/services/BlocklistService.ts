@@ -34,6 +34,7 @@ function hasEmptyAdultCategory(): boolean {
   return state.categories.some(
     (c) =>
       c.enabled &&
+      // hentai only counts once a hentai source is enabled (none by default).
       (c.id === "adult" || c.id === "hentai") &&
       getCachedDomainCount(c.id) === 0 &&
       state.sources.some(

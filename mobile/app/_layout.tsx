@@ -244,12 +244,18 @@ export default function RootLayout(): ReactNode {
   // else ever refetched the lists; they were frozen at the first fetch.
   useEffect(() => {
     if (!launchRecoveryComplete) return;
-    void BlocklistService.refreshIfStale().catch((e: unknown) => {
-      console.warn("[Layout] Blocklist refresh failed:", e);
-    });
-    void BlocklistService.fetchIfEmptyOnLaunch().catch((e: unknown) => {
-      console.warn("[Layout] First-run blocklist fetch failed:", e);
-    });
+    void (async () => {
+      try {
+        await BlocklistService.refreshIfStale();
+      } catch (e: unknown) {
+        console.warn("[Layout] Blocklist refresh failed:", e);
+      }
+      try {
+        await BlocklistService.fetchIfEmptyOnLaunch();
+      } catch (e: unknown) {
+        console.warn("[Layout] First-run blocklist fetch failed:", e);
+      }
+    })();
   }, [launchRecoveryComplete]);
 
   useEffect(() => {

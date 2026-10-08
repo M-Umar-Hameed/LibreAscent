@@ -90,3 +90,21 @@ export async function saveSourceDomainsInChunks(
     }
   }
 }
+
+/**
+ * What a refresh does after saving its sources. A category with a half-written
+ * source (a save that failed after its first chunk committed, or an earlier
+ * run killed mid-save) is not pushed over native's full copy, and the refresh
+ * is not recorded as done, so the next launch refetches instead of waiting out
+ * the update interval.
+ */
+export function planRefreshSync(
+  dirty: ReadonlySet<string>,
+  partial: ReadonlySet<string>,
+  saveFailed: boolean,
+): { push: Set<string>; markUpdated: boolean } {
+  return {
+    push: new Set([...dirty].filter((id) => !partial.has(id))),
+    markUpdated: !saveFailed && partial.size === 0,
+  };
+}

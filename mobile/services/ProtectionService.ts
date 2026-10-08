@@ -16,6 +16,7 @@ import {
 } from "@/stores/useBlockingStore";
 import { BlocklistService } from "./BlocklistService";
 import { createBlockedEventCoalescer } from "./blockedEventCoalescer";
+import { canSkipSync } from "./launchSyncSkip";
 
 const recordBlocked = createBlockedEventCoalescer((count) => {
   useAppStore.getState().incrementBlocked(count);
@@ -186,15 +187,16 @@ export const ProtectionService = {
                 currentCategoryContent !==
                 ProtectionService._lastCategoryContent;
 
-              const skipIfUnchanged = ProtectionService._skipNextIfUnchanged;
+              const armed = ProtectionService._skipNextIfUnchanged;
               ProtectionService._skipNextIfUnchanged = false;
               if (
-                skipIfUnchanged &&
-                !urlsChanged &&
-                !categoriesChanged &&
-                slices.every(
-                  (slice, i) => slice === ProtectionService._syncedSlices[i],
-                )
+                canSkipSync({
+                  armed,
+                  urlsChanged,
+                  categoriesChanged,
+                  slices,
+                  syncedSlices: ProtectionService._syncedSlices,
+                })
               ) {
                 return;
               }

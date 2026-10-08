@@ -1,5 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { parseLinesInChunks } from "@/db/blocklistChunks";
+import { parseLinesInChunks, planRefreshSync } from "@/db/blocklistChunks";
 import {
   contentFingerprint,
   getCachedDomainCount,
@@ -912,6 +912,7 @@ export const BlocklistService = {
       const total = enabledSources.length + 1;
       const dirtyCategories = new Set<string>();
       const fetchedKeywords: string[] = [];
+      let saveFailed = false;
 
       // Phase 1: Check each source for changes
       for (let i = 0; i < enabledSources.length; i++) {
@@ -944,14 +945,19 @@ export const BlocklistService = {
             continue;
           }
 
-          await saveSourceDomains(
-            source.id,
-            categoryId,
-            result.etag,
-            result.lastModified,
-            result.hash,
-            result.list,
-          );
+          try {
+            await saveSourceDomains(
+              source.id,
+              categoryId,
+              result.etag,
+              result.lastModified,
+              result.hash,
+              result.list,
+            );
+          } catch (e) {
+            saveFailed = true;
+            throw e;
+          }
           dirtyCategories.add(categoryId);
           // eslint-disable-next-line no-console
           console.log(
@@ -972,12 +978,23 @@ export const BlocklistService = {
       const categoryIds = useBlockingStore
         .getState()
         .categories.map((c) => c.id);
+      const partialCategories = new Set(
+        categoryIds.filter((id) => BlocklistService.hasPartialSource(id)),
+      );
+      const plan = planRefreshSync(
+        dirtyCategories,
+        partialCategories,
+        saveFailed,
+      );
 
       for (const categoryId of categoryIds) {
-        if (!dirtyCategories.has(categoryId)) {
+        if (!plan.push.has(categoryId)) {
           // Nothing changed — native already has correct data from its own
-          // persistence files. Just update the UI count from SQLite DISTINCT.
-          const cachedCount = getCachedDomainCount(categoryId);
+          // persistence files. Just update the UI count from SQLite DISTINCT,
+          // unless the cache is half-written and would understate native.
+          const cachedCount = partialCategories.has(categoryId)
+            ? 0
+            : getCachedDomainCount(categoryId);
           if (cachedCount > 0) {
             useBlockingStore
               .getState()
@@ -1017,7 +1034,7 @@ export const BlocklistService = {
       // Update counts: use native count for dirty categories (just re-synced),
       // SQLite DISTINCT count for clean categories (already set above).
       for (const categoryId of categoryIds) {
-        if (dirtyCategories.has(categoryId)) {
+        if (plan.push.has(categoryId)) {
           // VPN-only categories aren't in the accessibility matcher, so read
           // their count from the SQLite cache instead.
           const count = VPN_ONLY_CATEGORIES.has(categoryId)
@@ -1060,7 +1077,7 @@ export const BlocklistService = {
         console.warn("[BlocklistService] Failed to sync URLs:", e);
       }
 
-      setLastBlocklistUpdate();
+      if (plan.markUpdated) setLastBlocklistUpdate();
       return true;
     } catch (error) {
       console.error("[BlocklistService] Failed to update blocklists:", error);

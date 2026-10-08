@@ -6,6 +6,7 @@ const { DatabaseSync } = require("node:sqlite");
 const {
   CHUNK_SIZE,
   parseLinesInChunks,
+  planRefreshSync,
   saveSourceDomainsInChunks,
 } = require("../db/blocklistChunks.ts");
 
@@ -124,6 +125,25 @@ const domains = (n, tag) => Array.from({ length: n }, (_, i) => `${tag}${i}.com`
     assert.ok(turned, "parsing yielded to the event loop");
     assert.strictEqual(parsed.length, Math.floor(lines / 2));
     assert.strictEqual(parsed[parsed.length - 1], `d${lines - 2}.com`);
+  }
+
+  // After the saves: a category with a half-written source is not pushed,
+  // and any save failure or half-written source leaves the refresh unrecorded
+  // so the next launch refetches.
+  {
+    const clean = planRefreshSync(new Set(["adult", "ads"]), new Set(), false);
+    assert.deepStrictEqual([...clean.push].sort(), ["ads", "adult"]);
+    assert.strictEqual(clean.markUpdated, true);
+
+    const partial = planRefreshSync(new Set(["adult", "ads"]), new Set(["adult"]), true);
+    assert.deepStrictEqual([...partial.push], ["ads"], "the half-written category stays out");
+    assert.strictEqual(partial.markUpdated, false);
+
+    const firstChunkFailed = planRefreshSync(new Set(), new Set(), true);
+    assert.strictEqual(firstChunkFailed.markUpdated, false, "a rolled-back save still retries");
+
+    const leftover = planRefreshSync(new Set(), new Set(["hentai"]), false);
+    assert.strictEqual(leftover.markUpdated, false, "an earlier killed save still retries");
   }
 
   console.log("blocklistChunks: all checks passed");

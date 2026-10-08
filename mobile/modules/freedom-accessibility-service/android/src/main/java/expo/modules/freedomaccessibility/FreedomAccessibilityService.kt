@@ -1569,8 +1569,10 @@ internal object KeywordRotation {
  * Which whitelisted site a browser page belongs to, decided by the URL bar alone.
  * Page text names other sites, so it never sets or clears this. Browsers hide
  * their toolbar while scrolling, so an event with no readable URL bar keeps the
- * last whitelisted domain seen in the same browser, for at most [TTL_MS]. An
- * event from another package drops it, so a later visit starts without it.
+ * last whitelisted domain seen in the same browser. Each such event extends it
+ * by [TTL_MS], so a long read with the toolbar hidden keeps it, while a gap that
+ * long with no event from that browser ends it. An event from another package
+ * or any URL-bar value that is not a whitelisted host drops it.
  */
 internal object PageWhitelist {
     const val TTL_MS = 30_000L
@@ -1591,7 +1593,7 @@ internal object PageWhitelist {
     ): Pair<String?, Memory?> {
         if (urlBar.isNullOrBlank()) {
             val live = memory?.takeIf { it.packageName == packageName && now - it.seenAt < TTL_MS }
-            return live?.domain to live
+            return live?.domain to live?.copy(seenAt = now)
         }
         // A value without a dot is a search term or an edit in progress, not a site.
         val host = urlBar.substringBefore('/').substringBefore('?').substringBefore(' ')

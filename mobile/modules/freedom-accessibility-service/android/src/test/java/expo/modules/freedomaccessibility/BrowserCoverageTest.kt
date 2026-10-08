@@ -138,7 +138,23 @@ class BrowserCoverageTest {
 
         val (context, memory) = PageWhitelist.resolve("com.android.chrome", null, { false }, remembered, 20_000)
         assertEquals("wikipedia.org", context)
-        assertEquals(remembered, memory)
+        assertEquals(PageWhitelist.Memory("com.android.chrome", "wikipedia.org", 20_000), memory)
+    }
+
+    @Test
+    fun continuousUnreadableEventsKeepInheritingPastTheTtl() {
+        // A long read of a whitelisted page with the toolbar hidden must not lose it.
+        var memory: PageWhitelist.Memory? = PageWhitelist.Memory("com.android.chrome", "wikipedia.org", 0)
+        for (now in 10_000L..120_000L step 10_000L) {
+            val (context, next) = PageWhitelist.resolve("com.android.chrome", null, { false }, memory, now)
+            assertEquals("wikipedia.org", context)
+            memory = next
+        }
+    }
+
+    @Test
+    fun aGapLongerThanTheTtlWithNoEventsStopsInheriting() {
+        val remembered = PageWhitelist.Memory("com.android.chrome", "wikipedia.org", 1_000)
 
         val expired = PageWhitelist.resolve("com.android.chrome", null, { false }, remembered, 1_000 + PageWhitelist.TTL_MS)
         assertEquals(null to null, expired)

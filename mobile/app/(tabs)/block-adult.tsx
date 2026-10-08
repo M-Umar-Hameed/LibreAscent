@@ -118,18 +118,22 @@ export default function BlockAdultScreen(): ReactNode {
     const newEnabled = !adultBlockingEnabled;
     setAdultBlockingEnabled(newEnabled);
 
-    const state = useBlockingStore.getState();
-    for (const cat of state.categories) {
-      // The adult master must not touch VPN-only categories (e.g. ads),
-      // which are governed by their own independent toggle.
-      if (VPN_ONLY_CATEGORIES.has(cat.id)) continue;
-      void BlocklistService.syncVpnCategoryToggle(
-        cat.id,
-        newEnabled && cat.enabled,
+    // The adult master must not touch VPN-only categories (e.g. ads),
+    // which are governed by their own independent toggle.
+    const vpnToggles = useBlockingStore
+      .getState()
+      .categories.filter((cat) => !VPN_ONLY_CATEGORIES.has(cat.id))
+      .map((cat) =>
+        BlocklistService.syncVpnCategoryToggle(
+          cat.id,
+          newEnabled && cat.enabled,
+        ),
       );
-    }
 
     await ProtectionService.syncAllConfigs({ skipResync: true });
+    // Held until the VPN has the categories back, so the toggle cannot be
+    // flipped off while a re-push is still adding domains.
+    await Promise.all(vpnToggles);
     setIsSyncing(false);
     setGuardVisible(false);
   };

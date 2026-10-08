@@ -148,7 +148,7 @@ export const DEFAULT_CATEGORIES: BlockingCategory[] = [
 
 export const useBlockingStore = create<BlockingState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       keywords: [],
       defaultKeywordsApplied: false,
       includedUrls: [],
@@ -208,9 +208,10 @@ export const useBlockingStore = create<BlockingState>()(
 
       setKeywords: (keywords) => set({ keywords }),
 
-      applyDefaultKeywords: () =>
+      applyDefaultKeywords: () => {
+        // A set that changes nothing still writes the whole store to SQLite.
+        if (get().defaultKeywordsApplied) return;
         set((state) => {
-          if (state.defaultKeywordsApplied) return state;
           const merged = mergeDefaultKeywords(
             state.keywords,
             false,
@@ -220,7 +221,8 @@ export const useBlockingStore = create<BlockingState>()(
             keywords: merged.keywords,
             defaultKeywordsApplied: merged.applied,
           };
-        }),
+        });
+      },
 
       addIncludedUrl: (url) =>
         set((state) => {
@@ -383,16 +385,21 @@ export const useBlockingStore = create<BlockingState>()(
     {
       name: "freedom-blocking-store",
       storage: createJSONStorage(() => sqliteStorage),
-      // sources is force-reset to DEFAULT_SOURCES below on every rehydrate —
-      // persisting it would be pure waste.
+      // sources is always DEFAULT_SOURCES on launch: never persisted, and
+      // merge drops it from blobs written before partialize existed.
       partialize: (state) => {
         const { sources: _sources, ...persisted } = state;
         return persisted;
       },
+      merge: (persisted, current) => ({
+        ...current,
+        ...(persisted as Partial<BlockingState>),
+        sources: current.sources,
+      }),
+      // Every set here writes the whole store back, so each one runs only when
+      // its migration changes something.
       onRehydrateStorage: () => (state) => {
         if (state) {
-          // Force-reset sources to exactly DEFAULT_SOURCES on every launch.
-          state.importSettings({ sources: [...DEFAULT_SOURCES] });
           state.applyDefaultKeywords();
 
           // Restore default categories if persisted state has none

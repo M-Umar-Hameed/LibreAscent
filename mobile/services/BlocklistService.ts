@@ -162,6 +162,11 @@ export const BlocklistService = {
     } catch (e) {
       console.warn("[BlocklistService] Failed to sync master flag:", e);
     }
+    try {
+      await FreedomVpn.setSafeSearch(state.adultBlockingEnabled);
+    } catch {
+      // Older native builds have no setSafeSearch.
+    }
 
     for (const category of state.categories) {
       // VPN-only categories are not held by the accessibility matcher.

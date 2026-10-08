@@ -7,6 +7,7 @@ interface FreedomForegroundModuleInterface {
   updateNotification(title?: string, text?: string): Promise<void>;
   setAutoStart(enabled: boolean): Promise<void>;
   isAutoStartEnabled(): Promise<boolean>;
+  getProtectionProblems(): Promise<string[]>;
   hasUsageStatsPermission(): Promise<boolean>;
   openUsageStatsSettings(): Promise<void>;
 }
@@ -68,4 +69,9 @@ export async function openUsageStatsSettings(): Promise<void> {
     return;
   }
   return FreedomForegroundNative.openUsageStatsSettings();
+}
+
+export async function getProtectionProblems(): Promise<string[]> {
+  if (!FreedomForegroundNative) return [];
+  return FreedomForegroundNative.getProtectionProblems();
 }

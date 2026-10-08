@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
@@ -51,6 +52,7 @@ class FreedomForegroundService : Service() {
         private const val TAG = "FreedomForeground"
         private const val BLOCKED_NOTIFY_INTERVAL_MS = 30_000L
         const val CHANNEL_ID = "freedom_protection"
+        const val ALERT_CHANNEL_ID = "freedom_protection_alert"
         const val NOTIFICATION_ID = 1001
         const val ACTION_UPDATE_NOTIFICATION = "expo.modules.freedomforeground.UPDATE"
         const val EXTRA_TITLE = "title"
@@ -62,7 +64,55 @@ class FreedomForegroundService : Service() {
     }
 
     private val bankingGuard by lazy { BankingAppGuard(this) }
-    private val vpnWatchdog by lazy { VpnWatchdog(this) }
+    private val vpnWatchdog by lazy { VpnWatchdog(this, ::onProblems) }
+    private var problems: List<String> = emptyList()
+
+    private fun onProblems(next: List<String>) {
+        if (next == problems) return
+        problems = next
+        updateNotification(null, null)
+    }
+
+    private fun problemText(code: String): String = when {
+        code == ProtectionCheck.ACCESSIBILITY_OFF ->
+            "Content protection is off: accessibility service is disabled"
+        code.startsWith(ProtectionCheck.VPN_TAKEN) -> {
+            val pkg = code.removePrefix(ProtectionCheck.VPN_TAKEN)
+            val label = try {
+                packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+            } catch (e: Exception) {
+                pkg
+            }
+            "DNS protection is off: $label is set as the always-on VPN"
+        }
+        else -> "DNS protection is off: the VPN is not running"
+    }
+
+    private fun settingsIntent(code: String): PendingIntent {
+        val action = if (code == ProtectionCheck.ACCESSIBILITY_OFF) {
+            Settings.ACTION_ACCESSIBILITY_SETTINGS
+        } else {
+            Settings.ACTION_VPN_SETTINGS
+        }
+        return PendingIntent.getActivity(
+            this, 1, Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    private fun alertNotification(): Notification {
+        val first = problems.first()
+        return NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+            .setContentTitle("Protection is off")
+            .setContentText(problemText(first))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(problems.joinToString("\n") { problemText(it) }))
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(settingsIntent(first))
+            .build()
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -101,6 +151,10 @@ class FreedomForegroundService : Service() {
      * Update the notification text dynamically.
      */
     private fun updateNotification(title: String?, text: String?) {
+        if (problems.isNotEmpty()) {
+            getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, alertNotification())
+            return
+        }
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title ?: "LibreAscent is protecting you")
             .setContentText(text ?: "Content blocking is active • $blockedCount blocked")
@@ -115,6 +169,7 @@ class FreedomForegroundService : Service() {
     }
 
     private fun createNotification(): Notification {
+        if (problems.isNotEmpty()) return alertNotification()
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("LibreAscent is protecting you")
             .setContentText("Content blocking is active")
@@ -155,8 +210,17 @@ class FreedomForegroundService : Service() {
                 description = "Shows when LibreAscent is actively protecting you"
                 setShowBadge(false)
             }
+            val alert = NotificationChannel(
+                ALERT_CHANNEL_ID,
+                "LibreAscent Protection Alerts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Shows when a protection layer is off"
+                setShowBadge(false)
+            }
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(channel)
+            manager?.createNotificationChannel(alert)
         }
     }
 

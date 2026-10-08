@@ -68,6 +68,15 @@ class FreedomForegroundModule : Module() {
             }
         }
 
+        AsyncFunction("getProtectionProblems") { promise: Promise ->
+            val context = appContext.reactContext
+            if (context == null) {
+                promise.resolve(emptyList<String>())
+                return@AsyncFunction
+            }
+            promise.resolve(ProtectionCheck.evaluate(context))
+        }
+
         AsyncFunction("setAutoStart") { enabled: Boolean, promise: Promise ->
             try {
                 val context = appContext.reactContext

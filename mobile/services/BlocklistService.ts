@@ -14,6 +14,7 @@ import {
 import * as DeviceAdmin from "@/modules/freedom-device-admin/src";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import * as FreedomVpn from "@/modules/freedom-vpn-service/src";
+import { shouldFetchOnLaunch } from "./blocklistFirstRun";
 
 const SUSPENDED_PKGS_KEY = "libreascent.suspendedPkgs";
 /** Per-category fingerprint of what native was last given; see categoryFingerprint. */
@@ -23,6 +24,23 @@ import {
   getActiveIncludedUrls,
   useBlockingStore,
 } from "@/stores/useBlockingStore";
+
+const FIRST_RUN_FAILURE_KEY = "libreascent.firstRunFetchFailedAt";
+let firstRunAttempted = false;
+
+/** An enabled adult/hentai category that has a source but nothing cached. */
+function hasEmptyAdultCategory(): boolean {
+  const state = useBlockingStore.getState();
+  return state.categories.some(
+    (c) =>
+      c.enabled &&
+      (c.id === "adult" || c.id === "hentai") &&
+      getCachedDomainCount(c.id) === 0 &&
+      state.sources.some(
+        (s) => s.enabled && BlocklistService.getCategoryForSource(s) === c.id,
+      ),
+  );
+}
 
 /**
  * Categories enforced by the VPN/DNS layer only. Their domains are NEVER
@@ -817,6 +835,34 @@ export const BlocklistService = {
     const last = getLastBlocklistUpdate();
     if (last === 0 || Date.now() - last < UPDATE_INTERVAL_MS) return false;
     return BlocklistService.updateBlocklists();
+  },
+
+  /**
+   * Fresh install: nothing else fetches the lists until the user taps Update,
+   * so the tunnel would run with empty adult categories. Tries once per launch,
+   * and not again for 6 hours after a failure, across launches.
+   */
+  fetchIfEmptyOnLaunch: async (): Promise<boolean> => {
+    const needsFetch = hasEmptyAdultCategory();
+    const lastFailureAt =
+      Number(await AsyncStorage.getItem(FIRST_RUN_FAILURE_KEY)) || 0;
+    if (
+      !shouldFetchOnLaunch({
+        needsFetch,
+        attemptedThisLaunch: firstRunAttempted,
+        lastFailureAt,
+        now: Date.now(),
+      })
+    ) {
+      return false;
+    }
+    firstRunAttempted = true;
+    const ok = await BlocklistService.updateBlocklists();
+    const stillEmpty = hasEmptyAdultCategory();
+    if (!ok || stillEmpty) {
+      await AsyncStorage.setItem(FIRST_RUN_FAILURE_KEY, String(Date.now()));
+    }
+    return ok;
   },
 
   updateBlocklists: async (

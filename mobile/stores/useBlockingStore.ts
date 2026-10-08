@@ -1,4 +1,6 @@
+import { DEFAULT_ADULT_KEYWORDS } from "@/data/keywords/defaultAdultKeywords";
 import { sqliteStorage } from "@/db/database";
+import { mergeDefaultKeywords } from "@/services/blocklistFirstRun";
 import type {
   BlockedApp,
   BlockedUrl,
@@ -13,6 +15,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 export interface BlockingState {
   // Keywords
   keywords: string[];
+  defaultKeywordsApplied: boolean;
 
   // Websites
   includedUrls: BlockedUrl[];
@@ -52,6 +55,7 @@ export interface BlockingState {
   removeKeyword: (keyword: string) => void;
   removeKeywords: (keywordsToRemove: string[]) => void;
   setKeywords: (keywords: string[]) => void;
+  applyDefaultKeywords: () => void;
 
   // URL actions
   addIncludedUrl: (url: string) => void;
@@ -146,6 +150,7 @@ export const useBlockingStore = create<BlockingState>()(
   persist(
     (set) => ({
       keywords: [],
+      defaultKeywordsApplied: false,
       includedUrls: [],
       excludedUrls: [],
       siteControlMode: "flexible",
@@ -202,6 +207,20 @@ export const useBlockingStore = create<BlockingState>()(
         })),
 
       setKeywords: (keywords) => set({ keywords }),
+
+      applyDefaultKeywords: () =>
+        set((state) => {
+          if (state.defaultKeywordsApplied) return state;
+          const merged = mergeDefaultKeywords(
+            state.keywords,
+            false,
+            DEFAULT_ADULT_KEYWORDS,
+          );
+          return {
+            keywords: merged.keywords,
+            defaultKeywordsApplied: merged.applied,
+          };
+        }),
 
       addIncludedUrl: (url) =>
         set((state) => {
@@ -374,6 +393,7 @@ export const useBlockingStore = create<BlockingState>()(
         if (state) {
           // Force-reset sources to exactly DEFAULT_SOURCES on every launch.
           state.importSettings({ sources: [...DEFAULT_SOURCES] });
+          state.applyDefaultKeywords();
 
           // Restore default categories if persisted state has none
           if (state.categories.length === 0) {

@@ -115,7 +115,16 @@ class BrowserCoverageTest {
     fun otherAppsKeepTheirReelsContainerRules() {
         val pager = Triple("androidx.viewpager.widget.ViewPager", true, 100)
         assertTrue(inReelsFeed("com.instagram.android", "Reels", pager))
-        assertTrue(inReelsFeed("com.facebook.katana", "Reel", Triple(recycler, true, 100)))
+        assertTrue(ReelsDetector.isFacebookReelViewerLabel("Reels tab details"))
+        assertTrue(ReelsDetector.isFacebookReelViewerLabel("Navigate to your Reels profile"))
+        assertTrue(ReelsDetector.isFacebookReelViewerLabel("View Riya Verma's reels"))
+        assertFalse(ReelsDetector.isFacebookReelViewerLabel("Reels tab"))
+        assertFalse(ReelsDetector.isFacebookReelViewerLabel("Selected Reels tab"))
+        assertFalse(ReelsDetector.isFacebookReelViewerLabel("See more reels"))
+        assertFalse(ReelsDetector.isFacebookReelViewerLabel("TOK Videos's story, Unseen"))
+        // Facebook's home feed holds Reels/Stories labels in lists and pagers.
+        assertFalse(inReelsFeed("com.facebook.katana", "Reels", Triple(recycler, true, 100)))
+        assertFalse(inReelsFeed("com.facebook.katana", "Reels", pager))
         assertFalse(inReelsFeed("com.instagram.android", "Reels", Triple(recycler, true, 1800)))
         // Instagram still climbs past a list to the pager around it.
         assertTrue(inReelsFeed("com.instagram.android", "Reels", Triple(recycler, true, 1800), pager))

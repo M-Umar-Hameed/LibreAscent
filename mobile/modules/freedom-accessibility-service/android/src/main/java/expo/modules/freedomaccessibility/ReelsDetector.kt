@@ -137,6 +137,25 @@ class ReelsDetector {
         detectionNodes: List<String>,
         deadline: Long
     ): Boolean? {
+        // Facebook strips its view ids, and its home feed shows Reels and Stories
+        // labels, so only labels the reel viewer itself carries count.
+        if (packageName.contains("com.facebook.")) {
+            for (marker in FACEBOOK_REEL_VIEWER_MARKERS) {
+                if (overDeadline(deadline)) return null
+                val matches = rootNode.findAccessibilityNodeInfosByText(marker) ?: continue
+                var found = false
+                for (match in matches) {
+                    if (!found && match.isVisibleToUser &&
+                        isFacebookReelViewerLabel(match.contentDescription?.toString() ?: match.text?.toString())
+                    ) {
+                        found = true
+                    }
+                    match.recycle()
+                }
+                if (found) return true
+            }
+            return false
+        }
 
         for (nodeId in detectionNodes) {
             if (overDeadline(deadline)) return null
@@ -185,20 +204,9 @@ class ReelsDetector {
                 var found = false
                 for (match in matches) {
                     if (!found && match.isVisibleToUser) {
-                        // For Facebook, these keywords are often landing page entry points.
-                        // We block the landing page if these keywords are present.
-                        val isFacebookLanding = (keyword == "Watch" || keyword == "Video home") && 
-                                                packageName.contains("com.facebook.")
-                        
-                        if (isFacebookLanding) {
-                            Log.d(TAG, "Facebook Video Landing detected via keyword: $keyword")
-                            found = true
-                        } else {
-                            // General swiping logic: check for scrollable ancestor
-                            val label = match.text?.toString() ?: match.contentDescription?.toString()
-                            found = hasScrollableReelsAncestor(match, packageName, label, windowBounds.height())
-                            if (found) Log.d(TAG, "Reels detected in $packageName via keyword: $keyword")
-                        }
+                        val label = match.text?.toString() ?: match.contentDescription?.toString()
+                        found = hasScrollableReelsAncestor(match, packageName, label, windowBounds.height())
+                        if (found) Log.d(TAG, "Reels detected in $packageName via keyword: $keyword")
                     }
                     match.recycle()
                 }
@@ -283,9 +291,12 @@ class ReelsDetector {
             windowHeight: Int
         ): Boolean? {
             if (!scrollable) return null
+            // Facebook's home feed carries a Reels shelf and tab labels inside its
+            // scrolling lists and tab pager, so a label there says nothing about
+            // the reel viewer.
+            if (packageName.contains("com.facebook.")) return false
             if (className.contains("ViewPager")) return true
             if (!className.contains("RecyclerView")) return null
-            if (packageName.contains("com.facebook.")) return true
             if (packageName != YOUTUBE) return null
             return label?.trim().equals("Shorts", ignoreCase = true) && height * 2 > windowHeight
         }
@@ -353,6 +364,21 @@ class ReelsDetector {
                 Log.w(TAG, "Failed to parse reels configs: ${e.message}")
                 emptyList()
             }
+        }
+
+        // Seen on device (Facebook, Oct 2026): the Reels tab and reel viewer label
+        // these controls; the home feed's Reels shelf and Stories do not.
+        private val FACEBOOK_REEL_VIEWER_MARKERS = listOf(
+            "Reels tab details",
+            "Navigate to your Reels profile",
+            "'s reels"
+        )
+
+        internal fun isFacebookReelViewerLabel(label: String?): Boolean {
+            val l = label?.trim() ?: return false
+            return l.equals("Reels tab details", ignoreCase = true) ||
+                l.equals("Navigate to your Reels profile", ignoreCase = true) ||
+                (l.startsWith("View ", ignoreCase = true) && l.endsWith("'s reels", ignoreCase = true))
         }
 
         // Fallback keywords for reels detection

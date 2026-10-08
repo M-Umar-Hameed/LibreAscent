@@ -1,6 +1,7 @@
 package expo.modules.freedomaccessibility
 
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -23,5 +24,30 @@ class TransientWindowsTest {
         assertFalse(TransientWindows.isTransient("com.reddit.frontpage", imes))
         assertFalse(TransientWindows.isTransient("com.google.android.apps.nexuslauncher", imes))
         assertFalse(TransientWindows.isTransient("com.google.android.inputmethod.latin", emptySet()))
+    }
+
+    private val own = "com.libreascent"
+
+    @Test
+    fun emptyForegroundIsSeededFromAnApp() {
+        // Service connects while Instagram is already in front: no window-state
+        // change may follow, so the probe or the first event must seed it.
+        assertEquals("com.instagram.android", TransientWindows.seed("", "com.instagram.android", own, imes))
+    }
+
+    @Test
+    fun seedingSkipsUnknownOwnAndTransientPackages() {
+        assertEquals("", TransientWindows.seed("", null, own, imes))
+        assertEquals("", TransientWindows.seed("", "", own, imes))
+        assertEquals("", TransientWindows.seed("", own, own, imes))
+        assertEquals("", TransientWindows.seed("", "com.android.systemui", own, imes))
+        assertEquals("", TransientWindows.seed("", "com.google.android.inputmethod.latin", own, imes))
+    }
+
+    @Test
+    fun seedingNeverOverridesAKnownForegroundApp() {
+        // Once set, only window-state changes move it; a stray content event
+        // from a background window must not.
+        assertEquals("com.reddit.frontpage", TransientWindows.seed("com.reddit.frontpage", "com.whatsapp", own, imes))
     }
 }

@@ -52,7 +52,8 @@ class FreedomAccessibilityService : AccessibilityService() {
     private var instantOverlay: FrameLayout? = null
     // Written on the main thread, read by the scan thread before an NSFW scan.
     @Volatile private var isInstantOverlayShowing = false
-    // Set by browser, reels and NSFW scans on the scan thread, read on main.
+    // Written on the scan thread by applyBlock, on main by the reels and NSFW
+    // overlay posts and the overlay buttons; read on main.
     @Volatile private var reelsOverlayPackage: String? = null
     private val handler = Handler(Looper.getMainLooper())
 
@@ -450,6 +451,12 @@ class FreedomAccessibilityService : AccessibilityService() {
                 }
             }
         }
+
+        // Until a window-state change names the foreground app, the first
+        // non-transient package seen stands in, so a monitored app already in
+        // front at connect is not left unguarded.
+        foregroundAppPackage = TransientWindows.seed(
+            foregroundAppPackage, packageName, applicationContext.packageName, imePackages)
 
         val isNsfwMonitored = contentMatcher.isNsfwMonitoredApp(packageName)
         val shouldHandleAsBrowser =
@@ -888,7 +895,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             if (result.isInReels) {
                 Log.i(TAG, "Reels detected in ${result.appName}")
                 reelsOverlayPackage = packageName
-                showInstantOverlay(packageName, "${result.appName} Reels blocked")
+                showInstantOverlay(packageName, "${result.appName} Reels blocked", requireForeground = true)
             } else {
                 Log.i(TAG, "User left reels in ${result.appName}")
                 reelsOverlayPackage = null
@@ -954,7 +961,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                         if (foregroundAppPackage != packageName) return@post
                         lastNsfwBlockTime = now
                         reelsOverlayPackage = packageName
-                        showInstantOverlay(packageName, "Explicit content blocked")
+                        showInstantOverlay(packageName, "Explicit content blocked", requireForeground = true)
                     }
                     return
                 }
@@ -1018,8 +1025,20 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     @Synchronized
-    private fun showInstantOverlay(targetPackage: String, message: String, surveillanceType: String = "none", surveillanceValue: Int = 0) {
+    private fun showInstantOverlay(
+        targetPackage: String,
+        message: String,
+        surveillanceType: String = "none",
+        surveillanceValue: Int = 0,
+        requireForeground: Boolean = false
+    ) {
         handler.post {
+            // A switch queued between the caller's check and this post skipped
+            // its hide because the overlay was marked sticky; re-check here.
+            if (requireForeground && foregroundAppPackage != targetPackage) {
+                if (reelsOverlayPackage == targetPackage) reelsOverlayPackage = null
+                return@post
+            }
             if (isInstantOverlayShowing) {
                 return@post
             }
@@ -1453,12 +1472,15 @@ class FreedomAccessibilityService : AccessibilityService() {
     /**
      * On (re)connect — e.g. when the banking window ends and the service is
      * re-enabled — redirect home immediately if a blocked app is foregrounded,
-     * instead of waiting for the next window-state change.
+     * instead of waiting for the next window-state change. Also seeds the
+     * foreground app, since no window-state change may follow a reconnect.
      */
     private fun enforceForegroundIfBlocked() {
         val root = rootInActiveWindow ?: return
         val pkg = root.packageName?.toString()
         root.recycle()
+        foregroundAppPackage = TransientWindows.seed(
+            foregroundAppPackage, pkg, applicationContext.packageName, imePackages)
         if (pkg.isNullOrEmpty() || pkg == applicationContext.packageName) return
         val config = contentMatcher.getAppConfig(pkg) ?: return
         if (config.surveillanceType == "none") {
@@ -1560,4 +1582,13 @@ internal object TransientWindows {
 
     fun isTransient(packageName: String, imePackages: Set<String>): Boolean =
         packageName == SYSTEM_UI || packageName in imePackages
+
+    /**
+     * The foreground app to keep: [candidate] fills an empty [current] when it
+     * can be an app, i.e. it is known, not ours and not transient. A non-empty
+     * [current] is left to window-state changes.
+     */
+    fun seed(current: String, candidate: String?, ownPackage: String, imePackages: Set<String>): String =
+        if (current.isEmpty() && !candidate.isNullOrEmpty() && candidate != ownPackage &&
+            !isTransient(candidate, imePackages)) candidate else current
 }

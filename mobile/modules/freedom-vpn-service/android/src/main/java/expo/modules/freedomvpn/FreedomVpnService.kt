@@ -107,7 +107,8 @@ class FreedomVpnService : VpnService() {
 
         internal val DEFAULT_BYPASSED_PACKAGES = listOf(
             "com.whatsapp",
-            "com.whatsapp.w4b"
+            "com.whatsapp.w4b",
+            "com.google.android.apps.giant" // Google Analytics
         )
 
         // Settings.Secure.ALWAYS_ON_VPN_APP is @hide, so name it directly.

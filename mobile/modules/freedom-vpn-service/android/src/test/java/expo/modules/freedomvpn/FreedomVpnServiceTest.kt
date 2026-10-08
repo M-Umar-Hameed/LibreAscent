@@ -21,6 +21,7 @@ class FreedomVpnServiceTest {
     fun defaultBypassedPackagesIncludeWhatsAppVariants() {
         assertContains(FreedomVpnService.DEFAULT_BYPASSED_PACKAGES, "com.whatsapp")
         assertContains(FreedomVpnService.DEFAULT_BYPASSED_PACKAGES, "com.whatsapp.w4b")
+        assertContains(FreedomVpnService.DEFAULT_BYPASSED_PACKAGES, "com.google.android.apps.giant")
     }
 
     @Test

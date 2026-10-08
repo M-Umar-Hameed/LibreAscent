@@ -12,14 +12,19 @@ function withArm64Only(config) {
       );
       let contents = fs.readFileSync(gradleProps, "utf-8");
       contents = contents.replace(
-        /reactNativeArchitectures=.*/,
+        /^reactNativeArchitectures=.*$/m,
         "reactNativeArchitectures=arm64-v8a"
       );
       contents = contents.replace(
         "android.enablePngCrunchInReleaseBuilds=true",
         "android.enablePngCrunchInReleaseBuilds=false"
       );
-      contents += "\norg.gradle.workers.max=2\nCMAKE_BUILD_PARALLEL_LEVEL=2\n";
+      for (const line of ["org.gradle.workers.max=2", "CMAKE_BUILD_PARALLEL_LEVEL=2"]) {
+        const key = line.split("=")[0];
+        if (!new RegExp(`^${key}=`, "m").test(contents)) {
+          contents += `${contents.endsWith("\n") ? "" : "\n"}${line}\n`;
+        }
+      }
       fs.writeFileSync(gradleProps, contents);
       return config;
     },

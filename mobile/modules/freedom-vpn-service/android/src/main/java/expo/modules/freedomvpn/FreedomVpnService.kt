@@ -63,11 +63,22 @@ class FreedomVpnService : VpnService() {
         private const val MTU = 1500
         private const val MAX_PACKET_SIZE = 32767
 
-        // Cloudflare Family DNS — blocks malware AND adult content
+        // Resolvers the tunnel advertises and routes: plain Cloudflare, so
+        // Chrome's DoH auto-upgrade targets chrome.cloudflare-dns.com, which
+        // DomainBlocklist refuses. Queries to them are answered here or
+        // forwarded to the upstreams below, never sent to these addresses.
         private const val DNS_PRIMARY = "1.1.1.1"
         private const val DNS_SECONDARY = "1.0.0.1"
         private const val DNS_PRIMARY_V6 = "2606:4700:4700::1111"
         private const val DNS_SECONDARY_V6 = "2606:4700:4700::1001"
+        // Where allowed queries are forwarded: Cloudflare for Families, which
+        // blocks malware and adult content, as a backstop for names missing
+        // from the local lists. It answers those with 0.0.0.0 rather than
+        // NXDOMAIN, so they do not reach the blocked counter or the overlay.
+        private const val UPSTREAM_PRIMARY = "1.1.1.3"
+        private const val UPSTREAM_SECONDARY = "1.0.0.3"
+        private const val UPSTREAM_PRIMARY_V6 = "2606:4700:4700::1113"
+        private const val UPSTREAM_SECONDARY_V6 = "2606:4700:4700::1003"
         private const val TUN_ADDRESS_V6 = "fd00:1:1::2"
         // Kept short so a dead upstream frees its worker quickly instead of
         // holding it (and its socket) for seconds.
@@ -852,9 +863,9 @@ class FreedomVpnService : VpnService() {
         // the client's family from the captured srcIp, so a v6 client can be
         // answered from a v4 resolver.
         val dnsServers = if (srcIp.size == 16) {
-            listOf(DNS_PRIMARY_V6, DNS_SECONDARY_V6, DNS_PRIMARY, DNS_SECONDARY)
+            listOf(UPSTREAM_PRIMARY_V6, UPSTREAM_SECONDARY_V6, UPSTREAM_PRIMARY, UPSTREAM_SECONDARY)
         } else {
-            listOf(DNS_PRIMARY, DNS_SECONDARY)
+            listOf(UPSTREAM_PRIMARY, UPSTREAM_SECONDARY)
         }
 
         for (server in dnsServers) {

@@ -41,6 +41,11 @@ class FreedomAccessibilityService : AccessibilityService() {
     private val contentMatcher = ContentMatcher()
     private val settingsProtector = SettingsProtector()
     private var currentPackage: String = ""
+    // Main thread only. Like currentPackage, but never set to a keyboard or
+    // System UI window, which report their own package while the app beneath
+    // stays foreground. Scan results are applied only while it still matches.
+    private var foregroundAppPackage: String = ""
+    private var imePackages: Set<String> = emptySet()
 
     // Instant overlay drawn directly by the accessibility service
     private var windowManager: WindowManager? = null
@@ -223,6 +228,7 @@ class FreedomAccessibilityService : AccessibilityService() {
 
         // Apply any pending configs that arrived before the service was ready
         applyPendingConfigs()
+        imePackages = loadImePackages()
 
         // Initialize SettingsProtector from persisted state
         val prefs = getSharedPreferences("freedom_settings", MODE_PRIVATE)
@@ -360,6 +366,27 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Enabled keyboards plus the selected one. The selected one is read from
+     * settings as well because package visibility can hide enabled IMEs from
+     * the list, never the one serving input. Refreshed on each connect.
+     */
+    private fun loadImePackages(): Set<String> {
+        val packages = mutableSetOf<String>()
+        try {
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+            imm.enabledInputMethodList.mapTo(packages) { it.packageName }
+            android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.DEFAULT_INPUT_METHOD)
+                ?.substringBefore('/')
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { packages.add(it) }
+        } catch (e: Exception) {
+            // Runs in onServiceConnected; an empty set only weakens the guard.
+            Log.w(TAG, "Failed to list input methods: ${e.message}")
+        }
+        return packages
+    }
+
+    /**
      * Seed the scope from the currently focused window, for the case where the
      * service (re)connects while a monitored app is already foreground.
      */
@@ -395,6 +422,11 @@ class FreedomAccessibilityService : AccessibilityService() {
             // made while its own app is already foreground takes effect on the next
             // window-state change; push an update from the module if that ever matters.
             updateEventScope(isDetachedWebview || needsDeepInspection(packageName))
+            if (packageName != foregroundAppPackage &&
+                !TransientWindows.isTransient(packageName, imePackages)) {
+                foregroundAppPackage = packageName
+                handler.removeCallbacksAndMessages(NSFW_TRAILING_TOKEN)
+            }
             if (packageName != currentPackage) {
                 // User switched apps - reset reels state for both old and new app
                 // so detection fires fresh when (re-)entering a reels app.
@@ -410,7 +442,6 @@ class FreedomAccessibilityService : AccessibilityService() {
                 lastFullScanAt = 0
                 scanHandler.removeCallbacksAndMessages(FULL_SCAN_TOKEN)
                 fullScanPending = false
-                handler.removeCallbacksAndMessages(NSFW_TRAILING_TOKEN)
                 // Dismiss any lingering overlay - but never dismiss a reels
                 // overlay here. The reels overlay is dismissed only by the
                 // "I understand" button handler, which sends the user home/back.
@@ -845,11 +876,11 @@ class FreedomAccessibilityService : AccessibilityService() {
             rootNode.recycle()
         } ?: return
 
-        // Applied on main against currentPackage, which only main writes: a scan
-        // of app A can finish after the switch to B, and a sticky overlay raised
-        // then would sit over B.
+        // Applied on main against foregroundAppPackage, which only main writes: a
+        // scan of app A can finish after the switch to B, and a sticky overlay
+        // raised then would sit over B.
         handler.post {
-            if (currentPackage != packageName) {
+            if (foregroundAppPackage != packageName) {
                 // The switch already reset this package; drop what the stale scan wrote.
                 reelsDetector.resetState(packageName)
                 return@post
@@ -867,7 +898,8 @@ class FreedomAccessibilityService : AccessibilityService() {
         }
     }
 
-    private var lastNsfwBlockTime = 0L
+    // Set on main once a block overlay is actually applied, read on the scan thread.
+    @Volatile private var lastNsfwBlockTime = 0L
 
     private fun handleNsfwScan(packageName: String) {
         if (isInstantOverlayShowing) return
@@ -915,11 +947,12 @@ class FreedomAccessibilityService : AccessibilityService() {
 
                 if (found) {
                     Log.i(TAG, "NSFW keyword '$keyword' found in $packageName")
-                    lastNsfwBlockTime = now
                     nsfwResumeAt = 0
-                    // On main against currentPackage, as for reels.
+                    // On main against foregroundAppPackage, as for reels. A match
+                    // dropped as stale must not start the cooldown.
                     handler.post {
-                        if (currentPackage != packageName) return@post
+                        if (foregroundAppPackage != packageName) return@post
+                        lastNsfwBlockTime = now
                         reelsOverlayPackage = packageName
                         showInstantOverlay(packageName, "Explicit content blocked")
                     }
@@ -1519,4 +1552,12 @@ internal object KeywordRotation {
 
     /** Start index for the next scan after one starting at [start] searched [searched] keywords. */
     fun resumeAt(start: Int, searched: Int, size: Int): Int = if (size == 0) 0 else (start + searched).mod(size)
+}
+
+/** Windows that report their own package while the app beneath stays foreground. */
+internal object TransientWindows {
+    private const val SYSTEM_UI = "com.android.systemui"
+
+    fun isTransient(packageName: String, imePackages: Set<String>): Boolean =
+        packageName == SYSTEM_UI || packageName in imePackages
 }

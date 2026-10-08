@@ -100,6 +100,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         private val SCOPE_TOKEN = Any()
         private val REPROBE_TOKEN = Any()
         private val FULL_SCAN_TOKEN = Any()
+        private val NSFW_TRAILING_TOKEN = Any()
 
         // Content-changed stays subscribed for every package: an in-app WebView
         // lives in a package we cannot enumerate, and its events are the only
@@ -409,6 +410,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 lastFullScanAt = 0
                 scanHandler.removeCallbacksAndMessages(FULL_SCAN_TOKEN)
                 fullScanPending = false
+                handler.removeCallbacksAndMessages(NSFW_TRAILING_TOKEN)
                 // Dismiss any lingering overlay - but never dismiss a reels
                 // overlay here. The reels overlay is dismissed only by the
                 // "I understand" button handler, which sends the user home/back.
@@ -465,15 +467,13 @@ class FreedomAccessibilityService : AccessibilityService() {
                 shouldHandleAsBrowser -> {
                     // The system recycles the event once this returns.
                     val scan = BrowserScan(AccessibilityEvent.obtain(event), packageName, scopeUpgradedThisEvent)
-                    postScan(browserSlot, scan, ::runBrowserScan)
+                    postScan(browserSlot, scan, ::runBrowserScan) { it.event.recycle() }
                 }
                 reelsDetector.isReelsApp(packageName) -> {
                     postScan(reelsSlot, packageName, ::handleReelsEvent)
                 }
                 isNsfwMonitored -> {
-                    if (nsfwRateLimit.tryAcquire(packageName, android.os.SystemClock.uptimeMillis())) {
-                        postScan(nsfwSlot, packageName, ::handleNsfwScan)
-                    }
+                    requestNsfwScan(packageName)
                 }
                 isSettingsApp -> {
                     val rootNode = rootInActiveWindow
@@ -504,8 +504,15 @@ class FreedomAccessibilityService : AccessibilityService() {
      * the pending item runs next without the slot ever going idle, so the newest
      * event always gets a full pass and nothing queues beyond it.
      */
-    private fun <T : Any> postScan(slot: ScanSlot<T>, item: T, scan: (T) -> Unit) {
-        if (slot.offer(item)) runScan(slot, item, scan)
+    private fun <T : Any> postScan(
+        slot: ScanSlot<T>,
+        item: T,
+        scan: (T) -> Unit,
+        onDisplaced: (T) -> Unit = {}
+    ) {
+        val (runNow, displaced) = slot.offer(item)
+        displaced?.let(onDisplaced)
+        if (runNow) runScan(slot, item, scan)
     }
 
     private fun <T : Any> runScan(slot: ScanSlot<T>, item: T, scan: (T) -> Unit) {
@@ -528,7 +535,24 @@ class FreedomAccessibilityService : AccessibilityService() {
             handleBrowserEvent(scan.event, root, scan.packageName, scan.scopeUpgraded)
         } finally {
             root?.recycle()
+            scan.event.recycle()
         }
+    }
+
+    /**
+     * Main thread. Rate limited per package before any root is fetched. A
+     * rejected event gets one trailing scan when the interval ends, so the
+     * screen a scroll burst stops on is still checked.
+     */
+    private fun requestNsfwScan(packageName: String) {
+        val wait = nsfwRateLimit.acquire(packageName, android.os.SystemClock.uptimeMillis())
+        if (wait == 0L) {
+            postScan(nsfwSlot, packageName, ::handleNsfwScan)
+            return
+        }
+        handler.removeCallbacksAndMessages(NSFW_TRAILING_TOKEN)
+        handler.postAtTime({ requestNsfwScan(packageName) }, NSFW_TRAILING_TOKEN,
+            android.os.SystemClock.uptimeMillis() + wait)
     }
 
     /**
@@ -821,17 +845,26 @@ class FreedomAccessibilityService : AccessibilityService() {
             rootNode.recycle()
         } ?: return
 
-        if (result.isInReels) {
-            Log.i(TAG, "Reels detected in ${result.appName}")
-            reelsOverlayPackage = packageName
-            showInstantOverlay(packageName, "${result.appName} Reels blocked")
-        } else {
-            Log.i(TAG, "User left reels in ${result.appName}")
-            reelsOverlayPackage = null
-            hideInstantOverlay()
+        // Applied on main against currentPackage, which only main writes: a scan
+        // of app A can finish after the switch to B, and a sticky overlay raised
+        // then would sit over B.
+        handler.post {
+            if (currentPackage != packageName) {
+                // The switch already reset this package; drop what the stale scan wrote.
+                reelsDetector.resetState(packageName)
+                return@post
+            }
+            if (result.isInReels) {
+                Log.i(TAG, "Reels detected in ${result.appName}")
+                reelsOverlayPackage = packageName
+                showInstantOverlay(packageName, "${result.appName} Reels blocked")
+            } else {
+                Log.i(TAG, "User left reels in ${result.appName}")
+                reelsOverlayPackage = null
+                hideInstantOverlay()
+            }
+            broadcastReelsDetected(result)
         }
-
-        broadcastReelsDetected(result)
     }
 
     private var lastNsfwBlockTime = 0L
@@ -860,18 +893,14 @@ class FreedomAccessibilityService : AccessibilityService() {
         // Combine built-in NSFW labels with user keywords
         val allKeywords = NSFW_BUILTIN_KEYWORDS + contentMatcher.getKeywords()
         val deadline = android.os.SystemClock.uptimeMillis() + APP_SCAN_BUDGET_MS
-        // A scan that runs out of budget hands the rest of the list to the next
-        // one, so a long keyword list is still covered within a few scans.
-        val start = nsfwResumeAt % allKeywords.size
 
         // ponytail: one IPC per keyword; a single tree walk would mean
         // reimplementing Android's own text-match semantics
-        for (i in allKeywords.indices) {
+        for ((i, keyword) in KeywordRotation.order(allKeywords, nsfwResumeAt).withIndex()) {
             if (android.os.SystemClock.uptimeMillis() > deadline) {
-                nsfwResumeAt = start + i
+                nsfwResumeAt = KeywordRotation.resumeAt(nsfwResumeAt, i, allKeywords.size)
                 return
             }
-            val keyword = allKeywords[(start + i) % allKeywords.size]
             try {
                 val matches = rootNode.findAccessibilityNodeInfosByText(keyword)
                 if (matches.isNullOrEmpty()) continue
@@ -887,8 +916,13 @@ class FreedomAccessibilityService : AccessibilityService() {
                 if (found) {
                     Log.i(TAG, "NSFW keyword '$keyword' found in $packageName")
                     lastNsfwBlockTime = now
-                    reelsOverlayPackage = packageName
-                    showInstantOverlay(packageName, "Explicit content blocked")
+                    nsfwResumeAt = 0
+                    // On main against currentPackage, as for reels.
+                    handler.post {
+                        if (currentPackage != packageName) return@post
+                        reelsOverlayPackage = packageName
+                        showInstantOverlay(packageName, "Explicit content blocked")
+                    }
                     return
                 }
             } catch (_: Exception) {}
@@ -1428,8 +1462,9 @@ class FreedomAccessibilityService : AccessibilityService() {
 }
 
 /**
- * One scan in flight, newest pending wins. [offer] returns true when the caller
- * should start the item now; [finish] hands back the item to run next, or
+ * One scan in flight, newest pending wins. [offer] says whether the caller
+ * should start the item now, and hands back any pending item it displaced so
+ * the caller can release it; [finish] hands back the item to run next, or
  * returns null and goes idle. Synchronized so an offer racing a finish can
  * never strand a pending item behind a slot that has just gone idle.
  */
@@ -1438,13 +1473,14 @@ internal class ScanSlot<T : Any> {
     private var pending: T? = null
 
     @Synchronized
-    fun offer(item: T): Boolean {
+    fun offer(item: T): Pair<Boolean, T?> {
         if (inFlight) {
+            val displaced = pending
             pending = item
-            return false
+            return false to displaced
         }
         inFlight = true
-        return true
+        return true to null
     }
 
     @Synchronized
@@ -1460,10 +1496,27 @@ internal class ScanSlot<T : Any> {
 internal class PerKeyRateLimit(private val intervalMs: Long) {
     private val lastAt = HashMap<String, Long>()
 
-    fun tryAcquire(key: String, now: Long): Boolean {
+    /** 0 if acquired now, otherwise how long until the next acquire can succeed. */
+    fun acquire(key: String, now: Long): Long {
         val last = lastAt[key]
-        if (last != null && now - last < intervalMs) return false
+        if (last != null && now - last < intervalMs) return last + intervalMs - now
         lastAt[key] = now
-        return true
+        return 0
     }
+}
+
+/**
+ * Keyword order for a scan that may run out of budget part way: each scan
+ * starts where the previous one stopped and wraps, so every keyword is reached
+ * within a few scans however long the list is.
+ */
+internal object KeywordRotation {
+    fun <T> order(keywords: List<T>, start: Int): List<T> {
+        if (keywords.isEmpty()) return keywords
+        val s = start.mod(keywords.size)
+        return keywords.drop(s) + keywords.take(s)
+    }
+
+    /** Start index for the next scan after one starting at [start] searched [searched] keywords. */
+    fun resumeAt(start: Int, searched: Int, size: Int): Int = if (size == 0) 0 else (start + searched).mod(size)
 }

@@ -123,6 +123,32 @@ class DomainBlocklistTest {
     }
 
     @Test
+    fun aDisabledCategoryKeepsItsDomainsButStopsBlocking() {
+        val list = DomainBlocklist()
+        list.addCategory("adult", listOf("adult.example"), replace = true)
+        list.addCategory("ads", listOf("ads.example"), replace = true)
+
+        list.setCategoryEnabled("adult", false)
+        assertFalse(list.isBlocked("www.adult.example"))
+        assertTrue(list.isBlocked("ads.example"), "other categories are unaffected")
+        assertEquals(1, list.size(), "a switched-off category is not counted as blocking")
+        assertTrue(list.hasCategory("adult"), "the set is kept for switching back on")
+
+        list.setCategoryEnabled("adult", true)
+        assertTrue(list.isBlocked("www.adult.example"), "back on without a re-push")
+        assertEquals(2, list.size())
+    }
+
+    @Test
+    fun aFlagSetBeforeTheCategoryLoadsStillApplies() {
+        // The tunnel restores the flags before the disk load installs the sets.
+        val list = DomainBlocklist()
+        list.setCategoryEnabled("adult", false)
+        list.putCategoryIfAbsent("adult", listOf("adult.example"))
+        assertFalse(list.isBlocked("adult.example"))
+    }
+
+    @Test
     fun suffixBoundariesAreRespected() {
         val list = DomainBlocklist()
         list.setDomains(listOf("example.com"))

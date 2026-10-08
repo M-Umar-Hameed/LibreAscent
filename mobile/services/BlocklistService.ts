@@ -169,6 +169,19 @@ export const BlocklistService = {
     }
 
     for (const category of state.categories) {
+      const masterOn =
+        category.id === "ads" ? true : state.adultBlockingEnabled;
+      try {
+        await FreedomVpn.setCategoryEnabled(
+          category.id,
+          masterOn && category.enabled,
+        );
+      } catch (e) {
+        console.warn(
+          `[BlocklistService] Failed to sync VPN category ${category.id} enabled:`,
+          e,
+        );
+      }
       // VPN-only categories are not held by the accessibility matcher.
       if (VPN_ONLY_CATEGORIES.has(category.id)) continue;
       try {
@@ -334,8 +347,16 @@ export const BlocklistService = {
     if (!category) return;
 
     const masterOn = categoryId === "ads" ? true : state.adultBlockingEnabled;
+    const active = enabled && masterOn;
     try {
-      if (enabled && masterOn) {
+      // Flipping the tunnel's flag keeps the domains it already holds; removing
+      // and re-streaming moved ~500k domains over the bridge on every toggle.
+      const held = await FreedomVpn.setCategoryEnabled(
+        categoryId,
+        active,
+      ).catch(() => false);
+      if (held) return;
+      if (active) {
         await FreedomVpn.removeCategory(categoryId);
         if (category.domains.length > 0) {
           await FreedomVpn.addCategory(categoryId, category.domains);

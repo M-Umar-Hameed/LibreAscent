@@ -121,11 +121,31 @@ class FreedomVpnService : VpnService() {
         private const val KEY_PAUSED_UNTIL = "vpn_paused_until"
 
         private const val KEY_SAFE_SEARCH = "safe_search"
+        private const val KEY_DISABLED_CATEGORIES = "disabled_categories"
 
         // One loader at a time: two starts in quick succession would otherwise
         // build the same category index concurrently.
         private val diskLoader = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
             Thread(task, "FreedomVPN-BlocklistLoad")
+        }
+
+        /**
+         * Switch a category on or off in the tunnel without touching its domains,
+         * in memory or on disk. Persisted so a watchdog or boot start honours it.
+         */
+        @Synchronized
+        fun setCategoryEnabled(context: Context, name: String, enabled: Boolean) {
+            blocklist.setCategoryEnabled(name, enabled)
+            val prefs = context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
+            val disabled = HashSet(prefs.getStringSet(KEY_DISABLED_CATEGORIES, emptySet()) ?: emptySet())
+            if (enabled) disabled.remove(name) else disabled.add(name)
+            prefs.edit().putStringSet(KEY_DISABLED_CATEGORIES, disabled).apply()
+        }
+
+        private fun restoreDisabledCategories(context: Context) {
+            context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
+                .getStringSet(KEY_DISABLED_CATEGORIES, emptySet())
+                ?.forEach { blocklist.setCategoryEnabled(it, false) }
         }
 
         fun setSafeSearch(context: Context, enabled: Boolean) {
@@ -610,6 +630,8 @@ class FreedomVpnService : VpnService() {
         // First, so a slow disk load cannot push it past the foreground-service
         // start deadline.
         startForeground(NOTIFICATION_ID, createNotification())
+
+        restoreDisabledCategories(this)
 
         // A watchdog or boot start has no JS behind it to fill the list. Off the
         // main thread, which the accessibility service shares: after a sync

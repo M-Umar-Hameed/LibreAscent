@@ -82,6 +82,10 @@ object BlocklistPersistence {
         indexFile(dir, name).delete()
     }
 
+    /** Whether a finalized copy of [name] is on disk for the next tunnel start. */
+    fun hasCategory(context: Context, name: String): Boolean =
+        categoryFile(dir(context), name).exists()
+
     fun deleteCategory(context: Context, name: String) = deleteCategory(dir(context), name)
 
     internal fun deleteCategory(dir: File, name: String) {

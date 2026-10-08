@@ -188,6 +188,21 @@ class FreedomVpnModule : Module() {
             promise.resolve(null)
         }
 
+        // Resolves whether the tunnel holds the category, in memory or on disk.
+        // When it does, the caller can skip re-streaming it.
+        AsyncFunction("setCategoryEnabled") { name: String, enabled: Boolean, promise: Promise ->
+            val context = appContext.reactContext
+                ?: run {
+                    promise.reject("ERR_NO_CONTEXT", "No React context", null)
+                    return@AsyncFunction
+                }
+            FreedomVpnService.setCategoryEnabled(context, name, enabled)
+            promise.resolve(
+                FreedomVpnService.blocklist.hasCategory(name) ||
+                    BlocklistPersistence.hasCategory(context, name)
+            )
+        }
+
         AsyncFunction("removeCategory") { name: String, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.removeCategory(name)

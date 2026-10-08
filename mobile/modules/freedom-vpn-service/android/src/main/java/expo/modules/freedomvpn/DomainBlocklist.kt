@@ -58,6 +58,10 @@ class DomainBlocklist {
     // the bulk of the app's Java heap. See HashedDomainSet.
     private val categories = ConcurrentHashMap<String, DomainSet>()
 
+    // Categories the user switched off. Their sets stay loaded so switching
+    // back on is instant instead of a re-stream of ~500k domains.
+    private val disabledCategories: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     // Whitelist — domains explicitly allowed (takes precedence over blocklist)
     @Volatile
     private var whitelist: Set<String> = emptySet()
@@ -95,8 +99,8 @@ class DomainBlocklist {
 
         if (matchesList(candidates, blockedDomains)) return true
 
-        for (categorySet in categories.values) {
-            if (matchesList(candidates, categorySet)) return true
+        for ((name, categorySet) in categories) {
+            if (name !in disabledCategories && matchesList(candidates, categorySet)) return true
         }
 
         return false
@@ -203,6 +207,13 @@ class DomainBlocklist {
         return categories.putIfAbsent(name, set) == null
     }
 
+    /** Whether [name] is consulted by [isBlocked]. Independent of whether it holds any domains. */
+    fun setCategoryEnabled(name: String, enabled: Boolean) {
+        if (enabled) disabledCategories.remove(name) else disabledCategories.add(name)
+    }
+
+    fun hasCategory(name: String): Boolean = categories.containsKey(name)
+
     /**
      * Remove a category and its domains from the blocklist.
      * Only removes domains that aren't in other active categories.
@@ -249,8 +260,8 @@ class DomainBlocklist {
         // categories is counted twice. De-duplicating would need a flattened
         // union set, roughly +37 MB per million domains in the VPN process.
         var total = blockedDomains.size
-        for (categorySet in categories.values) {
-            total += categorySet.size
+        for ((name, categorySet) in categories) {
+            if (name !in disabledCategories) total += categorySet.size
         }
         return total
     }

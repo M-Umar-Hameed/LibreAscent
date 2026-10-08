@@ -16,6 +16,7 @@ interface FreedomVpnModuleInterface {
   removeCategory(name: string): Promise<void>;
   // Absent on native builds older than the JS bundle.
   finalizeCategory?(name: string): Promise<void>;
+  setCategoryEnabled?(name: string, enabled: boolean): Promise<boolean>;
   setWhitelist(domains: string[]): Promise<void>;
   setSafeSearch(enabled: boolean): Promise<void>;
   getBlockedCount(): Promise<number>;
@@ -101,6 +102,19 @@ export async function removeCategory(name: string): Promise<void> {
 export async function finalizeCategory(name: string): Promise<void> {
   if (!FreedomVpnNative?.finalizeCategory) return;
   return FreedomVpnNative.finalizeCategory(name);
+}
+
+/**
+ * Switch a category on or off in the tunnel without dropping its domains.
+ * Resolves whether the tunnel holds the category; false also means this
+ * native build cannot toggle it, so the caller should push or remove it.
+ */
+export async function setCategoryEnabled(
+  name: string,
+  enabled: boolean,
+): Promise<boolean> {
+  if (!FreedomVpnNative?.setCategoryEnabled) return false;
+  return FreedomVpnNative.setCategoryEnabled(name, enabled);
 }
 
 export async function setWhitelist(domains: string[]): Promise<void> {

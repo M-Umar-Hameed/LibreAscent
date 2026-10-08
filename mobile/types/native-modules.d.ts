@@ -18,6 +18,10 @@ declare module "freedom-vpn-service" {
   ): Promise<void>;
   export function removeCategory(name: string): Promise<void>;
   export function finalizeCategory(name: string): Promise<void>;
+  export function setCategoryEnabled(
+    name: string,
+    enabled: boolean,
+  ): Promise<boolean>;
   export function setWhitelist(domains: string[]): Promise<void>;
   export function setSafeSearch(enabled: boolean): Promise<void>;
   export function getBlockedCount(): Promise<number>;

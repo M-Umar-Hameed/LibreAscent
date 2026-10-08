@@ -1,5 +1,6 @@
 import * as SQLite from "expo-sqlite";
 import { flushPending, incrementPending } from "./blockedCountAccumulator";
+import { saveSourceDomainsInChunks } from "./blocklistChunks";
 import { isUnchanged, recordWritten } from "./dedupeWrite";
 
 // Create or open the database.
@@ -228,15 +229,16 @@ export function contentFingerprint(content: string): string {
   return h.toString(36);
 }
 
+// COUNT(DISTINCT) walks the category's whole index range. The cached rows
+// only change in saveSourceDomains and pruneDisabledSources, which clear this.
+const distinctCounts = new Map<string, number>();
+
+let saveChain: Promise<void> = Promise.resolve();
+
 /**
- * Replace cached domains for a source and update its HTTP cache headers.
- * Uses batch INSERT for speed (~300 rows per statement to stay under
- * SQLite's 999-variable limit).
- *
- * ponytail: parse + insert still run on the JS thread, so a ~1M-domain source
- * stalls it for the whole transaction. Upgrade path is fetching, parsing and
- * inserting natively; a yield here would hold the transaction open across
- * unrelated writes.
+ * Replace cached domains for a source and update its HTTP cache headers, in
+ * chunks that yield to the UI (see saveSourceDomainsInChunks). Saves run one
+ * at a time so two refreshes cannot interleave chunks of the same source.
  */
 export function saveSourceDomains(
   sourceId: string,
@@ -245,43 +247,27 @@ export function saveSourceDomains(
   lastModified: string,
   contentHash: string,
   domains: string[],
-): void {
-  db.execSync("BEGIN TRANSACTION");
-  try {
-    db.runSync("DELETE FROM cached_domains WHERE source_id = ?", sourceId);
-
-    const BATCH = 300;
-    for (let i = 0; i < domains.length; i += BATCH) {
-      const slice = domains.slice(i, i + BATCH);
-      const placeholders = slice.map(() => "(?,?,?)").join(",");
-      const params: string[] = [];
-      for (const d of slice) {
-        params.push(sourceId, categoryId, d);
-      }
-      db.runSync(
-        `INSERT INTO cached_domains (source_id, category_id, domain) VALUES ${placeholders}`,
-        params,
+): Promise<void> {
+  const run = async (): Promise<void> => {
+    distinctCounts.clear();
+    try {
+      await saveSourceDomainsInChunks(
+        db,
+        sourceId,
+        categoryId,
+        etag,
+        lastModified,
+        contentHash,
+        domains,
       );
+    } finally {
+      // A count read between chunks saw a half-written source.
+      distinctCounts.clear();
     }
-
-    db.runSync(
-      `INSERT INTO source_cache (source_id, etag, last_modified, content_hash)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(source_id) DO UPDATE SET
-         etag = excluded.etag,
-         last_modified = excluded.last_modified,
-         content_hash = excluded.content_hash`,
-      sourceId,
-      etag,
-      lastModified,
-      contentHash,
-    );
-
-    db.execSync("COMMIT");
-  } catch (e) {
-    db.execSync("ROLLBACK");
-    throw e;
-  }
+  };
+  const saved = saveChain.then(run);
+  saveChain = saved.catch(() => undefined);
+  return saved;
 }
 
 /**
@@ -307,11 +293,15 @@ export function readCachedDomainsBatch(
  * Total unique cached domain count for a category.
  */
 export function getCachedDomainCount(categoryId: string): number {
+  const known = distinctCounts.get(categoryId);
+  if (known !== undefined) return known;
   const row = db.getFirstSync<{ c: number }>(
     "SELECT COUNT(DISTINCT domain) as c FROM cached_domains WHERE category_id = ?",
     categoryId,
   );
-  return row?.c ?? 0;
+  const count = row?.c ?? 0;
+  distinctCounts.set(categoryId, count);
+  return count;
 }
 
 /** Whether a category has any cached domain. O(1); no full scan. */
@@ -343,6 +333,7 @@ export function hasSourceDomains(
  * Remove cached domains for sources no longer in the enabled list.
  */
 export function pruneDisabledSources(enabledSourceIds: string[]): void {
+  distinctCounts.clear();
   if (enabledSourceIds.length === 0) {
     db.execSync("DELETE FROM cached_domains");
     db.execSync("DELETE FROM source_cache");

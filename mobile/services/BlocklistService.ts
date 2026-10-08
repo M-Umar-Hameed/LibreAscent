@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { parseLinesInChunks } from "@/db/blocklistChunks";
 import {
   contentFingerprint,
   getCachedDomainCount,
@@ -76,6 +77,61 @@ function githubRawMirror(url: string): string | null {
   if (!m) return null;
   const [, owner, repo, ref, path] = m;
   return `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${path}`;
+}
+
+/** One line of a hosts, domains or adblock-style list; null when it holds no domain. */
+function parseDomainLine(line: string): string | null {
+  let trimmed = line.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith("#") ||
+    trimmed.startsWith("!") ||
+    trimmed.startsWith("[")
+  ) {
+    return null;
+  }
+
+  if (trimmed.startsWith("0.0.0.0 ") || trimmed.startsWith("127.0.0.1 ")) {
+    trimmed = trimmed.split(/\s+/)[1] || "";
+    if (!trimmed) return null;
+  }
+
+  if (
+    trimmed.includes("##") ||
+    trimmed.includes("#?#") ||
+    trimmed.startsWith("@@")
+  ) {
+    return null;
+  }
+
+  const commentIdx = trimmed.indexOf("#");
+  if (commentIdx > 0) {
+    trimmed = trimmed.substring(0, commentIdx).trim();
+  }
+
+  if (trimmed.startsWith("||")) {
+    trimmed = trimmed.substring(2);
+  }
+
+  const caretIdx = trimmed.indexOf("^");
+  if (caretIdx > 0) {
+    trimmed = trimmed.substring(0, caretIdx);
+  }
+
+  const dollarIdx = trimmed.indexOf("$");
+  if (dollarIdx > 0) {
+    trimmed = trimmed.substring(0, dollarIdx);
+  }
+
+  trimmed = trimmed
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "")
+    .replace(/:.*$/, "")
+    .toLowerCase();
+
+  return trimmed && trimmed.includes(".") && !trimmed.includes(" ")
+    ? trimmed
+    : null;
 }
 
 /**
@@ -368,59 +424,9 @@ export const BlocklistService = {
    */
   parseDomainList: (content: string): string[] => {
     const domains: string[] = [];
-    const lines = content.split("\n");
-    for (const line of lines) {
-      let trimmed = line.trim();
-      if (
-        !trimmed ||
-        trimmed.startsWith("#") ||
-        trimmed.startsWith("!") ||
-        trimmed.startsWith("[")
-      ) {
-        continue;
-      }
-
-      if (trimmed.startsWith("0.0.0.0 ") || trimmed.startsWith("127.0.0.1 ")) {
-        trimmed = trimmed.split(/\s+/)[1] || "";
-        if (!trimmed) continue;
-      }
-
-      if (
-        trimmed.includes("##") ||
-        trimmed.includes("#?#") ||
-        trimmed.startsWith("@@")
-      ) {
-        continue;
-      }
-
-      const commentIdx = trimmed.indexOf("#");
-      if (commentIdx > 0) {
-        trimmed = trimmed.substring(0, commentIdx).trim();
-      }
-
-      if (trimmed.startsWith("||")) {
-        trimmed = trimmed.substring(2);
-      }
-
-      const caretIdx = trimmed.indexOf("^");
-      if (caretIdx > 0) {
-        trimmed = trimmed.substring(0, caretIdx);
-      }
-
-      const dollarIdx = trimmed.indexOf("$");
-      if (dollarIdx > 0) {
-        trimmed = trimmed.substring(0, dollarIdx);
-      }
-
-      trimmed = trimmed
-        .replace(/^https?:\/\//, "")
-        .replace(/\/.*$/, "")
-        .replace(/:.*$/, "")
-        .toLowerCase();
-
-      if (trimmed && trimmed.includes(".") && !trimmed.includes(" ")) {
-        domains.push(trimmed);
-      }
+    for (const line of content.split("\n")) {
+      const domain = parseDomainLine(line);
+      if (domain) domains.push(domain);
     }
     return domains;
   },
@@ -646,7 +652,7 @@ export const BlocklistService = {
         const list =
           format === "keywords"
             ? BlocklistService.parseKeywordList(content)
-            : BlocklistService.parseDomainList(content);
+            : await parseLinesInChunks(content, parseDomainLine);
         // Keyword lists are legitimately short; domain lists are not.
         if (format !== "keywords" && list.length < MIN_PLAUSIBLE_DOMAINS) {
           throw new Error(`only ${list.length} domains parsed`);
@@ -720,6 +726,23 @@ export const BlocklistService = {
       .join("|"),
 
   /**
+   * A refresh killed between saveSourceDomains chunks leaves the source's rows
+   * half-written and its cache row gone. Nothing else produces rows without a
+   * cache row.
+   */
+  hasPartialSource: (categoryId: string): boolean =>
+    useBlockingStore
+      .getState()
+      .sources.some(
+        (s) =>
+          s.enabled &&
+          s.format !== "keywords" &&
+          BlocklistService.getCategoryForSource(s) === categoryId &&
+          getSourceCache(s.id) === null &&
+          hasSourceDomains(s.id, categoryId),
+      ),
+
+  /**
    * Push ALL enabled categories from SQLite cache to native on app launch.
    * Fast path: skips if cache is empty (fresh install — updateBlocklists will fill it).
    */
@@ -752,12 +775,14 @@ export const BlocklistService = {
       // Both native sides persist categories to disk and reload them on their
       // own, so a launch re-pushes only when the cache changed since the last
       // push. Re-sending every time cost 72 s and ~250 MB of JS heap per UI
-      // open on a 515k-domain category.
+      // open on a 515k-domain category. A half-written cache is not pushed
+      // over a full native copy; the next refresh refetches that source.
       if (
         options?.skipMatchingNative &&
         vpnLoaded &&
         existingNativeCount > 0 &&
-        (await AsyncStorage.getItem(fpKey)) === fp
+        ((await AsyncStorage.getItem(fpKey)) === fp ||
+          BlocklistService.hasPartialSource(category.id))
       ) {
         useBlockingStore
           .getState()
@@ -914,7 +939,7 @@ export const BlocklistService = {
             continue;
           }
 
-          saveSourceDomains(
+          await saveSourceDomains(
             source.id,
             categoryId,
             result.etag,

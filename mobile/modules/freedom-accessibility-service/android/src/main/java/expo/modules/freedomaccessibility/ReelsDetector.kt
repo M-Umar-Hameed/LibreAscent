@@ -2,7 +2,6 @@ package expo.modules.freedomaccessibility
 
 import android.content.Context
 import android.util.Log
-import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
 import org.json.JSONObject
@@ -78,15 +77,15 @@ class ReelsDetector {
     /**
      * Detect if the user is currently in a reels/shorts section.
      *
-     * @param event The accessibility event
      * @param rootNode The root node of the active window
      * @param packageName The app's package name
+     * @param deadline uptimeMillis after which no further node search starts
      * @return Detection result with app name and whether reels are detected
      */
     fun detectReels(
-        event: AccessibilityEvent,
         rootNode: AccessibilityNodeInfo?,
-        packageName: String
+        packageName: String,
+        deadline: Long
     ): DetectionResult? {
         val config = reelsApps[packageName] ?: return null
 
@@ -103,7 +102,9 @@ class ReelsDetector {
             return null
         }
 
-        val isInReels = checkForReelsNodes(rootNode, packageName, config.detectionNodes)
+        // Out of budget before a match is not evidence of having left reels, and
+        // reporting it as such would drop the overlay.
+        val isInReels = checkForReelsNodes(rootNode, packageName, config.detectionNodes, deadline) ?: return null
 
         // Only report state changes to avoid spamming
         val previousState = lastDetectionState[packageName] ?: false
@@ -122,14 +123,18 @@ class ReelsDetector {
 
     /**
      * Search the node tree for any of the detection node IDs.
+     *
+     * @return null when the deadline passed before the answer was known.
      */
     private fun checkForReelsNodes(
         rootNode: AccessibilityNodeInfo,
         packageName: String,
-        detectionNodes: List<String>
-    ): Boolean {
+        detectionNodes: List<String>,
+        deadline: Long
+    ): Boolean? {
 
         for (nodeId in detectionNodes) {
+            if (overDeadline(deadline)) return null
             val fullResourceId = "$packageName:id/$nodeId"
             try {
                 val nodes = rootNode.findAccessibilityNodeInfosByViewId(fullResourceId)
@@ -151,7 +156,7 @@ class ReelsDetector {
         }
 
         // Fallback: check content descriptions and class names for reels keywords
-        return scanNodeTreeForReelsHints(rootNode, packageName)
+        return scanNodeTreeForReelsHints(rootNode, packageName, deadline)
     }
 
     /**
@@ -159,12 +164,15 @@ class ReelsDetector {
      * entire node tree for reels keywords. This is much more reliable than
      * manual traversal since it searches all depths and checks both text
      * and contentDescription.
+     *
+     * @return null when the deadline passed before every keyword was searched.
      */
-    private fun scanNodeTreeForReelsHints(node: AccessibilityNodeInfo?, packageName: String): Boolean {
+    private fun scanNodeTreeForReelsHints(node: AccessibilityNodeInfo?, packageName: String, deadline: Long): Boolean? {
         if (node == null) return false
 
         try {
             for (keyword in REELS_KEYWORDS) {
+                if (overDeadline(deadline)) return null
                 val matches = node.findAccessibilityNodeInfosByText(keyword)
                 if (matches.isNullOrEmpty()) continue
 
@@ -224,10 +232,14 @@ class ReelsDetector {
 
     /**
      * Reset detection state (e.g., when user navigates away from a reels app).
+     *
+     * @return true if the package was last seen in reels.
      */
-    fun resetState(packageName: String) {
-        lastDetectionState.remove(packageName)
+    fun resetState(packageName: String): Boolean {
+        return lastDetectionState.remove(packageName) == true
     }
+
+    private fun overDeadline(deadline: Long) = android.os.SystemClock.uptimeMillis() > deadline
 
     data class DetectionResult(
         val appName: String,

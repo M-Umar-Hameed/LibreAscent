@@ -2,6 +2,7 @@ package expo.modules.freedomaccessibility
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ReelsDetectorTest {
@@ -33,6 +34,13 @@ class ReelsDetectorTest {
 
         assertEquals(1, restored.size)
         assertTrue(restored[0].detectionNodes.isEmpty())
+    }
+
+    @Test
+    fun resetOfAnAppNeverSeenInReelsReportsNoChange() {
+        // Every app switch resets the outgoing app; only one that was in reels
+        // should produce a "left reels" broadcast.
+        assertFalse(ReelsDetector().resetState("com.android.chrome"))
     }
 
     @Test

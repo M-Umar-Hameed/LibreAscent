@@ -20,7 +20,6 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import java.util.concurrent.atomic.AtomicBoolean
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -46,25 +45,32 @@ class FreedomAccessibilityService : AccessibilityService() {
     // Instant overlay drawn directly by the accessibility service
     private var windowManager: WindowManager? = null
     private var instantOverlay: FrameLayout? = null
-    private var isInstantOverlayShowing = false
-    private var reelsOverlayPackage: String? = null
+    // Written on the main thread, read by the scan thread before an NSFW scan.
+    @Volatile private var isInstantOverlayShowing = false
+    // Set by browser, reels and NSFW scans on the scan thread, read on main.
+    @Volatile private var reelsOverlayPackage: String? = null
     private val handler = Handler(Looper.getMainLooper())
 
-    // Browser URL extraction walks the remote node tree and makes cross-process
-    // lookups that each wait up to 5s; on the main thread that produced 20s
-    // service-start ANRs. It runs here, one event at a time: a burst arriving
-    // while a scan is in flight coalesces into the trailing full scan.
+    // Browser URL extraction, reels detection and the NSFW keyword scan all
+    // make cross-process node lookups that each wait up to 5s; on the main
+    // thread that produced 20s service-start ANRs and phone-wide lag in reels
+    // apps. They run here, each kind in its own slot: one scan in flight and
+    // the newest event pending, so a burst of one kind cannot starve another.
     private val scanThread = HandlerThread("FreedomA11yScan").apply { start() }
     private val scanHandler = Handler(scanThread.looper)
-    private val browserScanInFlight = AtomicBoolean(false)
 
-    // The newest event dropped while a scan was in flight. It gets a full
-    // handleBrowserEvent pass once the scan finishes, so the whitelist is
-    // computed from the page; a trailing full scan without that context blocked
-    // a whitelisted site on a keyword in its body text.
-    @Volatile private var pendingBrowserEvent: AccessibilityEvent? = null
-    @Volatile private var pendingBrowserPackage = ""
-    @Volatile private var pendingScopeUpgraded = false
+    // A pending browser event gets a full handleBrowserEvent pass once the scan
+    // in flight finishes, so the whitelist is computed from the page; a trailing
+    // full scan without that context blocked a whitelisted site on a keyword in
+    // its body text.
+    private class BrowserScan(val event: AccessibilityEvent, val packageName: String, val scopeUpgraded: Boolean)
+    private val browserSlot = ScanSlot<BrowserScan>()
+    private val reelsSlot = ScanSlot<String>()
+    private val nsfwSlot = ScanSlot<String>()
+    // Main thread only: gates NSFW scans before any root is fetched.
+    private val nsfwRateLimit = PerKeyRateLimit(NSFW_SCAN_MIN_INTERVAL_MS)
+    // Scan thread only: where the next NSFW scan resumes after one ran out of budget.
+    private var nsfwResumeAt = 0
     private var packageAddedReceiver: PackageAddedReceiver? = null
     @Volatile private var lastUrlCheckTime: Long = 0
     @Volatile private var consecutiveBlockCount = 0
@@ -131,6 +137,13 @@ class FreedomAccessibilityService : AccessibilityService() {
         // so a page is recognised up to this much late but never skipped. A
         // per-package or per-URL scan budget if that latency ever matters.
         private const val FULL_SCAN_MIN_INTERVAL_MS = 750L
+        // Per-event budget for reels detection and the NSFW scan, checked
+        // between node searches.
+        private const val APP_SCAN_BUDGET_MS = 300L
+        // Reddit/X emit up to ten content-changed events a second while
+        // scrolling and each scan is one node search per keyword; a missed
+        // frame is fine because scrolling keeps producing events.
+        private const val NSFW_SCAN_MIN_INTERVAL_MS = 500L
 
         // Built-in keywords for NSFW app scanning (Reddit, Twitter labels)
         private val NSFW_BUILTIN_KEYWORDS = listOf(
@@ -384,8 +397,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             if (packageName != currentPackage) {
                 // User switched apps - reset reels state for both old and new app
                 // so detection fires fresh when (re-)entering a reels app.
-                if (currentPackage.isNotEmpty()) {
-                    reelsDetector.resetState(currentPackage)
+                if (currentPackage.isNotEmpty() && reelsDetector.resetState(currentPackage)) {
                     broadcastReelsDetected(ReelsDetector.DetectionResult("App", currentPackage, false))
                 }
                 reelsDetector.resetState(packageName)
@@ -426,15 +438,9 @@ class FreedomAccessibilityService : AccessibilityService() {
         }
 
         try {
-            val rootNode = rootInActiveWindow
-            var handedOff = false
-
-            // Check Device Admin activity by class name (doesn't need rootNode)
+            // Check Device Admin activity by class name (doesn't need a root)
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-                if (settingsProtector.checkActivityClass(this, event)) {
-                    rootNode?.recycle()
-                    return
-                }
+                if (settingsProtector.checkActivityClass(this, event)) return
             }
 
             // Route to appropriate handler
@@ -458,28 +464,23 @@ class FreedomAccessibilityService : AccessibilityService() {
                 }
                 shouldHandleAsBrowser -> {
                     // The system recycles the event once this returns.
-                    val eventCopy = AccessibilityEvent.obtain(event)
-                    if (browserScanInFlight.compareAndSet(false, true)) {
-                        handedOff = true
-                        postBrowserScan(eventCopy, rootNode, packageName, scopeUpgradedThisEvent)
-                    } else {
-                        pendingBrowserEvent = eventCopy
-                        pendingBrowserPackage = packageName
-                        pendingScopeUpgraded = scopeUpgradedThisEvent
-                    }
+                    val scan = BrowserScan(AccessibilityEvent.obtain(event), packageName, scopeUpgradedThisEvent)
+                    postScan(browserSlot, scan, ::runBrowserScan)
                 }
                 reelsDetector.isReelsApp(packageName) -> {
-                    handleReelsEvent(event, rootNode, packageName)
+                    postScan(reelsSlot, packageName, ::handleReelsEvent)
                 }
                 isNsfwMonitored -> {
-                    handleNsfwScan(rootNode, packageName)
+                    if (nsfwRateLimit.tryAcquire(packageName, android.os.SystemClock.uptimeMillis())) {
+                        postScan(nsfwSlot, packageName, ::handleNsfwScan)
+                    }
                 }
                 isSettingsApp -> {
+                    val rootNode = rootInActiveWindow
                     settingsProtector.checkSettingsScreen(this, packageName, rootNode)
+                    rootNode?.recycle()
                 }
             }
-
-            if (!handedOff) rootNode?.recycle()
         } catch (e: Exception) {
             Log.w(TAG, "Error processing accessibility event: ${e.message}")
         }
@@ -498,32 +499,35 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Runs one extraction on the scan thread. On completion, if a burst left an
-     * event pending, that one runs next against the current root without ever
-     * releasing the in-flight flag, so the newest event always gets a full pass
-     * and nothing queues beyond it.
+     * Runs [item] on the scan thread unless a scan of the same kind is in
+     * flight, in which case it becomes that slot's pending item. On completion
+     * the pending item runs next without the slot ever going idle, so the newest
+     * event always gets a full pass and nothing queues beyond it.
      */
-    private fun postBrowserScan(
-        event: AccessibilityEvent,
-        root: android.view.accessibility.AccessibilityNodeInfo?,
-        packageName: String,
-        scopeUpgraded: Boolean
-    ) {
+    private fun <T : Any> postScan(slot: ScanSlot<T>, item: T, scan: (T) -> Unit) {
+        if (slot.offer(item)) runScan(slot, item, scan)
+    }
+
+    private fun <T : Any> runScan(slot: ScanSlot<T>, item: T, scan: (T) -> Unit) {
         scanHandler.post {
             try {
-                handleBrowserEvent(event, root, packageName, scopeUpgraded)
+                scan(item)
             } catch (e: Exception) {
-                Log.w(TAG, "Browser scan failed: ${e.message}")
+                Log.w(TAG, "Scan failed: ${e.message}")
             } finally {
-                root?.recycle()
-                val next = pendingBrowserEvent
-                if (next != null) {
-                    pendingBrowserEvent = null
-                    postBrowserScan(next, rootInActiveWindow, pendingBrowserPackage, pendingScopeUpgraded)
-                } else {
-                    browserScanInFlight.set(false)
-                }
+                slot.finish()?.let { runScan(slot, it, scan) }
             }
+        }
+    }
+
+    // The root is fetched here rather than on the main thread: during a scroll
+    // burst most events end up pending, and a root fetched for them was thrown away.
+    private fun runBrowserScan(scan: BrowserScan) {
+        val root = rootInActiveWindow
+        try {
+            handleBrowserEvent(scan.event, root, scan.packageName, scan.scopeUpgraded)
+        } finally {
+            root?.recycle()
         }
     }
 
@@ -808,12 +812,14 @@ class FreedomAccessibilityService : AccessibilityService() {
     /**
      * Handle a reels app event - detect reels/shorts section.
      */
-    private fun handleReelsEvent(
-        event: AccessibilityEvent,
-        rootNode: android.view.accessibility.AccessibilityNodeInfo?,
-        packageName: String
-    ) {
-        val result = reelsDetector.detectReels(event, rootNode, packageName) ?: return
+    private fun handleReelsEvent(packageName: String) {
+        val rootNode = rootInActiveWindow ?: return
+        val deadline = android.os.SystemClock.uptimeMillis() + APP_SCAN_BUDGET_MS
+        val result = try {
+            reelsDetector.detectReels(rootNode, packageName, deadline)
+        } finally {
+            rootNode.recycle()
+        } ?: return
 
         if (result.isInReels) {
             Log.i(TAG, "Reels detected in ${result.appName}")
@@ -830,21 +836,42 @@ class FreedomAccessibilityService : AccessibilityService() {
 
     private var lastNsfwBlockTime = 0L
 
-    private fun handleNsfwScan(
-        rootNode: android.view.accessibility.AccessibilityNodeInfo?,
-        packageName: String
-    ) {
-        if (rootNode == null || isInstantOverlayShowing) return
+    private fun handleNsfwScan(packageName: String) {
+        if (isInstantOverlayShowing) return
 
         val now = System.currentTimeMillis()
         if (now - lastNsfwBlockTime < 2000) return
 
+        val rootNode = rootInActiveWindow ?: return
+        try {
+            // The event may have been pending while the user switched apps.
+            if (rootNode.packageName?.toString() != packageName) return
+            scanNsfwKeywords(rootNode, packageName, now)
+        } finally {
+            rootNode.recycle()
+        }
+    }
+
+    private fun scanNsfwKeywords(
+        rootNode: android.view.accessibility.AccessibilityNodeInfo,
+        packageName: String,
+        now: Long
+    ) {
         // Combine built-in NSFW labels with user keywords
         val allKeywords = NSFW_BUILTIN_KEYWORDS + contentMatcher.getKeywords()
+        val deadline = android.os.SystemClock.uptimeMillis() + APP_SCAN_BUDGET_MS
+        // A scan that runs out of budget hands the rest of the list to the next
+        // one, so a long keyword list is still covered within a few scans.
+        val start = nsfwResumeAt % allKeywords.size
 
         // ponytail: one IPC per keyword; a single tree walk would mean
         // reimplementing Android's own text-match semantics
-        for (keyword in allKeywords) {
+        for (i in allKeywords.indices) {
+            if (android.os.SystemClock.uptimeMillis() > deadline) {
+                nsfwResumeAt = start + i
+                return
+            }
+            val keyword = allKeywords[(start + i) % allKeywords.size]
             try {
                 val matches = rootNode.findAccessibilityNodeInfosByText(keyword)
                 if (matches.isNullOrEmpty()) continue
@@ -866,6 +893,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 }
             } catch (_: Exception) {}
         }
+        nsfwResumeAt = 0
     }
 
     /**
@@ -1396,5 +1424,46 @@ class FreedomAccessibilityService : AccessibilityService() {
         sharedSettingsProtector = null
         Log.i(TAG, "Freedom Accessibility Service destroyed")
         super.onDestroy()
+    }
+}
+
+/**
+ * One scan in flight, newest pending wins. [offer] returns true when the caller
+ * should start the item now; [finish] hands back the item to run next, or
+ * returns null and goes idle. Synchronized so an offer racing a finish can
+ * never strand a pending item behind a slot that has just gone idle.
+ */
+internal class ScanSlot<T : Any> {
+    private var inFlight = false
+    private var pending: T? = null
+
+    @Synchronized
+    fun offer(item: T): Boolean {
+        if (inFlight) {
+            pending = item
+            return false
+        }
+        inFlight = true
+        return true
+    }
+
+    @Synchronized
+    fun finish(): T? {
+        val next = pending
+        pending = null
+        if (next == null) inFlight = false
+        return next
+    }
+}
+
+/** At most one acquire per [intervalMs] per key. Not thread-safe. */
+internal class PerKeyRateLimit(private val intervalMs: Long) {
+    private val lastAt = HashMap<String, Long>()
+
+    fun tryAcquire(key: String, now: Long): Boolean {
+        val last = lastAt[key]
+        if (last != null && now - last < intervalMs) return false
+        lastAt[key] = now
+        return true
     }
 }

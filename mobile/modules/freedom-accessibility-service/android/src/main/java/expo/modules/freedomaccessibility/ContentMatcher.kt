@@ -70,8 +70,9 @@ class ContentMatcher {
         "croxyproxy.com", "proxysite.com", "kproxy.com", "hidester.com",
         "proxyium.com", "blockaway.net", "4everproxy.com"
     )
+    private val webProxySuffixes = webProxyHosts.map { ".$it" }
     private val proxyTargetParams = setOf("u", "url", "q")
-    private val waybackPathPattern = Regex("^/web/[^/]+/(.+)")
+    private val waybackPathPattern = Regex("^/web/(?:[0-9*]+[a-z_]*/)?(.+)")
 
     // Look-alikes folded for the second keyword pass: foldFrom[i] -> foldTo[i].
     private val foldFrom = "013457@\$аеорсухіјѕ"
@@ -140,13 +141,16 @@ class ContentMatcher {
                     return MatchResult(true, MatchType.DOMAIN, embeddedDomain)
                 }
 
-                // Keyword check — skip if context, domain, proxied target, or any embedded domain is whitelisted
+                // Keyword check — skip if context, domain, proxied target, or any embedded domain is whitelisted.
+                // A whitelisted domain typed into a search query must not switch the query check off.
+                val isSearchEngine = searchEngineHostPattern.matches(domain)
+                val whitelistScanText = if (isSearchEngine) normalized.substringBefore('?') else normalized
                 if (contextWhitelisted || (domain.isNotEmpty() && isDomainWhitelisted(domain)) ||
-                    isDomainWhitelisted(targetDomain) || containsWhitelistedDomain(normalized)) {
+                    isDomainWhitelisted(targetDomain) || containsWhitelistedDomain(whitelistScanText)) {
                     continue
                 }
                 // On a search engine only the query itself is checked, not the rest of the URL.
-                val keywordText = if (searchEngineHostPattern.matches(domain)) {
+                val keywordText = if (isSearchEngine) {
                     queryValues(normalized, searchQueryParams).joinToString(" ")
                 } else normalized
                 val matchedKeyword = findMatchingKeyword(keywordText)
@@ -205,7 +209,7 @@ class ContentMatcher {
         if (host == "web.archive.org") {
             return waybackPathPattern.find(rest)?.let { normalizeUrl(it.groupValues[1]) }
         }
-        val isWebProxy = webProxyHosts.any { host == it || host.endsWith(".$it") } ||
+        val isWebProxy = host in webProxyHosts || webProxySuffixes.any { host.endsWith(it) } ||
             (host == "hide.me" && rest.contains("/proxy"))
         if (isWebProxy) {
             return queryValues(url, proxyTargetParams).firstOrNull()?.let { normalizeUrl(it) }
@@ -367,7 +371,8 @@ class ContentMatcher {
         for (keyword in blockedKeywords) {
             val lowerKeyword = keyword.lowercase()
             if (lowerKeyword.length > 3 &&
-                (compactText.contains(lowerKeyword) || foldedCompactText.contains(lowerKeyword))
+                (compactText.contains(lowerKeyword) ||
+                    foldedMatchHasLetter(compactText, foldedCompactText, lowerKeyword))
             ) {
                 // Verify it's not a false positive in the original text (to be safe)
                 return lowerKeyword
@@ -389,6 +394,22 @@ class ContentMatcher {
         return chars?.let { String(it) } ?: text
     }
 
+    /**
+     * Whether some occurrence of [keyword] in [folded] covers at least one letter
+     * of [original]. Folding is 1:1, so indices line up; without this, pure
+     * digits such as "$71.75" would fold into "stits".
+     */
+    private fun foldedMatchHasLetter(original: String, folded: String, keyword: String): Boolean {
+        var start = folded.indexOf(keyword)
+        while (start >= 0) {
+            for (i in start until start + keyword.length) {
+                if (original[i].isLetter()) return true
+            }
+            start = folded.indexOf(keyword, start + 1)
+        }
+        return false
+    }
+
     private fun findMatchingKeyword(url: String): String? {
         val lowerUrl = url.lowercase()
         matchKeywords(lowerUrl, minKeywordLength = 0)?.let { return it }
@@ -397,17 +418,20 @@ class ContentMatcher {
         // digits would let IDs such as "5ex" match "sex".
         val folded = foldLookalikes(lowerUrl)
         if (folded === lowerUrl) return null
-        return matchKeywords(folded, minKeywordLength = 4)
+        return matchKeywords(folded, minKeywordLength = 4, original = lowerUrl)
     }
 
-    private fun matchKeywords(lowerUrl: String, minKeywordLength: Int): String? {
+    /** [original] is the unfolded text when [lowerUrl] is a folded copy. */
+    private fun matchKeywords(lowerUrl: String, minKeywordLength: Int, original: String? = null): String? {
         var textBlocks: List<String>? = null
 
         for (keyword in blockedKeywords) {
             val lowerKeyword = keyword.lowercase()
             if (lowerKeyword.length < minKeywordLength) continue
 
-            if (lowerUrl.contains(lowerKeyword)) {
+            if (lowerUrl.contains(lowerKeyword) &&
+                (original == null || foldedMatchHasLetter(original, lowerUrl, lowerKeyword))
+            ) {
                 var hasValidBlock = false
                 // Surrounding context (alphanumeric block)
                 val blocks = textBlocks ?: lowerUrl.split(nonAlphanumericPattern).also { textBlocks = it }
@@ -567,7 +591,9 @@ class ContentMatcher {
     private fun cleanPkg(pkg: String): String {
         // getAppConfig runs for every accessibility event; real package names
         // are already clean, so skip the regex and allocations for them.
-        if (pkg.all { it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '_' }) return pkg
+        if (pkg.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '.' || it == '_' }) {
+            return pkg.lowercase()
+        }
         return pkg.replace(invisibleCharsPattern, "")
             .trim()
             .lowercase()

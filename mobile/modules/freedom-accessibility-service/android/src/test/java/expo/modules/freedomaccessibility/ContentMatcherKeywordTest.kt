@@ -112,4 +112,15 @@ class ContentMatcherKeywordTest {
 
         assertEquals("porn", matcher.findMatchingKeywordDirectly("watch p 0 r n now"))
     }
+
+    @Test
+    fun foldingNeverTurnsPureDigitsIntoAKeyword() {
+        val matcher = ContentMatcher()
+        matcher.setKeywordsForTest(listOf("tits"))
+
+        assertNull(matcher.findMatchingKeywordForTest("shop.com/item/27175"))
+        assertNull(matcher.findMatchingKeywordDirectly("Price: \$71.75"))
+        assertEquals("tits", matcher.findMatchingKeywordForTest("example.com/t1ts"))
+        assertEquals("tits", matcher.findMatchingKeywordDirectly("see t 1 t s"))
+    }
 }

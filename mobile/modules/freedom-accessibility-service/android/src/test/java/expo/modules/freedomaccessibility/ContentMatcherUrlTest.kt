@@ -46,11 +46,20 @@ class ContentMatcherUrlTest {
     }
 
     @Test
+    fun whitelistedDomainInSearchQueryDoesNotDisableQueryCheck() {
+        val m = matcher(keywords = listOf("porn"))
+        m.setWhitelist(listOf("wikipedia.org"))
+
+        m.assertBlocked("google.com/search?q=porn+wikipedia.org", ContentMatcher.MatchType.KEYWORD, "porn")
+    }
+
+    @Test
     fun translateProxyIsUnwrappedToTheOriginalDomain() {
         val m = matcher(domains = listOf("blocked.com", "my-site.com"))
 
         m.assertBlocked("www-blocked-com.translate.goog/x?_x_tr_sl=auto", ContentMatcher.MatchType.DOMAIN, "blocked.com")
         m.assertBlocked("my--site-com.translate.goog", ContentMatcher.MatchType.DOMAIN, "my-site.com")
+        m.assertBlocked("www-blocked-com.translate.goog:443/x", ContentMatcher.MatchType.DOMAIN, "blocked.com")
         assertFalse(m.isUrlBlocked("www-allowed-com.translate.goog/x").blocked)
     }
 
@@ -60,7 +69,17 @@ class ContentMatcherUrlTest {
 
         m.assertBlocked("https://web.archive.org/web/20240101000000/https://blocked.com/x", ContentMatcher.MatchType.DOMAIN, "blocked.com")
         m.assertBlocked("web.archive.org/web/2024if_/http://www.blocked.com/", ContentMatcher.MatchType.DOMAIN, "blocked.com")
+        m.assertBlocked("web.archive.org/web/https://blocked.com/x", ContentMatcher.MatchType.DOMAIN, "blocked.com")
         assertFalse(m.isUrlBlocked("web.archive.org/web/2024/https://allowed.com/").blocked)
+    }
+
+    @Test
+    fun whitelistedProxiedTargetStaysAllowed() {
+        val m = matcher(domains = listOf("example.com"), keywords = listOf("video"))
+        m.setWhitelist(listOf("example.com"))
+
+        assertFalse(m.isUrlBlocked("www-example-com.translate.goog/video").blocked)
+        assertFalse(m.isUrlBlocked("web.archive.org/web/2024/https://example.com/video").blocked)
     }
 
     @Test

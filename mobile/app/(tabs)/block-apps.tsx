@@ -191,7 +191,12 @@ export default function BlockAppsScreen(): React.JSX.Element {
     packageName: string,
     config?: Partial<BlockedApp>,
   ): void => {
-    if (controlMode === "flexible") {
+    // EXPO_PUBLIC_TEST_SKIP_FRICTION=1 at build time lets a test build change
+    // app blocks under a permanent lockout; release builds never set it.
+    if (
+      controlMode === "flexible" ||
+      process.env.EXPO_PUBLIC_TEST_SKIP_FRICTION === "1"
+    ) {
       executeAction(type, packageName, config);
     } else {
       setPendingAction({ type, packageName, config });

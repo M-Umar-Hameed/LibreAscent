@@ -4,6 +4,14 @@
     <uses-permission
         android:name="android.permission.WRITE_SECURE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
+    <!-- Package visibility for the blocked-app picker: without it Android 11+
+         hides most launcher apps from queryIntentActivities. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
     <application>
         <service
             android:name="expo.modules.freedomaccessibility.FreedomAccessibilityService"

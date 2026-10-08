@@ -115,7 +115,11 @@ export default function BlockWebsitesScreen(): ReactNode {
 
   const visibleKeywords = filteredKeywords.slice(0, displayLimit);
 
-  const isEffectiveFlexible = effectiveMode === "flexible";
+  // EXPO_PUBLIC_TEST_SKIP_FRICTION=1 at build time lets a test build edit these
+  // lists under a permanent lockout; release builds never set it.
+  const isEffectiveFlexible =
+    effectiveMode === "flexible" ||
+    process.env.EXPO_PUBLIC_TEST_SKIP_FRICTION === "1";
 
   // --- Actions ---
 

@@ -79,22 +79,77 @@ class BrowserCoverageTest {
         assertFalse(BrowserUrlMonitor.isSearchMediaVertical("example.com/images/x"))
     }
 
+    private val recycler = "androidx.recyclerview.widget.RecyclerView"
+
+    /** The ancestor walk in hasScrollableReelsAncestor, nearest ancestor first. */
+    private fun inReelsFeed(pkg: String, label: String?, vararg ancestors: Triple<String, Boolean, Int>): Boolean =
+        ancestors.firstNotNullOfOrNull { (cls, scrollable, height) ->
+            ReelsDetector.reelsAncestorVerdict(cls, scrollable, pkg, label, height, 2400)
+        } ?: false
+
     @Test
     fun youtubeShortsFeedIsATallRecyclerUnderAnExactShortsLabel() {
         val yt = "com.google.android.youtube"
-        assertTrue(ReelsDetector.isReelsFeedContainer("androidx.recyclerview.widget.RecyclerView", yt, "Shorts", 1800, 2400))
-        // A filter chip bar is a short horizontal list.
-        assertFalse(ReelsDetector.isReelsFeedContainer("androidx.recyclerview.widget.RecyclerView", yt, "Shorts", 120, 2400))
+        val tallFeed = Triple(recycler, true, 1800)
+        val chipBar = Triple(recycler, true, 120)
+        assertTrue(inReelsFeed(yt, "Shorts", tallFeed))
+        assertFalse(inReelsFeed(yt, "Shorts", chipBar))
         // Video titles and "Watch later" match the keyword search, not the label.
-        assertFalse(ReelsDetector.isReelsFeedContainer("androidx.recyclerview.widget.RecyclerView", yt, "Basketball shorts review", 1800, 2400))
-        assertFalse(ReelsDetector.isReelsFeedContainer("androidx.recyclerview.widget.RecyclerView", yt, "Watch later", 1800, 2400))
-        assertFalse(ReelsDetector.isReelsFeedContainer("android.widget.LinearLayout", yt, "Shorts", 1800, 2400))
+        assertFalse(inReelsFeed(yt, "Basketball shorts review", tallFeed))
+        assertFalse(inReelsFeed(yt, "Watch later", tallFeed))
+        assertFalse(inReelsFeed(yt, "Shorts", Triple("android.widget.LinearLayout", true, 1800)))
+        assertFalse(inReelsFeed(yt, "Shorts", Triple(recycler, false, 1800)))
+    }
+
+    @Test
+    fun theNearestYoutubeListDecidesNotAnOuterOne() {
+        val yt = "com.google.android.youtube"
+        val layout = Triple("android.widget.FrameLayout", false, 300)
+        // A "Shorts" chip in a horizontal list nested in the tall home feed.
+        assertFalse(inReelsFeed(yt, "Shorts", layout, Triple(recycler, true, 120), layout, Triple(recycler, true, 1800)))
+        // The shelf header's nearest list is the tall feed itself.
+        assertTrue(inReelsFeed(yt, "Shorts", layout, Triple(recycler, false, 400), Triple(recycler, true, 1800)))
     }
 
     @Test
     fun otherAppsKeepTheirReelsContainerRules() {
-        assertTrue(ReelsDetector.isReelsFeedContainer("androidx.viewpager.widget.ViewPager", "com.instagram.android", "Reels", 100, 2400))
-        assertTrue(ReelsDetector.isReelsFeedContainer("androidx.recyclerview.widget.RecyclerView", "com.facebook.katana", "Reel", 100, 2400))
-        assertFalse(ReelsDetector.isReelsFeedContainer("androidx.recyclerview.widget.RecyclerView", "com.instagram.android", "Reels", 1800, 2400))
+        val pager = Triple("androidx.viewpager.widget.ViewPager", true, 100)
+        assertTrue(inReelsFeed("com.instagram.android", "Reels", pager))
+        assertTrue(inReelsFeed("com.facebook.katana", "Reel", Triple(recycler, true, 100)))
+        assertFalse(inReelsFeed("com.instagram.android", "Reels", Triple(recycler, true, 1800)))
+        // Instagram still climbs past a list to the pager around it.
+        assertTrue(inReelsFeed("com.instagram.android", "Reels", Triple(recycler, true, 1800), pager))
+    }
+
+    @Test
+    fun aWhitelistedUrlBarSetsThePageContextAndIsRemembered() {
+        val (context, memory) = PageWhitelist.resolve("org.mozilla.firefox", "wikipedia.org", { it == "wikipedia.org" }, null)
+
+        assertEquals("wikipedia.org", context)
+        assertEquals(PageWhitelist.Memory("org.mozilla.firefox", "wikipedia.org"), memory)
+    }
+
+    @Test
+    fun anUnreadableUrlBarKeepsTheRememberedDomainForTheSameBrowserOnly() {
+        // Chrome hides its toolbar while scrolling; page text must not clear this.
+        val remembered = PageWhitelist.Memory("com.android.chrome", "wikipedia.org")
+
+        val (context, memory) = PageWhitelist.resolve("com.android.chrome", null, { false }, remembered)
+        assertEquals("wikipedia.org", context)
+        assertEquals(remembered, memory)
+
+        val (otherContext, otherMemory) = PageWhitelist.resolve("org.mozilla.firefox", null, { false }, remembered)
+        assertEquals(null, otherContext)
+        assertEquals(remembered, otherMemory)
+    }
+
+    @Test
+    fun aNonWhitelistedUrlBarHostClearsTheMemory() {
+        val remembered = PageWhitelist.Memory("com.android.chrome", "wikipedia.org")
+
+        val (context, memory) = PageWhitelist.resolve("com.android.chrome", "example.com", { it == "wikipedia.org" }, remembered)
+
+        assertEquals(null, context)
+        assertEquals(null, memory)
     }
 }

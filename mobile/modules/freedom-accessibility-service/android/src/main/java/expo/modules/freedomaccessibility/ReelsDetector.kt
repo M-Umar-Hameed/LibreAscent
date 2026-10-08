@@ -212,7 +212,8 @@ class ReelsDetector {
     }
 
     /**
-     * Walk up to 10 ancestors looking for a scrollable reels feed container.
+     * Walk up to 10 ancestors until one decides whether the label sits in a
+     * scrollable reels feed container.
      */
     private fun hasScrollableReelsAncestor(
         node: AccessibilityNodeInfo,
@@ -225,9 +226,9 @@ class ReelsDetector {
         for (i in 0 until 10) {
             val className = current.className?.toString() ?: ""
             current.getBoundsInScreen(bounds)
-            if (current.isScrollable && isReelsFeedContainer(className, packageName, label, bounds.height(), windowHeight)) {
+            reelsAncestorVerdict(className, current.isScrollable, packageName, label, bounds.height(), windowHeight)?.let {
                 current.recycle()
-                return true
+                return it
             }
 
             val next = current.parent
@@ -262,27 +263,31 @@ class ReelsDetector {
         private const val YOUTUBE = "com.google.android.youtube"
 
         /**
-         * Whether a scrollable ancestor of a visible reels label is the reels feed.
-         * ViewPager is the swipeable video container reels feeds use; RecyclerView
-         * is too broad for Instagram, but Facebook often uses it for reels.
-         * YouTube's Shorts feed is a RecyclerView too, which only counts for a
-         * label reading exactly "Shorts" (titles contain the word, "Watch later"
-         * the other keywords) in a list taller than half the window (search
-         * filter chips sit in a short horizontal one).
+         * What one ancestor of a visible reels label says: true when it is the
+         * scrollable reels feed, false when it rules the label out, null to keep
+         * climbing. ViewPager is the swipeable video container reels feeds use;
+         * RecyclerView is too broad for Instagram, but Facebook often uses it for
+         * reels. YouTube's Shorts feed is a RecyclerView too, and there the
+         * nearest scrollable one decides: it counts only for a label reading
+         * exactly "Shorts" (titles contain the word, "Watch later" the other
+         * keywords) in a list taller than half the window. A filter chip sits in
+         * a short horizontal list, which must not be skipped for the tall feed
+         * around it.
          */
-        internal fun isReelsFeedContainer(
+        internal fun reelsAncestorVerdict(
             className: String,
+            scrollable: Boolean,
             packageName: String,
             label: String?,
             height: Int,
             windowHeight: Int
-        ): Boolean {
+        ): Boolean? {
+            if (!scrollable) return null
             if (className.contains("ViewPager")) return true
-            if (!className.contains("RecyclerView")) return false
+            if (!className.contains("RecyclerView")) return null
             if (packageName.contains("com.facebook.")) return true
-            return packageName == YOUTUBE &&
-                    label?.trim().equals("Shorts", ignoreCase = true) &&
-                    height * 2 > windowHeight
+            if (packageName != YOUTUBE) return null
+            return label?.trim().equals("Shorts", ignoreCase = true) && height * 2 > windowHeight
         }
 
         /**

@@ -84,9 +84,9 @@ class FreedomAccessibilityService : AccessibilityService() {
     @Volatile private var blockCooldownUntil: Long = 0
     @Volatile private var lastFullScanAt: Long = 0
     @Volatile private var fullScanPending = false
-    // Remember the last whitelisted domain per browser, so text-only events still get context
-    @Volatile private var lastWhitelistedDomain: String? = null
-    @Volatile private var lastWhitelistedPackage: String? = null
+    // The last whitelisted URL-bar domain and its browser, so events that cannot
+    // read the URL bar still get context. Scan thread only.
+    private var whitelistMemory: PageWhitelist.Memory? = null
     // True while the expensive event/flag set is subscribed. Guards setServiceInfo
     // so it runs on scope transitions only, never per event.
     private var deepInspectionEnabled = false
@@ -643,26 +643,12 @@ class FreedomAccessibilityService : AccessibilityService() {
         // Only the URL bar says which site this is. Page text names other sites
         // in links, captions and footers, and a whitelisted one there switched
         // keyword checks off for the whole page.
-        var pageWhitelisted = false
-        var contextDomain: String? = null
-        val urlBarDomain = urlBar?.substringBefore('/')?.substringBefore('?')?.substringBefore(' ')
-        if (urlBarDomain != null && urlBarDomain.contains('.') && contentMatcher.isWhitelisted(urlBarDomain)) {
-            pageWhitelisted = true
-            contextDomain = urlBarDomain
-        }
-        // Cache: remember whitelisted domain for this browser so text-only events inherit it.
-        // Clear cache when we see a real URL that is NOT whitelisted (user navigated away).
-        val hasRealUrl = candidates.any { it.contains('.') && !it.contains(' ') }
-        if (pageWhitelisted) {
-            lastWhitelistedDomain = contextDomain
-            lastWhitelistedPackage = packageName
-        } else if (hasRealUrl) {
-            lastWhitelistedDomain = null
-            lastWhitelistedPackage = null
-        } else if (packageName == lastWhitelistedPackage && lastWhitelistedDomain != null) {
-            pageWhitelisted = true
-            contextDomain = lastWhitelistedDomain
-        }
+        val urlBarHost = urlBar?.substringBefore('/')?.substringBefore('?')?.substringBefore(' ')
+            ?.takeIf { it.contains('.') }
+        val (contextDomain, memory) = PageWhitelist.resolve(
+            packageName, urlBarHost, contentMatcher::isWhitelisted, whitelistMemory)
+        whitelistMemory = memory
+        val pageWhitelisted = contextDomain != null
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
             if (Math.random() < 0.1) {
@@ -1575,6 +1561,31 @@ internal object KeywordRotation {
 
     /** Start index for the next scan after one starting at [start] searched [searched] keywords. */
     fun resumeAt(start: Int, searched: Int, size: Int): Int = if (size == 0) 0 else (start + searched).mod(size)
+}
+
+/**
+ * Which whitelisted site a browser page belongs to, decided by the URL bar alone.
+ * Page text names other sites, so it never sets or clears this. Browsers hide
+ * their toolbar while scrolling, so an event with no readable URL bar keeps the
+ * last whitelisted domain seen for the same browser.
+ */
+internal object PageWhitelist {
+    data class Memory(val packageName: String, val domain: String)
+
+    /**
+     * @param urlBarHost the URL bar's host, or null when no URL bar host was read
+     * @return the page's whitelisted domain (null if none) and the memory to keep
+     */
+    fun resolve(
+        packageName: String,
+        urlBarHost: String?,
+        isWhitelisted: (String) -> Boolean,
+        memory: Memory?
+    ): Pair<String?, Memory?> = when {
+        urlBarHost == null -> memory?.takeIf { it.packageName == packageName }?.domain to memory
+        isWhitelisted(urlBarHost) -> urlBarHost to Memory(packageName, urlBarHost)
+        else -> null to null
+    }
 }
 
 /** Windows that report their own package while the app beneath stays foreground. */

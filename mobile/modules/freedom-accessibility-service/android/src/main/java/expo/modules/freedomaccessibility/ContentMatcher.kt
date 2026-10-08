@@ -247,8 +247,6 @@ class ContentMatcher {
         return false
     }
 
-    fun containsWhitelistedDomainPublic(text: String): Boolean = containsWhitelistedDomain(text)
-
     private fun isDomainBlocked(domain: String): Boolean {
         val normalizedDomain = domain.removePrefix("www.")
 

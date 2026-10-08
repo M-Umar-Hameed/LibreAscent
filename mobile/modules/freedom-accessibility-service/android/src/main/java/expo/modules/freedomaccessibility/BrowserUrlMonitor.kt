@@ -35,8 +35,10 @@ class BrowserUrlMonitor {
     private val browsers = ConcurrentHashMap<String, BrowserConfig>()
     // Unlisted packages reach extraction only through WebView events, mostly
     // from apps that embed one, so a universal id sweep that found no URL bar
-    // holds off the next sweep for that package instead of repeating per event.
+    // holds off the next sweep for that package instead of repeating per event,
+    // and the id a sweep found is tried alone first on later events.
     private val universalMissAt = ConcurrentHashMap<String, Long>()
+    private val universalHitId = ConcurrentHashMap<String, String>()
     private var lastDetectedUrl: String = ""
 
     // Per-event scan budget. Every tree walk and every cross-process lookup
@@ -239,14 +241,18 @@ class BrowserUrlMonitor {
      */
     private fun unlistedUrlBar(rootNode: AccessibilityNodeInfo?, packageName: String): String? {
         if (rootNode == null) return null
-        val now = android.os.SystemClock.uptimeMillis()
-        if (universalMissAt[packageName]?.let { now - it < UNLISTED_RETRY_MS } == true) return null
         // Generic ids such as edit_text exist in apps that are not browsers, so
         // only a value that reads as a URL counts.
-        val urlBar = firstUrlBarMatch(UNIVERSAL_URL_BAR_FALLBACKS) { id ->
+        fun read(id: String) =
             if (overBudget()) null else findUrlByResourceId(rootNode, packageName, id)?.takeIf { looksLikeUrl(it) }
-        }
+        universalHitId[packageName]?.let { id -> read(id)?.let { return it } }
+        val now = android.os.SystemClock.uptimeMillis()
+        if (universalMissAt[packageName]?.let { now - it < UNLISTED_RETRY_MS } == true) return null
+        var hitId: String? = null
+        val urlBar = firstUrlBarMatch(UNIVERSAL_URL_BAR_FALLBACKS) { id -> read(id)?.also { hitId = id } }
+        // A blank bar misses the sweep, so the remembered id is kept for a retry.
         if (urlBar == null) universalMissAt[packageName] = now else universalMissAt.remove(packageName)
+        hitId?.let { universalHitId[packageName] = it }
         return urlBar
     }
 

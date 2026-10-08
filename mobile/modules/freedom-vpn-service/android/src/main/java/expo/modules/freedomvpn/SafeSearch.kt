@@ -79,11 +79,13 @@ internal object SafeSearch {
 
         val out = ByteArrayOutputStream()
         out.write(query, 0, 2) // transaction id
-        // QR, RD, RA, NOERROR. An empty answer is NODATA, which keeps a client
-        // from falling back to the unrestricted host over the other family.
+        // QR, RA, NOERROR, and RD echoed from the query as RFC 1035 requires.
+        // An empty answer is NODATA, which keeps a client from falling back to
+        // the unrestricted host over the other family.
+        val rd = query[2].toInt() and 0x01
         out.write(
             ByteBuffer.allocate(10)
-                .putShort(0x8180.toShort())
+                .putShort((0x8080 or (rd shl 8)).toShort())
                 .putShort(1)
                 .putShort(answer.addresses.size.toShort())
                 .putShort(0)
@@ -105,6 +107,21 @@ internal object SafeSearch {
             out.write(address)
         }
         return out.toByteArray()
+    }
+
+    /**
+     * [answer] as served at [now]: its TTL counts down from when it was cached,
+     * so a client never holds a record past the upstream's own expiry. Null
+     * when there is no entry for [key] or it has expired.
+     */
+    fun cachedAnswer(cache: Map<String, Pair<Answer, Long>>, key: String, now: Long): Answer? {
+        val (answer, expiresAt) = cache[key] ?: return null
+        if (now >= expiresAt) return null
+        return answer.copy(ttlSeconds = maxOf(1L, (expiresAt - now) / 1000))
+    }
+
+    fun cacheAnswer(cache: MutableMap<String, Pair<Answer, Long>>, key: String, answer: Answer, now: Long) {
+        cache[key] = answer to now + answer.ttlSeconds * 1000
     }
 
     /** A recursive query for [name] with transaction id [id]. */

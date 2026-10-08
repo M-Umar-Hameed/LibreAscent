@@ -901,15 +901,12 @@ class FreedomVpnService : VpnService() {
 
     private fun resolveSafeSearchTarget(target: String, qtype: Int, preferIpv6: Boolean): SafeSearch.Answer? {
         val key = "$target/$qtype"
-        val now = System.currentTimeMillis()
-        safeSearchCache[key]?.let { (answer, expiresAt) ->
-            if (now < expiresAt) return answer.copy(ttlSeconds = maxOf(1L, (expiresAt - now) / 1000))
-        }
+        SafeSearch.cachedAnswer(safeSearchCache, key, System.currentTimeMillis())?.let { return it }
         val id = java.util.concurrent.ThreadLocalRandom.current().nextInt(0x10000)
         val query = SafeSearch.buildQuery(id, target, qtype)
         val response = queryUpstream(query, query.size, preferIpv6) ?: return null
         val answer = SafeSearch.parseAnswer(response, response.size, id, qtype) ?: return null
-        safeSearchCache[key] = answer to now + answer.ttlSeconds * 1000
+        SafeSearch.cacheAnswer(safeSearchCache, key, answer, System.currentTimeMillis())
         return answer
     }
 

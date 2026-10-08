@@ -1,6 +1,7 @@
 package expo.modules.freedomvpn
 
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -64,6 +65,19 @@ class DnsInterceptorTest {
         val minimum = rdata + mname + rname + 16
         assertEquals(DnsInterceptor.NEGATIVE_CACHE_TTL_SECONDS, u32(r, minimum), "SOA MINIMUM is the negative TTL (RFC 2308)")
         assertEquals(rdata + rdlength, r.size, "nothing trails the SOA; RDLENGTH accounts for every byte")
+    }
+
+    @Test
+    fun anEdnsOptRecordIsNotCopiedIntoTheResponse() {
+        // OPT pseudo-record: root name, TYPE 41, UDP size 4096, no options.
+        val opt = byteArrayOf(0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0)
+        val edns = query.copyOf().also { it[11] = 1 } + opt
+        val list = DomainBlocklist()
+        list.setDomains(setOf("example.com"))
+        val r = assertNotNull(DnsInterceptor(list).processQuery(edns, edns.size)?.response)
+
+        assertEquals(0, u16(r, 10), "ARCOUNT")
+        assertContentEquals(blockedResponse(), r, "same bytes as the query without EDNS")
     }
 
     @Test

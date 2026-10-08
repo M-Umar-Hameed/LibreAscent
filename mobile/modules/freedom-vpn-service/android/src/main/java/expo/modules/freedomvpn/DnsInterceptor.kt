@@ -75,7 +75,7 @@ class DnsInterceptor(private val blocklist: DomainBlocklist) {
                 val nxdomainResponse = buildNxdomainResponse(
                     transactionId,
                     packet,
-                    length
+                    buffer.position()
                 )
                 return DnsResult(domain, true, nxdomainResponse)
             }
@@ -136,12 +136,12 @@ class DnsInterceptor(private val blocklist: DomainBlocklist) {
      * - Set QR bit (response)
      * - Set RA bit (recursion available)
      * - Set RCODE to 3 (NXDOMAIN)
-     * - Keep the original question section
+     * - Keep the original question section, and nothing after it
      */
     private fun buildNxdomainResponse(
         transactionId: Short,
         queryPacket: ByteArray,
-        queryLength: Int
+        questionEnd: Int
     ): ByteArray {
         val response = ByteArrayOutputStream()
 
@@ -170,11 +170,10 @@ class DnsInterceptor(private val blocklist: DomainBlocklist) {
         response.write(0x00)
         response.write(0x00)
 
-        // Copy the question section from the original query
-        // (starts at offset 12, runs to the end of the query)
-        if (queryLength > DNS_HEADER_SIZE) {
-            response.write(queryPacket, DNS_HEADER_SIZE, queryLength - DNS_HEADER_SIZE)
-        }
+        // Copy only the question. An EDNS OPT record after it used to be
+        // copied too, under ARCOUNT 0 and ahead of the SOA, so a resolver read
+        // the OPT as the authority record and the SOA as trailing garbage.
+        response.write(queryPacket, DNS_HEADER_SIZE, questionEnd - DNS_HEADER_SIZE)
 
         // Authority section: one SOA so resolvers negative-cache this answer
         // (RFC 2308). Without it a client cannot cache NXDOMAIN and re-asks on

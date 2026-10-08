@@ -161,6 +161,30 @@ class SafeSearchTest {
     }
 
     @Test
+    fun respondEchoesTheQueryRecursionDesiredBit() {
+        val q = query(3, "www.bing.com", SafeSearch.TYPE_A).also { it[2] = 0 }
+        val r = assertNotNull(SafeSearch.respond(q, q.size, "strict.bing.com") { _, _ -> SafeSearch.Answer(emptyList(), 60) })
+        assertEquals(0x8080, u16(r, 2), "RD clear in the query stays clear")
+    }
+
+    @Test
+    fun cachedAnswerServesADecayingTtlUntilExpiry() {
+        val cache = HashMap<String, Pair<SafeSearch.Answer, Long>>()
+        val address = byteArrayOf(1, 2, 3, 4)
+        assertNull(SafeSearch.cachedAnswer(cache, "k", 0), "miss on an empty cache")
+
+        SafeSearch.cacheAnswer(cache, "k", SafeSearch.Answer(listOf(address), 300), 1_000)
+
+        val fresh = assertNotNull(SafeSearch.cachedAnswer(cache, "k", 1_000), "hit right after caching")
+        assertEquals(300, fresh.ttlSeconds)
+        assertContentEquals(address, fresh.addresses.single())
+        assertEquals(200, assertNotNull(SafeSearch.cachedAnswer(cache, "k", 101_000)).ttlSeconds, "TTL counts down")
+        assertEquals(1, assertNotNull(SafeSearch.cachedAnswer(cache, "k", 300_500)).ttlSeconds, "never served as 0")
+        assertNull(SafeSearch.cachedAnswer(cache, "k", 301_000), "expired at the upstream TTL")
+        assertNull(SafeSearch.cachedAnswer(cache, "other", 1_000))
+    }
+
+    @Test
     fun respondFallsBackWhenTheTargetDoesNotResolve() {
         val q = query(3, "www.google.com", SafeSearch.TYPE_A)
         assertNull(SafeSearch.respond(q, q.size, google) { _, _ -> null })

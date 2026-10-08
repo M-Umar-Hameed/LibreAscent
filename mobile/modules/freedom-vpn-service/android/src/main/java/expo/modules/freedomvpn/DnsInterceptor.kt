@@ -149,9 +149,9 @@ class DnsInterceptor(private val blocklist: DomainBlocklist) {
         response.write(transactionId.toInt() shr 8 and 0xFF)
         response.write(transactionId.toInt() and 0xFF)
 
-        // Flags: QR=1, OPCODE=0, AA=1, TC=0, RD=1, RA=1, RCODE=3 (NXDOMAIN)
-        // 1 0000 1 0 1 1 000 0011 = 0x8583
-        response.write(0x85)
+        // Flags: QR=1, OPCODE=0, AA=1, TC=0, RD echoed from the query
+        // (RFC 1035), RA=1, RCODE=3 (NXDOMAIN): 0x8483 | RD
+        response.write(0x84 or (queryPacket[2].toInt() and 0x01))
         response.write(0x83)
 
         // QDCOUNT = 1

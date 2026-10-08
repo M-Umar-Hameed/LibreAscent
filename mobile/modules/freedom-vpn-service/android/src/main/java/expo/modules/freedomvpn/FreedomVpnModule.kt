@@ -203,6 +203,17 @@ class FreedomVpnModule : Module() {
             )
         }
 
+        // Lets a launch skip a re-push only for a category the tunnel actually
+        // has. Falls back to the disk copy, which a stopped or still-loading
+        // tunnel installs when it starts.
+        AsyncFunction("getCategorySize") { name: String, promise: Promise ->
+            val held = FreedomVpnService.blocklist.categorySize(name)
+            promise.resolve(
+                if (held > 0) held
+                else appContext.reactContext?.let { BlocklistPersistence.categorySize(it, name) } ?: 0
+            )
+        }
+
         AsyncFunction("removeCategory") { name: String, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.removeCategory(name)

@@ -22,6 +22,7 @@ declare module "freedom-vpn-service" {
     name: string,
     enabled: boolean,
   ): Promise<boolean>;
+  export function getCategorySize(name: string): Promise<number | null>;
   export function setWhitelist(domains: string[]): Promise<void>;
   export function setSafeSearch(enabled: boolean): Promise<void>;
   export function getBlockedCount(): Promise<number>;

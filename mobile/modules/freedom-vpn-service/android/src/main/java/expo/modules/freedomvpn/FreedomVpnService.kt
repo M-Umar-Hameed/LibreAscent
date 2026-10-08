@@ -648,8 +648,12 @@ class FreedomVpnService : VpnService() {
             val elapsed = android.os.SystemClock.elapsedRealtime() - loadQueuedAt
             Log.i(TAG, "Disk blocklist loaded ${elapsed} ms after start; queries before then resolved without it")
             // The notification was posted before the load and shows its count.
-            if (running.get()) {
-                getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, createNotification())
+            // Refreshed on the main thread, where onDestroy clears running, so
+            // it cannot resurrect the notification of a service that just stopped.
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                if (running.get()) {
+                    getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, createNotification())
+                }
             }
         }
 

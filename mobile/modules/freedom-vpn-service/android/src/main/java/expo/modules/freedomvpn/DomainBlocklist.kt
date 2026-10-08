@@ -214,6 +214,9 @@ class DomainBlocklist {
 
     fun hasCategory(name: String): Boolean = categories.containsKey(name)
 
+    /** Domains held for [name], whether or not it is enabled; 0 when absent. */
+    fun categorySize(name: String): Int = categories[name]?.size ?: 0
+
     /**
      * Remove a category and its domains from the blocklist.
      * Only removes domains that aren't in other active categories.

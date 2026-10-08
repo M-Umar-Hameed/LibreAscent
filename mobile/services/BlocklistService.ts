@@ -357,6 +357,12 @@ export const BlocklistService = {
       ).catch(() => false);
       if (held) return;
       if (active) {
+        // Cleared while the tunnel's copy is gone so a push killed midway is
+        // redone at the next launch. Restored as it was afterwards: this push
+        // only refills the tunnel, so it says nothing new about accessibility.
+        const fpKey = PUSHED_FP_PREFIX + categoryId;
+        const pushedFp = await AsyncStorage.getItem(fpKey);
+        await AsyncStorage.removeItem(fpKey);
         await FreedomVpn.removeCategory(categoryId);
         if (category.domains.length > 0) {
           await FreedomVpn.addCategory(categoryId, category.domains);
@@ -367,6 +373,7 @@ export const BlocklistService = {
             syncAccessibility: false,
           });
         }
+        if (pushedFp !== null) await AsyncStorage.setItem(fpKey, pushedFp);
       } else {
         await FreedomVpn.removeCategory(categoryId);
       }
@@ -783,10 +790,19 @@ export const BlocklistService = {
   }): Promise<void> => {
     const state = useBlockingStore.getState();
     // The tunnel reloads its category files when it starts, so only a running
-    // tunnel holding nothing proves the disk copy is gone.
+    // tunnel holding nothing proves the disk copy is gone. Only the fallback
+    // for native builds that cannot report a single category.
     const vpnLoaded =
       !(await FreedomVpn.isVpnActive()) ||
       (await FreedomVpn.getBlocklistSize()) > 0;
+    // Per category: a push killed midway leaves that one category missing
+    // while the others keep the global size above zero.
+    const vpnHolds = async (categoryId: string): Promise<boolean> => {
+      const size = await FreedomVpn.getCategorySize(categoryId).catch(
+        () => null,
+      );
+      return size === null ? vpnLoaded : size > 0;
+    };
 
     for (const category of state.categories) {
       const masterOn =
@@ -810,16 +826,20 @@ export const BlocklistService = {
       // over a full native copy; the next refresh refetches that source.
       if (
         options?.skipMatchingNative &&
-        vpnLoaded &&
         existingNativeCount > 0 &&
         ((await AsyncStorage.getItem(fpKey)) === fp ||
-          BlocklistService.hasPartialSource(category.id))
+          BlocklistService.hasPartialSource(category.id)) &&
+        (await vpnHolds(category.id))
       ) {
         useBlockingStore
           .getState()
           .setCategoryDomainCount(category.id, existingNativeCount);
         continue;
       }
+
+      // Cleared before native drops its copy and written back only once the
+      // push completes, so a push killed midway fails the next launch's skip.
+      await AsyncStorage.removeItem(fpKey);
 
       if (VPN_ONLY_CATEGORIES.has(category.id)) {
         try {
@@ -1032,6 +1052,7 @@ export const BlocklistService = {
         const vpnOnly = VPN_ONLY_CATEGORIES.has(categoryId);
         // Clear native category and re-populate from SQLite cache. The
         // accessibility clear also removes any stale file for VPN-only cats.
+        await AsyncStorage.removeItem(PUSHED_FP_PREFIX + categoryId);
         try {
           await FreedomVpn.removeCategory(categoryId);
           await FreedomAccessibility.clearCategoryDomains(categoryId);

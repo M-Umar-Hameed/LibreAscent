@@ -71,20 +71,34 @@ object BlocklistPersistence {
         val staged = stagingFile(dir, name)
         if (!staged.exists()) return
         val live = categoryFile(dir, name)
+        // Dropped first so no moment pairs the new file with the old index. It
+        // is rebuilt from the new file on the next load, once per sync rather
+        // than once per batch.
+        indexFile(dir, name).delete()
         // rename(2) replaces the target atomically on Android. The delete is the
         // fallback for platforms whose rename refuses an existing target.
         if (!staged.renameTo(live) && !(live.delete() && staged.renameTo(live))) {
             Log.w(TAG, "Could not publish category $name")
-            return
         }
-        // Rebuilt from the new file on the next load, once per sync rather
-        // than once per batch.
-        indexFile(dir, name).delete()
     }
 
     /** Whether a finalized copy of [name] is on disk for the next tunnel start. */
     fun hasCategory(context: Context, name: String): Boolean =
         categoryFile(dir(context), name).exists()
+
+    /** Domains in the finalized copy of [name] on disk, 0 when there is none. */
+    fun categorySize(context: Context, name: String): Int = categorySize(dir(context), name)
+
+    internal fun categorySize(dir: File, name: String): Int {
+        val file = categoryFile(dir, name)
+        if (!file.exists()) return 0
+        return try {
+            file.bufferedReader().useLines { lines -> lines.count { it.isNotBlank() } }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to count category $name: ${e.message}")
+            0
+        }
+    }
 
     fun deleteCategory(context: Context, name: String) = deleteCategory(dir(context), name)
 

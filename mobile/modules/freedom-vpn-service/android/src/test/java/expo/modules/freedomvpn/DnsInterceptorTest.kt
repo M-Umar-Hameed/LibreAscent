@@ -81,6 +81,17 @@ class DnsInterceptorTest {
     }
 
     @Test
+    fun nxdomainEchoesTheQueryRecursionDesiredBit() {
+        assertEquals(0x8583, u16(blockedResponse(), 2), "QR AA RD RA NXDOMAIN for an RD query")
+
+        val noRd = query.copyOf().also { it[2] = 0 }
+        val list = DomainBlocklist()
+        list.setDomains(setOf("example.com"))
+        val r = assertNotNull(DnsInterceptor(list).processQuery(noRd, noRd.size)?.response)
+        assertEquals(0x8483, u16(r, 2), "RD clear in the query stays clear")
+    }
+
+    @Test
     fun negativeTtlIsShortEnoughThatUnblockingIsNotStuck() {
         // Bounds the retry storm without pinning a removed domain for long.
         assertTrue(DnsInterceptor.NEGATIVE_CACHE_TTL_SECONDS in 60L..3600L)

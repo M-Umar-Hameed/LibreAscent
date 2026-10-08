@@ -93,6 +93,23 @@ class BlocklistPersistenceTest {
     }
 
     @Test
+    fun finalizeDropsTheIndexBuiltFromThePreviousFile() {
+        val staleIndex = File(dir, "category_adult.idx").apply { writeText("stale") }
+        BlocklistPersistence.saveCategory(dir, "adult", listOf("fresh.example"), true)
+        BlocklistPersistence.finalizeCategory(dir, "adult")
+        assertFalse(staleIndex.exists(), "an index over the old file must not be mapped for the new one")
+    }
+
+    @Test
+    fun categorySizeCountsOnlyTheFinalizedCopy() {
+        assertEquals(0, BlocklistPersistence.categorySize(dir, "adult"), "absent")
+        BlocklistPersistence.saveCategory(dir, "adult", listOf("a.example", "b.example"), true)
+        assertEquals(0, BlocklistPersistence.categorySize(dir, "adult"), "staged batches are not held yet")
+        BlocklistPersistence.finalizeCategory(dir, "adult")
+        assertEquals(2, BlocklistPersistence.categorySize(dir, "adult"))
+    }
+
+    @Test
     fun deletingACategoryDropsItsStagedBatches() {
         BlocklistPersistence.saveCategory(dir, "adult", listOf("staged.example"), true)
         BlocklistPersistence.deleteCategory(dir, "adult")

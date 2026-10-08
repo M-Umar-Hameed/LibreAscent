@@ -17,6 +17,7 @@ interface FreedomVpnModuleInterface {
   // Absent on native builds older than the JS bundle.
   finalizeCategory?(name: string): Promise<void>;
   setCategoryEnabled?(name: string, enabled: boolean): Promise<boolean>;
+  getCategorySize?(name: string): Promise<number>;
   setWhitelist(domains: string[]): Promise<void>;
   setSafeSearch(enabled: boolean): Promise<void>;
   getBlockedCount(): Promise<number>;
@@ -115,6 +116,15 @@ export async function setCategoryEnabled(
 ): Promise<boolean> {
   if (!FreedomVpnNative?.setCategoryEnabled) return false;
   return FreedomVpnNative.setCategoryEnabled(name, enabled);
+}
+
+/**
+ * Domains the tunnel holds for a category, or will load from disk when it
+ * starts; 0 when it has none. Null when this native build cannot say.
+ */
+export async function getCategorySize(name: string): Promise<number | null> {
+  if (!FreedomVpnNative?.getCategorySize) return null;
+  return FreedomVpnNative.getCategorySize(name);
 }
 
 export async function setWhitelist(domains: string[]): Promise<void> {

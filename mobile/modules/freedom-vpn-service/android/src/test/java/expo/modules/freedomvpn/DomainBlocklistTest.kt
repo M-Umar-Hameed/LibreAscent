@@ -133,6 +133,8 @@ class DomainBlocklistTest {
         assertTrue(list.isBlocked("ads.example"), "other categories are unaffected")
         assertEquals(1, list.size(), "a switched-off category is not counted as blocking")
         assertTrue(list.hasCategory("adult"), "the set is kept for switching back on")
+        assertEquals(1, list.categorySize("adult"), "still held while switched off")
+        assertEquals(0, list.categorySize("missing"))
 
         list.setCategoryEnabled("adult", true)
         assertTrue(list.isBlocked("www.adult.example"), "back on without a re-push")

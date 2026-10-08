@@ -56,6 +56,9 @@ class FreedomVpnService : VpnService() {
     // One buffer per forwarding-pool thread instead of one per query.
     private val dnsResponseBuffer: ThreadLocal<ByteArray> = ThreadLocal.withInitial { ByteArray(MAX_PACKET_SIZE) }
 
+    // SafeSearch target records keyed by "target/qtype", with their expiry.
+    private val safeSearchCache = java.util.concurrent.ConcurrentHashMap<String, Pair<SafeSearch.Answer, Long>>()
+
     companion object {
         private const val TAG = "FreedomVPN"
         private const val CHANNEL_ID = "freedom_vpn"
@@ -116,6 +119,19 @@ class FreedomVpnService : VpnService() {
 
         // Also read by VpnWatchdog, which must not restart the tunnel mid-pause.
         private const val KEY_PAUSED_UNTIL = "vpn_paused_until"
+
+        private const val KEY_SAFE_SEARCH = "safe_search"
+
+        fun setSafeSearch(context: Context, enabled: Boolean) {
+            context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_SAFE_SEARCH, enabled)
+                .apply()
+        }
+
+        private fun isSafeSearchEnabled(context: Context): Boolean =
+            context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
+                .getBoolean(KEY_SAFE_SEARCH, true)
 
         fun setVpnWanted(context: Context, wanted: Boolean) {
             context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
@@ -821,8 +837,11 @@ class FreedomVpnService : VpnService() {
         } else {
             // NOT BLOCKED — forward to real DNS off-thread so the reader loop
             // keeps pumping while this query's upstream round-trip is in flight.
+            val target = result.safeSearchTarget
             dnsExecutor?.execute {
-                forwardDnsQuery(dnsPayload, dnsLength, srcIp, dstIp, srcPort)
+                val pinned = target != null && isSafeSearchEnabled(this) &&
+                    answerSafeSearch(target, dnsPayload, dnsLength, srcIp, dstIp, srcPort)
+                if (!pinned) forwardDnsQuery(dnsPayload, dnsLength, srcIp, dstIp, srcPort)
             }
         }
     }
@@ -856,13 +875,56 @@ class FreedomVpnService : VpnService() {
         dstIp: ByteArray,
         srcPort: Int
     ) {
+        val dnsResponse = queryUpstream(dnsPayload, dnsLength, srcIp.size == 16) ?: return
+        writeDnsResponse(dnsResponse, srcIp, dstIp, srcPort)
+    }
+
+    /**
+     * Answer a pinned search host with its SafeSearch target's records.
+     * False when the target could not be resolved, so the caller forwards the
+     * original query instead of failing the client.
+     */
+    private fun answerSafeSearch(
+        target: String,
+        dnsPayload: ByteArray,
+        dnsLength: Int,
+        srcIp: ByteArray,
+        dstIp: ByteArray,
+        srcPort: Int
+    ): Boolean {
+        val response = SafeSearch.respond(dnsPayload, dnsLength, target) { name, qtype ->
+            resolveSafeSearchTarget(name, qtype, srcIp.size == 16)
+        } ?: return false
+        writeDnsResponse(response, srcIp, dstIp, srcPort)
+        return true
+    }
+
+    private fun resolveSafeSearchTarget(target: String, qtype: Int, preferIpv6: Boolean): SafeSearch.Answer? {
+        val key = "$target/$qtype"
+        val now = System.currentTimeMillis()
+        safeSearchCache[key]?.let { (answer, expiresAt) ->
+            if (now < expiresAt) return answer.copy(ttlSeconds = maxOf(1L, (expiresAt - now) / 1000))
+        }
+        val id = java.util.concurrent.ThreadLocalRandom.current().nextInt(0x10000)
+        val query = SafeSearch.buildQuery(id, target, qtype)
+        val response = queryUpstream(query, query.size, preferIpv6) ?: return null
+        val answer = SafeSearch.parseAnswer(response, response.size, id, qtype) ?: return null
+        safeSearchCache[key] = answer to now + answer.ttlSeconds * 1000
+        return answer
+    }
+
+    /**
+     * Send a DNS query upstream from a protected socket and return the raw
+     * response, or null when every upstream failed.
+     */
+    private fun queryUpstream(dnsPayload: ByteArray, dnsLength: Int, preferIpv6: Boolean): ByteArray? {
         // An IPv6 query prefers the IPv6 upstreams but falls back to the IPv4
         // ones: the tunnel advertises IPv6 resolvers even on a network with no
         // IPv6 route, where those sends fail with ENETUNREACH. The DNS payload
         // is family-agnostic and buildResponseIpPacket rebuilds the answer in
         // the client's family from the captured srcIp, so a v6 client can be
         // answered from a v4 resolver.
-        val dnsServers = if (srcIp.size == 16) {
+        val dnsServers = if (preferIpv6) {
             listOf(UPSTREAM_PRIMARY_V6, UPSTREAM_SECONDARY_V6, UPSTREAM_PRIMARY, UPSTREAM_SECONDARY)
         } else {
             listOf(UPSTREAM_PRIMARY, UPSTREAM_SECONDARY)
@@ -886,28 +948,30 @@ class FreedomVpnService : VpnService() {
                     val receivePacket = DatagramPacket(responseBuffer, responseBuffer.size)
                     socket.receive(receivePacket)
 
-                    // Build IP packet with the DNS response and write to TUN
                     val dnsResponse = ByteArray(receivePacket.length)
                     System.arraycopy(receivePacket.data, receivePacket.offset,
                         dnsResponse, 0, receivePacket.length)
-
-                    val responseIpPacket = buildResponseIpPacket(
-                        dnsResponse,
-                        dstIp,   // DNS server -> source
-                        srcIp,   // Device -> destination
-                        DnsInterceptor.DNS_PORT, // DNS port -> source port
-                        srcPort  // Original source port -> destination port
-                    )
-                    writeToTun(responseIpPacket)
+                    return dnsResponse // Success — no need to try secondary
                 }
-                return // Success — no need to try secondary
-
             } catch (e: Exception) {
                 Log.w(TAG, "DNS query to $server failed: ${e.message}")
             }
         }
 
         Log.w(TAG, "All DNS servers failed for query")
+        return null
+    }
+
+    /** Wrap a DNS response in an IP packet back to the querying client and write it to the TUN. */
+    private fun writeDnsResponse(dnsResponse: ByteArray, srcIp: ByteArray, dstIp: ByteArray, srcPort: Int) {
+        val responseIpPacket = buildResponseIpPacket(
+            dnsResponse,
+            dstIp,   // DNS server -> source
+            srcIp,   // Device -> destination
+            DnsInterceptor.DNS_PORT, // DNS port -> source port
+            srcPort  // Original source port -> destination port
+        )
+        writeToTun(responseIpPacket)
     }
 
     /**

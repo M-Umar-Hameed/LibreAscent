@@ -15,6 +15,7 @@ interface FreedomVpnModuleInterface {
   addCategory(name: string, domains: string[], replace: boolean): Promise<void>;
   removeCategory(name: string): Promise<void>;
   setWhitelist(domains: string[]): Promise<void>;
+  setSafeSearch(enabled: boolean): Promise<void>;
   getBlockedCount(): Promise<number>;
   getBlocklistSize(): Promise<number>;
   addListener(eventName: string): void;
@@ -93,6 +94,15 @@ export async function removeCategory(name: string): Promise<void> {
 export async function setWhitelist(domains: string[]): Promise<void> {
   if (!FreedomVpnNative) return;
   return FreedomVpnNative.setWhitelist(domains);
+}
+
+/**
+ * Pin Google, Bing, DuckDuckGo and YouTube to their restricted endpoints in
+ * the DNS tunnel. On by default; persisted natively.
+ */
+export async function setSafeSearch(enabled: boolean): Promise<void> {
+  if (!FreedomVpnNative) return;
+  return FreedomVpnNative.setSafeSearch(enabled);
 }
 
 export async function getBlockedCount(): Promise<number> {

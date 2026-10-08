@@ -15,14 +15,16 @@ import java.nio.ByteBuffer
  * 1. Parses the domain name from DNS query packets
  * 2. Checks against DomainBlocklist
  * 3. If blocked: builds an NXDOMAIN response
- * 4. If allowed: returns null (forward to real DNS)
+ * 4. If allowed: returns null (forward to real DNS), or the SafeSearch
+ *    target to answer with for a pinned search host
  */
 class DnsInterceptor(private val blocklist: DomainBlocklist) {
 
     data class DnsResult(
         val domain: String,
         val blocked: Boolean,
-        val response: ByteArray? // NXDOMAIN response packet, null if not blocked
+        val response: ByteArray?, // NXDOMAIN response packet, null if not blocked
+        val safeSearchTarget: String? = null // restricted endpoint to answer with instead of forwarding
     )
 
     /**
@@ -78,7 +80,7 @@ class DnsInterceptor(private val blocklist: DomainBlocklist) {
                 return DnsResult(domain, true, nxdomainResponse)
             }
 
-            return DnsResult(domain, false, null)
+            return DnsResult(domain, false, null, SafeSearch.targetFor(domain))
 
         } catch (e: Exception) {
             // Malformed packet — let it pass through

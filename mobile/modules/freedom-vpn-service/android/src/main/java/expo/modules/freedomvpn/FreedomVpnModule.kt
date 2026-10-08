@@ -200,6 +200,18 @@ class FreedomVpnModule : Module() {
             }
         }
 
+        // Takes effect on the next pinned lookup; clients keep a pinned answer
+        // until its TTL runs out.
+        AsyncFunction("setSafeSearch") { enabled: Boolean, promise: Promise ->
+            val context = appContext.reactContext
+                ?: run {
+                    promise.reject("ERR_NO_CONTEXT", "No React context", null)
+                    return@AsyncFunction
+                }
+            FreedomVpnService.setSafeSearch(context, enabled)
+            promise.resolve(null)
+        }
+
         AsyncFunction("getBlockedCount") { promise: Promise ->
             promise.resolve(FreedomVpnService.blockedCount)
         }

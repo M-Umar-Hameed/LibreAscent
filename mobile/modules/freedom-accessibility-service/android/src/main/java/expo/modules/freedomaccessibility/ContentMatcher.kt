@@ -57,15 +57,30 @@ class ContentMatcher {
     // Apps monitored for NSFW content via keyword scanning
     @Volatile private var nsfwMonitoredApps = ConcurrentHashMap.newKeySet<String>()
 
-    private val searchEngineDomains = setOf(
-        "google.com", "bing.com", "duckduckgo.com", "yahoo.com", 
-        "baidu.com", "yandex.com", "ecosia.org", "startpage.com"
+    // Matched against the parsed host only: a substring test over the whole URL
+    // let "#duckduckgo" on any page switch keyword blocking off.
+    private val searchEngineHostPattern = Regex(
+        "(?:[a-z0-9-]+\\.)*(?:(?:google|yandex)\\.(?:(?:co|com)\\.)?[a-z]{2,3}" +
+            "|bing\\.com|duckduckgo\\.com|yahoo\\.com|ecosia\\.org|startpage\\.com|baidu\\.com)"
     )
+    private val searchQueryParams = setOf("q", "p", "text")
+
+    // Web proxies that carry the target URL in a u/url/q parameter.
+    private val webProxyHosts = setOf(
+        "croxyproxy.com", "proxysite.com", "kproxy.com", "hidester.com",
+        "proxyium.com", "blockaway.net", "4everproxy.com"
+    )
+    private val proxyTargetParams = setOf("u", "url", "q")
+    private val waybackPathPattern = Regex("^/web/[^/]+/(.+)")
+
+    // Look-alikes folded for the second keyword pass: foldFrom[i] -> foldTo[i].
+    private val foldFrom = "013457@\$аеорсухіјѕ"
+    private val foldTo = "oieastasaeopcyxijs"
 
     // Shared compiled patterns for URL/keyword matching below.
     private val candidateSplitPattern = Regex("\\s*[|·»]\\s*|\\s+[-:]\\s+")
     private val invisibleCharsPattern = Regex("[\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]")
-    private val embeddedCandidateDomainPattern = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\\.[a-z0-9]{2,}")
+    private val embeddedCandidateDomainPattern = Regex("[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\\.[a-z0-9]{2,}")
     private val compactTextPattern = Regex("[\\s\\-_\\.\\u200E\\u200F\\u200B\\u200C\\u200D\\uFEFF]+")
     private val nonAlphanumericPattern = Regex("[^a-z0-9]")
 
@@ -110,6 +125,14 @@ class ContentMatcher {
                     return MatchResult(true, MatchType.DOMAIN, domain)
                 }
 
+                // Domain check — the real site behind a proxy front-end
+                // (translate.goog, Wayback, web proxies)
+                val targetDomain = unwrapProxies(normalized)?.let { extractDomain(it) } ?: ""
+                if (targetDomain.isNotEmpty() && isDomainBlocked(targetDomain) && !isDomainWhitelisted(targetDomain)) {
+                    Log.w("ContentMatcher", "Proxied domain blocked: $targetDomain (from $normalized)")
+                    return MatchResult(true, MatchType.DOMAIN, targetDomain)
+                }
+
                 // Domain check — scan full URL for embedded blocked domains
                 val embeddedDomain = findEmbeddedBlockedDomain(normalized)
                 if (embeddedDomain != null) {
@@ -117,22 +140,19 @@ class ContentMatcher {
                     return MatchResult(true, MatchType.DOMAIN, embeddedDomain)
                 }
 
-                // Keyword check — skip if context, domain, or any embedded domain is whitelisted
-                if (contextWhitelisted || (domain.isNotEmpty() && isDomainWhitelisted(domain)) || containsWhitelistedDomain(normalized)) {
+                // Keyword check — skip if context, domain, proxied target, or any embedded domain is whitelisted
+                if (contextWhitelisted || (domain.isNotEmpty() && isDomainWhitelisted(domain)) ||
+                    isDomainWhitelisted(targetDomain) || containsWhitelistedDomain(normalized)) {
                     continue
                 }
-                val t = normalized.lowercase()
-                val isSearchEngine = searchEngineDomains.any { domain.endsWith(it) } ||
-                                   t.contains("google search") ||
-                                   t.contains("bing search") ||
-                                   t.contains("duckduckgo") ||
-                                   t.contains("yahoo search")
-                if (!isSearchEngine) {
-                    val matchedKeyword = findMatchingKeyword(normalized)
-                    if (matchedKeyword != null) {
-                        Log.w("ContentMatcher", "URL keyword blocked: $matchedKeyword (from $normalized)")
-                        return MatchResult(true, MatchType.KEYWORD, matchedKeyword)
-                    }
+                // On a search engine only the query itself is checked, not the rest of the URL.
+                val keywordText = if (searchEngineHostPattern.matches(domain)) {
+                    queryValues(normalized, searchQueryParams).joinToString(" ")
+                } else normalized
+                val matchedKeyword = findMatchingKeyword(keywordText)
+                if (matchedKeyword != null) {
+                    Log.w("ContentMatcher", "URL keyword blocked: $matchedKeyword (from $normalized)")
+                    return MatchResult(true, MatchType.KEYWORD, matchedKeyword)
                 }
             }
             else {
@@ -140,10 +160,8 @@ class ContentMatcher {
                 if (contextWhitelisted || containsWhitelistedDomain(normalized)) continue
 
                 val matchedKeyword = findMatchingKeyword(normalized)
-                val t = normalized.lowercase()
-                val isSearchEngine = t.contains("google search") || t.contains("bing search") || t.contains("duckduckgo") || t.contains("yahoo search")
 
-                if (matchedKeyword != null && !isSearchEngine && adultBlockingEnabled) {
+                if (matchedKeyword != null && adultBlockingEnabled) {
                     return MatchResult(true, MatchType.KEYWORD, matchedKeyword)
                 }
             }
@@ -161,6 +179,54 @@ class ContentMatcher {
             .removePrefix("http://")
             .removePrefix("www.")
             .trimEnd('/')
+    }
+
+    /** The normalized URL behind any proxy layers, or null when [normalizedUrl] is not proxied. */
+    private fun unwrapProxies(normalizedUrl: String): String? {
+        var current = normalizedUrl
+        // Bounded so a proxy wrapped in a proxy is still seen, without looping forever.
+        repeat(3) {
+            current = unwrapProxy(current) ?: return current.takeIf { it != normalizedUrl }
+        }
+        return current
+    }
+
+    private fun unwrapProxy(url: String): String? {
+        val hostEnd = url.indexOfAny(charArrayOf('/', '?', '#', ':', ' ')).let { if (it < 0) url.length else it }
+        val host = url.substring(0, hostEnd)
+        val rest = url.substring(hostEnd)
+
+        if (host.endsWith(".translate.goog")) {
+            // Google writes "." as "-" and a literal "-" as "--".
+            val original = host.removeSuffix(".translate.goog")
+                .replace("--", "\u0000").replace('-', '.').replace('\u0000', '-')
+            return normalizeUrl(original + rest)
+        }
+        if (host == "web.archive.org") {
+            return waybackPathPattern.find(rest)?.let { normalizeUrl(it.groupValues[1]) }
+        }
+        val isWebProxy = webProxyHosts.any { host == it || host.endsWith(".$it") } ||
+            (host == "hide.me" && rest.contains("/proxy"))
+        if (isWebProxy) {
+            return queryValues(url, proxyTargetParams).firstOrNull()?.let { normalizeUrl(it) }
+        }
+        return null
+    }
+
+    /** URL-decoded values of the query parameters named in [names]. */
+    private fun queryValues(url: String, names: Set<String>): List<String> {
+        val query = url.substringAfter('?', "").substringBefore('#')
+        if (query.isEmpty()) return emptyList()
+        return query.split('&').mapNotNull { pair ->
+            val eq = pair.indexOf('=')
+            if (eq <= 0 || pair.substring(0, eq) !in names) return@mapNotNull null
+            val raw = pair.substring(eq + 1)
+            try {
+                java.net.URLDecoder.decode(raw, "UTF-8")
+            } catch (_: Exception) {
+                raw
+            }
+        }
     }
 
 
@@ -297,9 +363,12 @@ class ContentMatcher {
         // Compact matching pass: handles "p o r n" or "p-o-r-n" or "p\u200Eo\u200Er\u200En"
         // We strip whitespace, common separators, and Unicode directional/invisible separators
         val compactText = text.lowercase().replace(compactTextPattern, "")
+        val foldedCompactText = foldLookalikes(compactText)
         for (keyword in blockedKeywords) {
             val lowerKeyword = keyword.lowercase()
-            if (lowerKeyword.length > 3 && compactText.contains(lowerKeyword)) {
+            if (lowerKeyword.length > 3 &&
+                (compactText.contains(lowerKeyword) || foldedCompactText.contains(lowerKeyword))
+            ) {
                 // Verify it's not a false positive in the original text (to be safe)
                 return lowerKeyword
             }
@@ -307,12 +376,36 @@ class ContentMatcher {
         return null
     }
 
+    /** Maps leetspeak digits/symbols and Cyrillic look-alikes to Latin letters. */
+    private fun foldLookalikes(text: String): String {
+        var chars: CharArray? = null
+        for (i in text.indices) {
+            val index = foldFrom.indexOf(text[i])
+            if (index >= 0) {
+                val out = chars ?: text.toCharArray().also { chars = it }
+                out[i] = foldTo[index]
+            }
+        }
+        return chars?.let { String(it) } ?: text
+    }
+
     private fun findMatchingKeyword(url: String): String? {
         val lowerUrl = url.lowercase()
+        matchKeywords(lowerUrl, minKeywordLength = 0)?.let { return it }
+        // Second pass catches "p0rn" and Cyrillic look-alikes. Keywords of three
+        // characters or fewer stay out: they need an exact token, and folding
+        // digits would let IDs such as "5ex" match "sex".
+        val folded = foldLookalikes(lowerUrl)
+        if (folded === lowerUrl) return null
+        return matchKeywords(folded, minKeywordLength = 4)
+    }
+
+    private fun matchKeywords(lowerUrl: String, minKeywordLength: Int): String? {
         var textBlocks: List<String>? = null
 
         for (keyword in blockedKeywords) {
             val lowerKeyword = keyword.lowercase()
+            if (lowerKeyword.length < minKeywordLength) continue
 
             if (lowerUrl.contains(lowerKeyword)) {
                 var hasValidBlock = false
@@ -472,6 +565,9 @@ class ContentMatcher {
     }
 
     private fun cleanPkg(pkg: String): String {
+        // getAppConfig runs for every accessibility event; real package names
+        // are already clean, so skip the regex and allocations for them.
+        if (pkg.all { it in 'a'..'z' || it in '0'..'9' || it == '.' || it == '_' }) return pkg
         return pkg.replace(invisibleCharsPattern, "")
             .trim()
             .lowercase()

@@ -73,4 +73,43 @@ class ContentMatcherKeywordTest {
 
         assertNull(matcher.findMatchingKeywordForTest("example.com/anything"))
     }
+
+    @Test
+    fun leetspeakAndCyrillicLookalikesMatch() {
+        val matcher = ContentMatcher()
+        matcher.setKeywordsForTest(listOf("porn", "hentai"))
+
+        assertEquals("porn", matcher.findMatchingKeywordForTest("example.com/p0rn/1"))
+        assertEquals("porn", matcher.findMatchingKeywordForTest("example.com/роrN"))
+        assertEquals("hentai", matcher.findMatchingKeywordForTest("example.com/h3nt@1"))
+    }
+
+    @Test
+    fun foldingLeavesShortKeywordsToExactTokens() {
+        val matcher = ContentMatcher()
+        matcher.setKeywordsForTest(listOf("sex", "ass"))
+
+        assertNull(matcher.findMatchingKeywordForTest("example.com/5ex"))
+        assertNull(matcher.findMatchingKeywordForTest("example.com/a55"))
+    }
+
+    @Test
+    fun foldingKeepsFalsePositiveProtections() {
+        val matcher = ContentMatcher()
+        matcher.setKeywordsForTest(listOf("desi", "dick", "porn"))
+
+        // Known false-positive words still win after folding.
+        assertNull(matcher.findMatchingKeywordForTest("example.com/des1gn"))
+        assertNull(matcher.findMatchingKeywordForTest("example.com/d1ckens"))
+        // A long folded token is still treated as a hash, not a word.
+        assertNull(matcher.findMatchingKeywordForTest("example.com/a8f3p0rn1234567890"))
+    }
+
+    @Test
+    fun compactPassFoldsSpacedLeetspeak() {
+        val matcher = ContentMatcher()
+        matcher.setKeywordsForTest(listOf("porn"))
+
+        assertEquals("porn", matcher.findMatchingKeywordDirectly("watch p 0 r n now"))
+    }
 }

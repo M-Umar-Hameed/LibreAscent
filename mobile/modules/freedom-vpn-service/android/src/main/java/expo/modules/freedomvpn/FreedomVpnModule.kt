@@ -180,6 +180,14 @@ class FreedomVpnModule : Module() {
             }
         }
 
+        // Ends a stream of addCategory batches. Until it runs the batches sit in
+        // a staging file, so a sync killed midway never leaves a partial
+        // category for the next tunnel start to load.
+        AsyncFunction("finalizeCategory") { name: String, promise: Promise ->
+            appContext.reactContext?.let { BlocklistPersistence.finalizeCategory(it, name) }
+            promise.resolve(null)
+        }
+
         AsyncFunction("removeCategory") { name: String, promise: Promise ->
             try {
                 FreedomVpnService.blocklist.removeCategory(name)

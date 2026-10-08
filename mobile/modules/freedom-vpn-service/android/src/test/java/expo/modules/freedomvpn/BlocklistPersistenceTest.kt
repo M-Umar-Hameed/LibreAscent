@@ -23,6 +23,7 @@ class BlocklistPersistenceTest {
         // an app update and the tunnel came up resolving every blocked domain,
         // because only JS ever filled the in-memory list.
         BlocklistPersistence.saveCategory(dir, "ads", listOf("doubleclick.net", "google-analytics.com"), true)
+        BlocklistPersistence.finalizeCategory(dir, "ads")
 
         val restarted = DomainBlocklist()
         BlocklistPersistence.load(dir, restarted)
@@ -40,6 +41,7 @@ class BlocklistPersistenceTest {
         BlocklistPersistence.saveCategory(dir, "ads", listOf("first.example"), true)
         BlocklistPersistence.saveCategory(dir, "ads", listOf("second.example"), false)
         BlocklistPersistence.saveCategory(dir, "ads", listOf("third.example"), false)
+        BlocklistPersistence.finalizeCategory(dir, "ads")
 
         val restarted = DomainBlocklist()
         BlocklistPersistence.load(dir, restarted)
@@ -53,7 +55,9 @@ class BlocklistPersistenceTest {
     @Test
     fun aResyncReplacesTheCategoryRatherThanGrowingIt() {
         BlocklistPersistence.saveCategory(dir, "ads", listOf("stale.example"), true)
+        BlocklistPersistence.finalizeCategory(dir, "ads")
         BlocklistPersistence.saveCategory(dir, "ads", listOf("fresh.example"), true)
+        BlocklistPersistence.finalizeCategory(dir, "ads")
 
         val restarted = DomainBlocklist()
         BlocklistPersistence.load(dir, restarted)
@@ -63,10 +67,49 @@ class BlocklistPersistenceTest {
     }
 
     @Test
+    fun aSyncKilledBeforeFinalizeLeavesThePreviousFileInPlace() {
+        BlocklistPersistence.saveCategory(dir, "adult", listOf("old-a.example", "old-b.example"), true)
+        BlocklistPersistence.finalizeCategory(dir, "adult")
+
+        // A resync dies after its first batch: no finalize.
+        BlocklistPersistence.saveCategory(dir, "adult", listOf("new-a.example"), true)
+
+        val restarted = DomainBlocklist()
+        BlocklistPersistence.load(dir, restarted)
+
+        assertTrue(restarted.isBlocked("old-b.example"), "the complete previous file still loads")
+        assertFalse(restarted.isBlocked("new-a.example"), "a partial sync is never loaded")
+        assertEquals(2, restarted.size())
+    }
+
+    @Test
+    fun aStreamThatNeverFinalizedLoadsNothing() {
+        BlocklistPersistence.saveCategory(dir, "adult", listOf("partial.example"), true)
+
+        val restarted = DomainBlocklist()
+        BlocklistPersistence.load(dir, restarted)
+
+        assertEquals(0, restarted.size(), "absent rather than a partial list that looks complete")
+    }
+
+    @Test
+    fun deletingACategoryDropsItsStagedBatches() {
+        BlocklistPersistence.saveCategory(dir, "adult", listOf("staged.example"), true)
+        BlocklistPersistence.deleteCategory(dir, "adult")
+        BlocklistPersistence.finalizeCategory(dir, "adult")
+
+        val restarted = DomainBlocklist()
+        BlocklistPersistence.load(dir, restarted)
+
+        assertEquals(0, restarted.size())
+    }
+
+    @Test
     fun theWhitelistIsRestoredAlongsideTheBlocklist() {
         // Restoring blocked domains without the whitelist would start blocking
         // sites the user had explicitly allowed.
         BlocklistPersistence.saveCategory(dir, "adult", listOf("example.com"), true)
+        BlocklistPersistence.finalizeCategory(dir, "adult")
         File(dir, "whitelist.txt").writeText("example.com\n")
 
         val restarted = DomainBlocklist()
@@ -88,6 +131,7 @@ class BlocklistPersistenceTest {
         // non-empty, so a JS push of a handful of user URLs cost it every
         // category domain. Loading must be safe to call unconditionally.
         BlocklistPersistence.saveCategory(dir, "adult", listOf("category-domain.com"), replace = true)
+        BlocklistPersistence.finalizeCategory(dir, "adult")
 
         val blocklist = DomainBlocklist()
         blocklist.setDomains(listOf("user-added.com"))

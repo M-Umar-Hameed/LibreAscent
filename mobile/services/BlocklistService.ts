@@ -287,6 +287,7 @@ export const BlocklistService = {
             }
           },
         );
+        await FreedomVpn.finalizeCategory(category.id);
         // Finalize accessibility (persist + rebuild active domains)
         if (toAccessibility) {
           await FreedomAccessibility.finalizeCategorySync(category.id);
@@ -338,6 +339,7 @@ export const BlocklistService = {
         await FreedomVpn.removeCategory(categoryId);
         if (category.domains.length > 0) {
           await FreedomVpn.addCategory(categoryId, category.domains);
+          await FreedomVpn.finalizeCategory(categoryId);
         } else if (hasCachedDomains(categoryId)) {
           await BlocklistService.syncCategoryFromCache(categoryId, {
             syncVpn: true,
@@ -709,6 +711,9 @@ export const BlocklistService = {
       after = batch[batch.length - 1];
       isFirstPage = false;
       await new Promise((r) => setTimeout(r, 0));
+    }
+    if (syncVpn && !isFirstPage) {
+      await FreedomVpn.finalizeCategory(categoryId);
     }
   },
 

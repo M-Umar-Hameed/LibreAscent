@@ -14,6 +14,8 @@ interface FreedomVpnModuleInterface {
   updateBlocklist(domains: string[]): Promise<void>;
   addCategory(name: string, domains: string[], replace: boolean): Promise<void>;
   removeCategory(name: string): Promise<void>;
+  // Absent on native builds older than the JS bundle.
+  finalizeCategory?(name: string): Promise<void>;
   setWhitelist(domains: string[]): Promise<void>;
   setSafeSearch(enabled: boolean): Promise<void>;
   getBlockedCount(): Promise<number>;
@@ -89,6 +91,16 @@ export async function addCategory(
 export async function removeCategory(name: string): Promise<void> {
   if (!FreedomVpnNative) return;
   return FreedomVpnNative.removeCategory(name);
+}
+
+/**
+ * End a stream of addCategory batches. The tunnel only persists a category for
+ * its next start once this is called, so a sync killed midway is not reloaded
+ * as if it were complete.
+ */
+export async function finalizeCategory(name: string): Promise<void> {
+  if (!FreedomVpnNative?.finalizeCategory) return;
+  return FreedomVpnNative.finalizeCategory(name);
 }
 
 export async function setWhitelist(domains: string[]): Promise<void> {

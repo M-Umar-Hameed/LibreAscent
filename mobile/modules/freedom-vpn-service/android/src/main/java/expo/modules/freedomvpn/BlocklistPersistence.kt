@@ -21,6 +21,7 @@ object BlocklistPersistence {
     private const val CATEGORY_PREFIX = "category_"
     private const val CATEGORY_SUFFIX = ".txt"
     private const val INDEX_SUFFIX = ".idx"
+    private const val STAGING_SUFFIX = ".tmp"
     private const val USER_FILE = "user_domains.txt"
     private const val WHITELIST_FILE = "whitelist.txt"
 
@@ -39,32 +40,55 @@ object BlocklistPersistence {
     private fun indexFile(dir: File, name: String): File =
         File(dir, "$CATEGORY_PREFIX$name$INDEX_SUFFIX")
 
+    // Batches land here and finalizeCategory renames the file into place, as
+    // ContentMatcher does. Writing the live file directly meant a kill mid-sync
+    // left a partial category that the next tunnel start loaded as complete.
+    // load() never matches this suffix.
+    private fun stagingFile(dir: File, name: String): File =
+        File(dir, "$CATEGORY_PREFIX$name$CATEGORY_SUFFIX$STAGING_SUFFIX")
+
     /** Mirrors DomainBlocklist.addCategory: [replace] truncates, otherwise appends. */
     fun saveCategory(context: Context, name: String, domains: List<String>, replace: Boolean) =
         saveCategory(dir(context), name, domains, replace)
 
     internal fun saveCategory(dir: File, name: String, domains: List<String>, replace: Boolean) {
         try {
-            FileOutputStream(categoryFile(dir, name), !replace).bufferedWriter().use { writer ->
+            FileOutputStream(stagingFile(dir, name), !replace).bufferedWriter().use { writer ->
                 domains.forEach { domain ->
                     writer.write(domain)
                     writer.newLine()
                 }
             }
-            // The text file just changed, so any index built from it is stale.
-            // It is rebuilt on the next load rather than here: a sync arrives in
-            // batches, and rebuilding per batch would sort the whole category
-            // over and over.
-            indexFile(dir, name).delete()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to save category $name: ${e.message}")
         }
     }
 
-    fun deleteCategory(context: Context, name: String) {
+    /** Publish the batches saved since the last replace as the category's file. */
+    fun finalizeCategory(context: Context, name: String) = finalizeCategory(dir(context), name)
+
+    internal fun finalizeCategory(dir: File, name: String) {
+        val staged = stagingFile(dir, name)
+        if (!staged.exists()) return
+        val live = categoryFile(dir, name)
+        // rename(2) replaces the target atomically on Android. The delete is the
+        // fallback for platforms whose rename refuses an existing target.
+        if (!staged.renameTo(live) && !(live.delete() && staged.renameTo(live))) {
+            Log.w(TAG, "Could not publish category $name")
+            return
+        }
+        // Rebuilt from the new file on the next load, once per sync rather
+        // than once per batch.
+        indexFile(dir, name).delete()
+    }
+
+    fun deleteCategory(context: Context, name: String) = deleteCategory(dir(context), name)
+
+    internal fun deleteCategory(dir: File, name: String) {
         try {
-            categoryFile(dir(context), name).delete()
-            indexFile(dir(context), name).delete()
+            categoryFile(dir, name).delete()
+            indexFile(dir, name).delete()
+            stagingFile(dir, name).delete()
         } catch (e: Exception) {
             Log.w(TAG, "Failed to delete category $name: ${e.message}")
         }

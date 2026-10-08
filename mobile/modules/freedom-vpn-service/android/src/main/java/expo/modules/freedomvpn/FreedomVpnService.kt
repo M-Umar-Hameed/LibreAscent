@@ -122,6 +122,12 @@ class FreedomVpnService : VpnService() {
 
         private const val KEY_SAFE_SEARCH = "safe_search"
 
+        // One loader at a time: two starts in quick succession would otherwise
+        // build the same category index concurrently.
+        private val diskLoader = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+            Thread(task, "FreedomVPN-BlocklistLoad")
+        }
+
         fun setSafeSearch(context: Context, enabled: Boolean) {
             context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
                 .edit()
@@ -601,15 +607,29 @@ class FreedomVpnService : VpnService() {
 
         Log.i(TAG, "Starting Freedom VPN Service")
 
-        // Before the tunnel exists: a watchdog or boot start has no JS behind it
-        // to fill the list. Unconditional because size() counts user domains too,
-        // so gating on it cost this tunnel every category whenever JS had pushed
-        // a single URL first. The *IfAbsent installers inside load() are what
-        // keep a live JS push from being overwritten.
-        BlocklistPersistence.load(this, blocklist)
-
-        // Show foreground notification
+        // First, so a slow disk load cannot push it past the foreground-service
+        // start deadline.
         startForeground(NOTIFICATION_ID, createNotification())
+
+        // A watchdog or boot start has no JS behind it to fill the list. Off the
+        // main thread, which the accessibility service shares: after a sync
+        // replaced a category's file the load rebuilds its index, about 1.5M
+        // lines. Queued before the tunnel is established to keep the window
+        // where queries resolve without the disk copy short. Unconditional
+        // because size() counts user domains too, so gating on it cost this
+        // tunnel every category whenever JS had pushed a single URL first. The
+        // *IfAbsent installers inside load() keep a live JS push from being
+        // overwritten.
+        val loadQueuedAt = android.os.SystemClock.elapsedRealtime()
+        diskLoader.execute {
+            BlocklistPersistence.load(this, blocklist)
+            val elapsed = android.os.SystemClock.elapsedRealtime() - loadQueuedAt
+            Log.i(TAG, "Disk blocklist loaded ${elapsed} ms after start; queries before then resolved without it")
+            // The notification was posted before the load and shows its count.
+            if (running.get()) {
+                getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, createNotification())
+            }
+        }
 
         // Establish VPN interface
         if (!establishVpn()) {

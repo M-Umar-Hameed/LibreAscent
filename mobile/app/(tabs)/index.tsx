@@ -1,4 +1,5 @@
 import { useAppTheme } from "@/providers/ThemeProvider";
+import { describeProblem } from "@/services/protectionProblems";
 import { ProtectionService } from "@/services/ProtectionService";
 import { useAppStore } from "@/stores/useAppStore";
 import { useBlockingStore } from "@/stores/useBlockingStore";
@@ -9,28 +10,13 @@ import type { ComponentProps, ReactNode } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-function describeProblem(code: string): {
-  message: string;
-  open: () => Promise<void>;
-} {
-  if (code === "accessibility_off") {
-    return {
-      message: "Content protection is off: accessibility service is disabled",
-      open: FreedomAccessibility.openAccessibilitySettings,
-    };
-  }
-  if (code.startsWith("vpn_taken:")) {
-    const pkg = code.slice("vpn_taken:".length);
-    return {
-      message: `DNS protection is off: ${pkg ? `${pkg} is set as the always-on VPN` : "another VPN app holds the VPN slot"}`,
-      open: FreedomVpn.openVpnSettings,
-    };
-  }
-  return {
-    message: "DNS protection is off: the LibreAscent VPN is not running",
-    open: FreedomVpn.openVpnSettings,
-  };
-}
+const TARGETS = {
+  accessibility: {
+    label: "Open accessibility settings",
+    open: FreedomAccessibility.openAccessibilitySettings,
+  },
+  vpn: { label: "Open VPN settings", open: FreedomVpn.openVpnSettings },
+};
 
 export default function DashboardScreen(): ReactNode {
   const t = useAppTheme();
@@ -110,12 +96,14 @@ export default function DashboardScreen(): ReactNode {
             }}
           >
             {protectionProblems.map((code) => {
-              const { message, open } = describeProblem(code);
+              const { message, target } = describeProblem(code);
+              const { label, open } = TARGETS[target];
               return (
                 <View key={code} className="mb-2">
                   <Text style={{ color: t.dangerColor }}>{message}</Text>
                   <Pressable
                     accessibilityRole="button"
+                    accessibilityLabel={label}
                     onPress={() => void open()}
                     className="self-start mt-1 px-3 py-1 rounded-full"
                     style={{ backgroundColor: t.dangerColor }}
@@ -124,7 +112,7 @@ export default function DashboardScreen(): ReactNode {
                       className="text-xs font-bold"
                       style={{ color: "#fff" }}
                     >
-                      Open settings
+                      {label}
                     </Text>
                   </Pressable>
                 </View>

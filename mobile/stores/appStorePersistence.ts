@@ -1,7 +1,10 @@
 import type { BlockingStats } from "@/types/blocking";
 import type { AppState } from "./useAppStore";
 
-export type PersistedAppState = Omit<AppState, "protection" | "stats"> & {
+export type PersistedAppState = Omit<
+  AppState,
+  "protection" | "protectionProblems" | "stats"
+> & {
   stats: Pick<BlockingStats, "cleanSince" | "daysClean">;
 };
 
@@ -17,7 +20,12 @@ export function incrementBlockedStats(stats: BlockingStats): BlockingStats {
 
 /** Drops fields that change per blocked event, so dedupingAppStoreStorage can skip those writes. */
 export function partializeAppState(state: AppState): PersistedAppState {
-  const { protection: _protection, stats, ...rest } = state;
+  const {
+    protection: _protection,
+    protectionProblems: _protectionProblems,
+    stats,
+    ...rest
+  } = state;
   return {
     ...rest,
     stats: { cleanSince: stats.cleanSince, daysClean: stats.daysClean },

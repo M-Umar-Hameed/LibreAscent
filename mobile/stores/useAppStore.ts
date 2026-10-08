@@ -11,6 +11,7 @@ import type {
   ScheduleEntry,
   SurveillanceConfig,
 } from "@/types/blocking";
+import { sameProblems } from "@/services/protectionProblems";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import {
@@ -115,7 +116,7 @@ export const useAppStore = create<AppState>()(
 
       setProtectionProblems: (problems) =>
         set((state) =>
-          state.protectionProblems.join("|") === problems.join("|")
+          sameProblems(state.protectionProblems, problems)
             ? state
             : { protectionProblems: problems },
         ),
@@ -166,8 +167,7 @@ export const useAppStore = create<AppState>()(
     {
       name: "freedom-app-store",
       storage: createJSONStorage(() => dedupingAppStoreStorage),
-      partialize: ({ protectionProblems: _problems, ...state }) =>
-        partializeAppState(state as AppState),
+      partialize: partializeAppState,
       merge: mergeAppState,
       onRehydrateStorage: () => (state) => {
         state?.setProtection({

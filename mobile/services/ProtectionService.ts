@@ -68,16 +68,15 @@ export const ProtectionService = {
       accessibilityRunning,
       foregroundService,
       overlay,
+      problems,
     ] = await Promise.all([
       FreedomVpn.isVpnActive(),
       FreedomAccessibility.isAccessibilityEnabled(),
       FreedomAccessibility.isServiceRunning(),
       FreedomForeground.isServiceRunning(),
       FreedomOverlay.hasOverlayPermission(),
+      FreedomForeground.getProtectionProblems().catch(() => []),
     ]);
-    const problems = await FreedomForeground.getProtectionProblems().catch(
-      () => [],
-    );
     useAppStore.getState().setProtectionProblems(problems ?? []);
     const status = {
       vpn,

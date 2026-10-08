@@ -157,6 +157,10 @@ class ReelsDetector {
             return false
         }
 
+        // Snapchat plays friends' stories and Discover in the same viewer; only a
+        // friend's story offers "Reply to <name>...".
+        if (packageName == SNAPCHAT && isSnapchatDiscoverViewer(rootNode)) return true
+
         for (nodeId in detectionNodes) {
             if (overDeadline(deadline)) return null
             val fullResourceId = "$packageName:id/$nodeId"
@@ -247,6 +251,51 @@ class ReelsDetector {
         return false
     }
 
+    @Volatile
+    private var snapchatPublicViewerSince = 0L
+
+    /**
+     * Discover, Quick Add suggestions and other public stories offer "View
+     * Profile" and no reply bar; a friend's story offers "Reply to <name>...".
+     * The reply bar renders a moment after the viewer opens, so the verdict
+     * waits until the public signs have held for SNAPCHAT_SETTLE_MS.
+     */
+    private fun isSnapchatDiscoverViewer(root: AccessibilityNodeInfo): Boolean {
+        val viewerOpen = anyVisible(root.findAccessibilityNodeInfosByViewId("$SNAPCHAT:id/opera_viewer"))
+        var friendStory = false
+        if (viewerOpen) {
+            for (node in root.findAccessibilityNodeInfosByText("Reply to") ?: emptyList()) {
+                if (node.isVisibleToUser && node.text?.toString()?.startsWith("Reply to") == true) {
+                    friendStory = true
+                }
+                node.recycle()
+            }
+        }
+        val publicStory = viewerOpen && !friendStory &&
+            anyVisible(root.findAccessibilityNodeInfosByText("View Profile"))
+        val now = android.os.SystemClock.uptimeMillis()
+        return snapchatPublicStorySettled(publicStory, now)
+    }
+
+    internal fun snapchatPublicStorySettled(publicStory: Boolean, now: Long): Boolean {
+        if (!publicStory) {
+            snapchatPublicViewerSince = 0L
+            return false
+        }
+        if (snapchatPublicViewerSince == 0L) snapchatPublicViewerSince = now
+        return now - snapchatPublicViewerSince >= SNAPCHAT_SETTLE_MS
+    }
+
+    private fun anyVisible(nodes: List<AccessibilityNodeInfo>?): Boolean {
+        if (nodes.isNullOrEmpty()) return false
+        var visible = false
+        for (node in nodes) {
+            if (node.isVisibleToUser) visible = true
+            node.recycle()
+        }
+        return visible
+    }
+
     /**
      * Reset detection state (e.g., when user navigates away from a reels app).
      *
@@ -269,6 +318,8 @@ class ReelsDetector {
         private const val PREFS_NAME = "freedom_settings"
         private const val KEY_REELS_CONFIGS = "reels_configs"
         private const val YOUTUBE = "com.google.android.youtube"
+        private const val SNAPCHAT = "com.snapchat.android"
+        private const val SNAPCHAT_SETTLE_MS = 800L
 
         /**
          * What one ancestor of a visible reels label says: true when it is the

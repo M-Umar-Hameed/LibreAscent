@@ -2,15 +2,41 @@ import { useAppTheme } from "@/providers/ThemeProvider";
 import { ProtectionService } from "@/services/ProtectionService";
 import { useAppStore } from "@/stores/useAppStore";
 import { useBlockingStore } from "@/stores/useBlockingStore";
+import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
+import * as FreedomVpn from "@/modules/freedom-vpn-service/src";
 import { Ionicons } from "@expo/vector-icons";
 import type { ComponentProps, ReactNode } from "react";
-import { ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+
+function describeProblem(code: string): {
+  message: string;
+  open: () => Promise<void>;
+} {
+  if (code === "accessibility_off") {
+    return {
+      message: "Content protection is off: accessibility service is disabled",
+      open: FreedomAccessibility.openAccessibilitySettings,
+    };
+  }
+  if (code.startsWith("vpn_taken:")) {
+    const pkg = code.slice("vpn_taken:".length);
+    return {
+      message: `DNS protection is off: ${pkg ? `${pkg} is set as the always-on VPN` : "another VPN app holds the VPN slot"}`,
+      open: FreedomVpn.openVpnSettings,
+    };
+  }
+  return {
+    message: "DNS protection is off: the LibreAscent VPN is not running",
+    open: FreedomVpn.openVpnSettings,
+  };
+}
 
 export default function DashboardScreen(): ReactNode {
   const t = useAppTheme();
   const stats = useAppStore((state) => state.stats);
-  const { controlMode, protection, schedule } = useAppStore();
+  const { controlMode, protection, protectionProblems, schedule } =
+    useAppStore();
   const keywordsCount = useBlockingStore((state) => state.keywords.length);
   const domainsBlockedCount = useBlockingStore(
     (state) => state.includedUrls.length,
@@ -73,6 +99,39 @@ export default function DashboardScreen(): ReactNode {
         >
           Your shield against addiction
         </Text>
+
+        {protectionProblems.length > 0 && (
+          <View
+            className="rounded-2xl p-4 mb-6"
+            style={{
+              backgroundColor: t.dangerColor + "1A",
+              borderWidth: 1,
+              borderColor: t.dangerColor + "40",
+            }}
+          >
+            {protectionProblems.map((code) => {
+              const { message, open } = describeProblem(code);
+              return (
+                <View key={code} className="mb-2">
+                  <Text style={{ color: t.dangerColor }}>{message}</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => void open()}
+                    className="self-start mt-1 px-3 py-1 rounded-full"
+                    style={{ backgroundColor: t.dangerColor }}
+                  >
+                    <Text
+                      className="text-xs font-bold"
+                      style={{ color: "#fff" }}
+                    >
+                      Open settings
+                    </Text>
+                  </Pressable>
+                </View>
+              );
+            })}
+          </View>
+        )}
 
         {/* Protection Status */}
         <View className="rounded-3xl p-6 items-center mb-6" style={cardStyle}>

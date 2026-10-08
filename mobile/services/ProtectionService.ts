@@ -75,6 +75,10 @@ export const ProtectionService = {
       FreedomForeground.isServiceRunning(),
       FreedomOverlay.hasOverlayPermission(),
     ]);
+    const problems = await FreedomForeground.getProtectionProblems().catch(
+      () => [],
+    );
+    useAppStore.getState().setProtectionProblems(problems ?? []);
     const status = {
       vpn,
       accessibility: accessibilityEnabled && accessibilityRunning,

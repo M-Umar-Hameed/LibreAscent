@@ -23,6 +23,8 @@ export interface AppState {
   // Protection status
   protection: ProtectionStatus;
 
+  protectionProblems: string[];
+
   // Stats
   stats: BlockingStats;
 
@@ -49,6 +51,7 @@ export interface AppState {
 
   // Actions
   setProtection: (status: Partial<ProtectionStatus>) => void;
+  setProtectionProblems: (problems: string[]) => void;
   incrementBlocked: () => void;
   resetCleanStreak: () => void;
   setAutoStart: (value: boolean) => void;
@@ -76,6 +79,8 @@ export const useAppStore = create<AppState>()(
         deviceAdmin: false,
         foregroundService: false,
       },
+
+      protectionProblems: [],
 
       stats: {
         blockedToday: 0,
@@ -107,6 +112,13 @@ export const useAppStore = create<AppState>()(
         set((state) => ({
           protection: { ...state.protection, ...status },
         })),
+
+      setProtectionProblems: (problems) =>
+        set((state) =>
+          state.protectionProblems.join("|") === problems.join("|")
+            ? state
+            : { protectionProblems: problems },
+        ),
 
       incrementBlocked: () =>
         set((state) => ({ stats: incrementBlockedStats(state.stats) })),
@@ -154,7 +166,8 @@ export const useAppStore = create<AppState>()(
     {
       name: "freedom-app-store",
       storage: createJSONStorage(() => dedupingAppStoreStorage),
-      partialize: partializeAppState,
+      partialize: ({ protectionProblems: _problems, ...state }) =>
+        partializeAppState(state as AppState),
       merge: mergeAppState,
       onRehydrateStorage: () => (state) => {
         state?.setProtection({

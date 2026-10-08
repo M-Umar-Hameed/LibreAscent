@@ -75,6 +75,9 @@ class FreedomAccessibilityService : AccessibilityService() {
     private val nsfwSlot = ScanSlot<String>()
     // Main thread only: gates NSFW scans before any root is fetched.
     private val nsfwRateLimit = PerKeyRateLimit(NSFW_SCAN_MIN_INTERVAL_MS)
+    // Main thread only: a trailing-scan token per package, so a browser's NSFW
+    // scans and an app's never cancel each other's trailing scan.
+    private val nsfwTrailingTokens = HashMap<String, Any>()
     // Scan thread only: where the next NSFW scan resumes after one ran out of budget.
     private var nsfwResumeAt = 0
     private var packageAddedReceiver: PackageAddedReceiver? = null
@@ -107,7 +110,6 @@ class FreedomAccessibilityService : AccessibilityService() {
         private val SCOPE_TOKEN = Any()
         private val REPROBE_TOKEN = Any()
         private val FULL_SCAN_TOKEN = Any()
-        private val NSFW_TRAILING_TOKEN = Any()
 
         // Content-changed stays subscribed for every package: an in-app WebView
         // lives in a package we cannot enumerate, and its events are the only
@@ -428,7 +430,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             if (packageName != foregroundAppPackage &&
                 !TransientWindows.isTransient(packageName, imePackages)) {
                 foregroundAppPackage = packageName
-                handler.removeCallbacksAndMessages(NSFW_TRAILING_TOKEN)
+                nsfwTrailingTokens.values.forEach(handler::removeCallbacksAndMessages)
                 // Queued behind any scan of the previous app, ahead of the new app's.
                 scanHandler.post { whitelistMemory = null }
             }
@@ -592,8 +594,9 @@ class FreedomAccessibilityService : AccessibilityService() {
             postScan(nsfwSlot, packageName, ::handleNsfwScan)
             return
         }
-        handler.removeCallbacksAndMessages(NSFW_TRAILING_TOKEN)
-        handler.postAtTime({ requestNsfwScan(packageName) }, NSFW_TRAILING_TOKEN,
+        val token = nsfwTrailingTokens.getOrPut(packageName) { Any() }
+        handler.removeCallbacksAndMessages(token)
+        handler.postAtTime({ requestNsfwScan(packageName) }, token,
             android.os.SystemClock.uptimeMillis() + wait)
     }
 
@@ -707,6 +710,11 @@ class FreedomAccessibilityService : AccessibilityService() {
                 lastCheckUrl = allowedCandidate
                 lastUrlCheckTime = now
                 Log.d(TAG, "URL allowed: $allowedCandidate (from ${candidates.size} candidates)")
+            }
+            // The web side of an NSFW-monitored app gets the same page scan,
+            // keyed by the browser package so it and the app never share a slot.
+            if (NsfwWeb.shouldScan(urlBar, pageWhitelisted, contentMatcher::isNsfwMonitoredApp)) {
+                handler.post { requestNsfwScan(packageName) }
             }
             return
         }
@@ -1600,6 +1608,29 @@ internal object PageWhitelist {
         if (host.contains('.') && isWhitelisted(host)) return host to Memory(packageName, host, now)
         return null to null
     }
+}
+
+/** Sites of the NSFW-monitored apps, matched on the URL-bar host and its subdomains. */
+internal object NsfwWeb {
+    private val SITES = mapOf(
+        "com.reddit.frontpage" to listOf("reddit.com", "redd.it"),
+        "com.twitter.android" to listOf("x.com", "twitter.com"),
+        "com.zhiliaoapp.musically" to listOf("tiktok.com"),
+        "com.ss.android.ugc.trill" to listOf("tiktok.com"),
+        "com.facebook.katana" to listOf("facebook.com")
+    )
+
+    /** Packages whose site [urlBar] is on. */
+    fun packagesFor(urlBar: String): List<String> {
+        val u = urlBar.trim().lowercase().substringAfter("://").substringBefore(' ')
+        val host = u.substring(0, u.indexOfAny(charArrayOf('/', '?', '#')).let { if (it < 0) u.length else it })
+            .substringBefore(':')
+        return SITES.filterValues { sites -> sites.any { host == it || host.endsWith(".$it") } }.keys.toList()
+    }
+
+    /** Whether a browser page with this URL bar gets the NSFW scan. Page text never decides it. */
+    fun shouldScan(urlBar: String?, pageWhitelisted: Boolean, isMonitored: (String) -> Boolean): Boolean =
+        !urlBar.isNullOrBlank() && !pageWhitelisted && packagesFor(urlBar).any(isMonitored)
 }
 
 /** Windows that report their own package while the app beneath stays foreground. */

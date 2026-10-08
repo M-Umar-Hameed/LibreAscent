@@ -121,35 +121,43 @@ class BrowserCoverageTest {
         assertTrue(inReelsFeed("com.instagram.android", "Reels", Triple(recycler, true, 1800), pager))
     }
 
+    private val wiki: (String) -> Boolean = { it == "wikipedia.org" }
+
     @Test
     fun aWhitelistedUrlBarSetsThePageContextAndIsRemembered() {
-        val (context, memory) = PageWhitelist.resolve("org.mozilla.firefox", "wikipedia.org", { it == "wikipedia.org" }, null)
+        val (context, memory) = PageWhitelist.resolve("org.mozilla.firefox", "wikipedia.org/wiki/x", wiki, null, 1_000)
 
         assertEquals("wikipedia.org", context)
-        assertEquals(PageWhitelist.Memory("org.mozilla.firefox", "wikipedia.org"), memory)
+        assertEquals(PageWhitelist.Memory("org.mozilla.firefox", "wikipedia.org", 1_000), memory)
     }
 
     @Test
-    fun anUnreadableUrlBarKeepsTheRememberedDomainForTheSameBrowserOnly() {
+    fun anUnreadableUrlBarInheritsTheRememberedDomainWithinTheTtl() {
         // Chrome hides its toolbar while scrolling; page text must not clear this.
-        val remembered = PageWhitelist.Memory("com.android.chrome", "wikipedia.org")
+        val remembered = PageWhitelist.Memory("com.android.chrome", "wikipedia.org", 1_000)
 
-        val (context, memory) = PageWhitelist.resolve("com.android.chrome", null, { false }, remembered)
+        val (context, memory) = PageWhitelist.resolve("com.android.chrome", null, { false }, remembered, 20_000)
         assertEquals("wikipedia.org", context)
         assertEquals(remembered, memory)
 
-        val (otherContext, otherMemory) = PageWhitelist.resolve("org.mozilla.firefox", null, { false }, remembered)
-        assertEquals(null, otherContext)
-        assertEquals(remembered, otherMemory)
+        val expired = PageWhitelist.resolve("com.android.chrome", null, { false }, remembered, 1_000 + PageWhitelist.TTL_MS)
+        assertEquals(null to null, expired)
     }
 
     @Test
-    fun aNonWhitelistedUrlBarHostClearsTheMemory() {
-        val remembered = PageWhitelist.Memory("com.android.chrome", "wikipedia.org")
+    fun anotherPackagesEventDropsTheMemory() {
+        val remembered = PageWhitelist.Memory("com.android.chrome", "wikipedia.org", 1_000)
 
-        val (context, memory) = PageWhitelist.resolve("com.android.chrome", "example.com", { it == "wikipedia.org" }, remembered)
+        assertEquals(null to null, PageWhitelist.resolve("org.mozilla.firefox", null, { false }, remembered, 2_000))
+    }
 
-        assertEquals(null, context)
-        assertEquals(null, memory)
+    @Test
+    fun aNonWhitelistedUrlBarValueClearsTheMemory() {
+        val remembered = PageWhitelist.Memory("com.android.chrome", "wikipedia.org", 1_000)
+
+        assertEquals(null to null, PageWhitelist.resolve("com.android.chrome", "example.com/x", wiki, remembered, 2_000))
+        // A typed search term or omnibox edit is a value without a site, not an unreadable bar.
+        assertEquals(null to null, PageWhitelist.resolve("com.android.chrome", "some search", wiki, remembered, 2_000))
+        assertEquals(null to null, PageWhitelist.resolve("com.android.chrome", "wikipedia", wiki, remembered, 2_000))
     }
 }

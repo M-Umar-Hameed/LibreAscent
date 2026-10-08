@@ -85,7 +85,8 @@ class FreedomAccessibilityService : AccessibilityService() {
     @Volatile private var lastFullScanAt: Long = 0
     @Volatile private var fullScanPending = false
     // The last whitelisted URL-bar domain and its browser, so events that cannot
-    // read the URL bar still get context. Scan thread only.
+    // read the URL bar still get context. Read and written on the scan thread
+    // only; a foreground change clears it through a post to that thread.
     private var whitelistMemory: PageWhitelist.Memory? = null
     // True while the expensive event/flag set is subscribed. Guards setServiceInfo
     // so it runs on scope transitions only, never per event.
@@ -428,6 +429,8 @@ class FreedomAccessibilityService : AccessibilityService() {
                 !TransientWindows.isTransient(packageName, imePackages)) {
                 foregroundAppPackage = packageName
                 handler.removeCallbacksAndMessages(NSFW_TRAILING_TOKEN)
+                // Queued behind any scan of the previous app, ahead of the new app's.
+                scanHandler.post { whitelistMemory = null }
             }
             if (packageName != currentPackage) {
                 // User switched apps - reset reels state for both old and new app
@@ -643,10 +646,9 @@ class FreedomAccessibilityService : AccessibilityService() {
         // Only the URL bar says which site this is. Page text names other sites
         // in links, captions and footers, and a whitelisted one there switched
         // keyword checks off for the whole page.
-        val urlBarHost = urlBar?.substringBefore('/')?.substringBefore('?')?.substringBefore(' ')
-            ?.takeIf { it.contains('.') }
         val (contextDomain, memory) = PageWhitelist.resolve(
-            packageName, urlBarHost, contentMatcher::isWhitelisted, whitelistMemory)
+            packageName, urlBar, contentMatcher::isWhitelisted, whitelistMemory,
+            android.os.SystemClock.uptimeMillis())
         whitelistMemory = memory
         val pageWhitelisted = contextDomain != null
 
@@ -1567,24 +1569,34 @@ internal object KeywordRotation {
  * Which whitelisted site a browser page belongs to, decided by the URL bar alone.
  * Page text names other sites, so it never sets or clears this. Browsers hide
  * their toolbar while scrolling, so an event with no readable URL bar keeps the
- * last whitelisted domain seen for the same browser.
+ * last whitelisted domain seen in the same browser, for at most [TTL_MS]. An
+ * event from another package drops it, so a later visit starts without it.
  */
 internal object PageWhitelist {
-    data class Memory(val packageName: String, val domain: String)
+    const val TTL_MS = 30_000L
+
+    data class Memory(val packageName: String, val domain: String, val seenAt: Long)
 
     /**
-     * @param urlBarHost the URL bar's host, or null when no URL bar host was read
+     * @param urlBar the normalized URL-bar value, or null when it could not be read
+     * @param now uptime millis
      * @return the page's whitelisted domain (null if none) and the memory to keep
      */
     fun resolve(
         packageName: String,
-        urlBarHost: String?,
+        urlBar: String?,
         isWhitelisted: (String) -> Boolean,
-        memory: Memory?
-    ): Pair<String?, Memory?> = when {
-        urlBarHost == null -> memory?.takeIf { it.packageName == packageName }?.domain to memory
-        isWhitelisted(urlBarHost) -> urlBarHost to Memory(packageName, urlBarHost)
-        else -> null to null
+        memory: Memory?,
+        now: Long
+    ): Pair<String?, Memory?> {
+        if (urlBar.isNullOrBlank()) {
+            val live = memory?.takeIf { it.packageName == packageName && now - it.seenAt < TTL_MS }
+            return live?.domain to live
+        }
+        // A value without a dot is a search term or an edit in progress, not a site.
+        val host = urlBar.substringBefore('/').substringBefore('?').substringBefore(' ')
+        if (host.contains('.') && isWhitelisted(host)) return host to Memory(packageName, host, now)
+        return null to null
     }
 }
 

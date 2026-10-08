@@ -16,4 +16,16 @@ export const NSFW_APPS: NsfwAppConfig[] = [
     name: "X (Twitter)",
     packageName: "com.twitter.android",
   },
+  {
+    name: "TikTok",
+    packageName: "com.zhiliaoapp.musically",
+  },
+  {
+    name: "TikTok (Asia)",
+    packageName: "com.ss.android.ugc.trill",
+  },
+  {
+    name: "Facebook",
+    packageName: "com.facebook.katana",
+  },
 ];

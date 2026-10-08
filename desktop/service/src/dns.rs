@@ -1,14 +1,18 @@
 use anyhow::{Context, Result};
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::{DnsError, NetError};
 use libreascent_shared::blocklist::DomainBlocklist;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
@@ -17,40 +21,183 @@ use crate::config_loader;
 
 const LOCAL_PROXY_TIMEOUT: Duration = Duration::from_secs(5);
 const RELOAD_POLL_SECS: u64 = 60;
+/// Per-tier query timeout. The tiers below do the retrying, so a dead tier
+/// should cost one short wait, not hickory's default two attempts of 5s.
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(3);
+/// A tier is skipped for this long once it has failed TRIP_AFTER times in a
+/// row. One timeout under a burst must not take a tier out: under load Quad9
+/// drops the odd query, and a single-failure breaker turned that into a minute
+/// of SERVFAIL for everything.
+const BREAKER_SECS: u64 = 60;
+const TRIP_AFTER: u32 = 3;
+/// Seconds without any upstream answer before UPSTREAM_DOWN is raised.
+const FAIL_OPEN_SECS: u64 = 60;
+/// Something else can hold :53 (Internet Connection Sharing, Mobile Hotspot).
+/// Keep trying for two minutes rather than leave a pinned resolver with nothing
+/// behind it.
+const BIND_RETRIES: u32 = 24;
+const BIND_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-/// Upstream resolver. Forwards over DNS-over-TLS to Quad9 (9.9.9.9:853). The
-/// firewall (firewall_manager) seals plaintext :53 and DoH/DoT to every other
-/// resolver but leaves Quad9:853 reachable, so this choice must stay Quad9 to
-/// match that exemption. The pooled connection and response cache keep steady
-/// -state latency close to plain UDP by avoiding a TLS handshake per query.
-fn build_upstream_resolver() -> Result<TokioResolver> {
+/// Raised once every upstream tier has failed for FAIL_OPEN_SECS, cleared by
+/// the next answer. service_manager releases the DNS pin on it in Locked mode.
+pub static UPSTREAM_DOWN: AtomicBool = AtomicBool::new(false);
+
+static UPSTREAM: OnceLock<Arc<Upstream>> = OnceLock::new();
+
+/// Quad9 over DoT, then DoH, then plain UDP, in that order. Every tier is the
+/// same resolver, so a fallback never widens what the firewall already grants
+/// to Quad9 on :853; firewall_manager carves Quad9 out of its :53 and :443
+/// seals to match. The plaintext tier is what survives a reset clock: with the
+/// CMOS cleared every TLS handshake fails as "not yet valid", and w32time cannot
+/// fix the clock because it needs DNS first.
+pub struct Upstream {
+    tiers: Vec<Tier>,
+    started: Instant,
+    last_ok: AtomicU64,
+}
+
+struct Tier {
+    label: &'static str,
+    resolver: TokioResolver,
+    /// Failures since the last answer from this tier.
+    failures: AtomicU32,
+    /// Seconds since `Upstream::started` before which the tier is skipped.
+    down_until: AtomicU64,
+}
+
+impl Upstream {
+    fn secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    /// Ok: answers. Err(Some): an authoritative negative answer (NXDOMAIN and
+    /// friends) to pass through. Err(None): every tier tried failed.
+    async fn lookup(&self, name: Name, rtype: RecordType) -> Result<Lookup, Option<ResponseCode>> {
+        let now = self.secs();
+        let mut live: Vec<&Tier> = self
+            .tiers
+            .iter()
+            .filter(|tier| tier.down_until.load(Ordering::Relaxed) <= now)
+            .collect();
+        // Every breaker open: still try the primary, so a dead upstream costs a
+        // query one timeout rather than an instant refusal for a minute, and the
+        // first answer closes the breakers again.
+        if live.is_empty() {
+            live.push(&self.tiers[0]);
+        }
+        for tier in live {
+            match tier.resolver.lookup(name.clone(), rtype).await {
+                Ok(lookup) => {
+                    self.answered(tier, now);
+                    return Ok(lookup);
+                }
+                Err(NetError::Dns(DnsError::NoRecordsFound(no_records))) => {
+                    self.answered(tier, now);
+                    return Err(Some(no_records.response_code));
+                }
+                Err(error) => {
+                    let failures = tier.failures.fetch_add(1, Ordering::Relaxed) + 1;
+                    if failures >= TRIP_AFTER {
+                        tier.down_until.store(now + BREAKER_SECS, Ordering::Relaxed);
+                    }
+                    if failures == TRIP_AFTER {
+                        crate::dns_manager::log_tamper_event(&format!(
+                            "Upstream {} failed {TRIP_AFTER} times, skipped for {BREAKER_SECS}s: {error}",
+                            tier.label
+                        ));
+                    }
+                }
+            }
+        }
+        if now.saturating_sub(self.last_ok.load(Ordering::Relaxed)) >= FAIL_OPEN_SECS {
+            UPSTREAM_DOWN.store(true, Ordering::Relaxed);
+        }
+        Err(None)
+    }
+
+    fn answered(&self, tier: &Tier, now: u64) {
+        tier.failures.store(0, Ordering::Relaxed);
+        tier.down_until.store(0, Ordering::Relaxed);
+        self.last_ok.store(now, Ordering::Relaxed);
+        UPSTREAM_DOWN.store(false, Ordering::Relaxed);
+    }
+}
+
+fn build_upstream() -> Result<Upstream> {
     use std::net::{IpAddr, Ipv4Addr};
 
-    // IPv4-only Quad9 DoT endpoints. Talking to the upstream over IPv4 avoids a
+    // IPv4-only Quad9 endpoints. Talking to the upstream over IPv4 avoids a
     // hard failure on hosts without an IPv6 route; clients still receive AAAA
-    // records normally. 9.9.9.9 is what the firewall leaves reachable on :853.
+    // records normally. Ports set explicitly rather than by protocol default:
+    // the firewall exemptions are written against Quad9 on exactly these.
+    build_upstream_for(
+        &[
+            IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
+            IpAddr::V4(Ipv4Addr::new(149, 112, 112, 112)),
+        ],
+        [853, 443, 53],
+    )
+}
+
+fn build_upstream_for(ips: &[std::net::IpAddr], ports: [u16; 3]) -> Result<Upstream> {
     let server_name: Arc<str> = Arc::from("dns.quad9.net");
-    let quad9 = [
-        IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
-        IpAddr::V4(Ipv4Addr::new(149, 112, 112, 112)),
-    ]
-    .into_iter()
-    .map(|ip| {
-        let mut connection = ConnectionConfig::tls(Arc::clone(&server_name));
-        // Set explicitly rather than relying on the protocol default: the
-        // firewall exemption is written against Quad9 on :853.
-        connection.port = 853;
-        NameServerConfig::new(ip, true, vec![connection])
+    let mut dot = ConnectionConfig::tls(Arc::clone(&server_name));
+    dot.port = ports[0];
+    let mut doh = ConnectionConfig::https(Arc::clone(&server_name), None);
+    doh.port = ports[1];
+    let mut udp = ConnectionConfig::udp();
+    udp.port = ports[2];
+
+    let tiers = [("DoT", dot), ("DoH", doh), ("UDP", udp)]
+        .into_iter()
+        .map(|(label, connection)| {
+            Ok(Tier {
+                label,
+                resolver: build_resolver(ips, connection)?,
+                failures: AtomicU32::new(0),
+                down_until: AtomicU64::new(0),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Upstream {
+        tiers,
+        started: Instant::now(),
+        last_ok: AtomicU64::new(0),
     })
-    .collect();
+}
+
+fn build_resolver(ips: &[std::net::IpAddr], connection: ConnectionConfig) -> Result<TokioResolver> {
+    let quad9 = ips
+        .iter()
+        .map(|ip| NameServerConfig::new(*ip, true, vec![connection.clone()]))
+        .collect();
     let config = ResolverConfig::from_parts(None, Vec::new(), quad9);
 
     let mut opts = ResolverOpts::default();
     opts.cache_size = 1024;
+    opts.timeout = UPSTREAM_TIMEOUT;
+    opts.attempts = 1;
     TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
         .with_options(opts)
         .build()
         .context("failed to build upstream DNS resolver")
+}
+
+pub fn upstream() -> Result<Arc<Upstream>> {
+    if let Some(existing) = UPSTREAM.get() {
+        return Ok(Arc::clone(existing));
+    }
+    let built = Arc::new(build_upstream()?);
+    Ok(Arc::clone(UPSTREAM.get_or_init(|| built)))
+}
+
+/// One lookup through the tiers. While the pin is released nothing reaches the
+/// proxy, so this is how service_manager learns the upstream is back.
+pub async fn upstream_probe() -> bool {
+    let (Ok(upstream), Ok(name)) = (upstream(), Name::from_ascii("dns.quad9.net.")) else {
+        return false;
+    };
+    !matches!(upstream.lookup(name, RecordType::A).await, Err(None))
 }
 
 pub struct BlockedDnsResponse {
@@ -99,27 +246,36 @@ pub async fn run_local_dns_proxy_with_ready(
 ) -> Result<()> {
     let bind: SocketAddr = bind_addr.parse().context("invalid DNS bind address")?;
 
-    let socket = match UdpSocket::bind(bind)
-        .await
-        .context("failed to bind DNS proxy")
-    {
-        Ok(socket) => {
-            if let Some(sender) = ready {
-                let _ = sender.send(Ok(()));
+    let mut attempt = 0;
+    let socket = loop {
+        match UdpSocket::bind(bind).await {
+            Ok(socket) => break socket,
+            Err(error) if attempt < BIND_RETRIES => {
+                attempt += 1;
+                if attempt == 1 {
+                    crate::dns_manager::log_tamper_event(&format!(
+                        "DNS proxy cannot bind {bind}: {error}. Retrying."
+                    ));
+                }
+                tokio::time::sleep(BIND_RETRY_DELAY).await;
             }
-            Arc::new(socket)
-        }
-        Err(error) => {
-            if let Some(sender) = ready {
-                let _ = sender.send(Err(error.to_string()));
+            Err(error) => {
+                let error = anyhow::Error::from(error).context("failed to bind DNS proxy");
+                if let Some(sender) = ready {
+                    let _ = sender.send(Err(error.to_string()));
+                }
+                return Err(error);
             }
-            return Err(error);
         }
     };
+    if let Some(sender) = ready {
+        let _ = sender.send(Ok(()));
+    }
+    let socket = Arc::new(socket);
     let broadcast_socket = UdpSocket::bind("127.0.0.1:0").await.ok();
     let mut buffer = vec![0_u8; 4096];
     let blocklist = Arc::new(RwLock::new(config_loader::load_blocklist(&config_path)));
-    let resolver = Arc::new(build_upstream_resolver()?);
+    let resolver = upstream()?;
     crate::dns_manager::log_tamper_event("DNS proxy started. Blocklist loaded.");
     tokio::spawn(watch_blocklist_file(config_path.clone(), Arc::clone(&blocklist)));
 
@@ -140,11 +296,11 @@ pub async fn run_local_dns_proxy_with_ready(
             build_block_response_if_needed(&request, &list)
         };
         match verdict {
+            // Not logged: a synchronous append to tamper.log per blocked query
+            // put the p99 of the fast path above a second under load, and wrote
+            // every blocked name to a world-readable file. The UI gets the
+            // broadcast below instead.
             Ok(Some(blocked)) => {
-                crate::dns_manager::log_tamper_event(&format!(
-                    "Blocked DNS: {domain} ({request_id:04x})",
-                    domain = blocked.domain
-                ));
                 let _ = socket.send_to(&blocked.response, peer).await;
 
                 if let Some(ref b_socket) = broadcast_socket {
@@ -185,7 +341,7 @@ pub async fn run_local_dns_proxy_with_ready(
     }
 }
 
-async fn resolve_via_upstream(resolver: &TokioResolver, request: &[u8]) -> Result<Vec<u8>> {
+async fn resolve_via_upstream(resolver: &Upstream, request: &[u8]) -> Result<Vec<u8>> {
     let message = Message::from_bytes(request).context("failed to parse DNS request")?;
     let Some(query) = message.queries.first() else {
         return build_error_response(request, ResponseCode::FormErr);
@@ -205,10 +361,10 @@ async fn resolve_via_upstream(resolver: &TokioResolver, request: &[u8]) -> Resul
         }
         // A name that does not resolve is a normal answer, not a failure: pass
         // the upstream's code through so NXDOMAIN stays NXDOMAIN.
-        Err(NetError::Dns(DnsError::NoRecordsFound(no_records))) => {
-            response.metadata.response_code = no_records.response_code;
+        Err(Some(code)) => {
+            response.metadata.response_code = code;
         }
-        Err(_) => {
+        Err(None) => {
             response.metadata.response_code = ResponseCode::ServFail;
         }
     }
@@ -313,25 +469,74 @@ mod tests {
     use hickory_proto::op::Query;
     use hickory_proto::rr::{Name, RecordType};
 
-    // Live check: resolves through the real Quad9 DoT upstream. Ignored so CI
-    // never depends on the network. Run with:
-    //   cargo test -p libreascent-service resolves_via_quad9_dot -- --ignored --nocapture
+    // Live check: resolves through the real Quad9 upstream, one tier at a time,
+    // so a tier that is silently broken (feature flag, port, path) shows up.
+    // Ignored so CI never depends on the network. Run with:
+    //   cargo test -p libreascent-service resolves_via_every_quad9_tier -- --ignored --nocapture
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore]
-    async fn resolves_via_quad9_dot() {
-        let resolver = build_upstream_resolver().expect("resolver should build");
-        let request = dns_query("example.com.");
+    async fn resolves_via_every_quad9_tier() {
+        let upstream = build_upstream().expect("upstream should build");
+        assert_eq!(upstream.tiers.len(), 3);
+        for tier in &upstream.tiers {
+            let name = Name::from_ascii("example.com.").unwrap();
+            let lookup = tier
+                .resolver
+                .lookup(name, RecordType::A)
+                .await
+                .unwrap_or_else(|e| panic!("{} tier failed: {e}", tier.label));
+            assert!(lookup.answers().len() > 0, "{}: expected an A record", tier.label);
+        }
 
-        let response_bytes = resolve_via_upstream(&resolver, &request)
+        let request = dns_query("example.com.");
+        let response_bytes = resolve_via_upstream(&upstream, &request)
             .await
             .expect("upstream should resolve");
         let response = Message::from_bytes(&response_bytes).expect("response should parse");
-
         assert_eq!(response.metadata.response_code, ResponseCode::NoError);
-        assert!(
-            !response.answers.is_empty(),
-            "expected at least one A record from Quad9 DoT"
-        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dead_tiers_trip_their_breakers_and_the_query_fails_fast_after() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // Port 1 on loopback refuses every tier.
+        let upstream = build_upstream_for(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], [1, 1, 1])
+            .expect("upstream should build");
+        let name = Name::from_ascii("example.com.").unwrap();
+
+        // One failure is weather, not an outage: no breaker trips.
+        assert!(matches!(upstream.lookup(name.clone(), RecordType::A).await, Err(None)));
+        for tier in &upstream.tiers {
+            assert_eq!(tier.down_until.load(Ordering::Relaxed), 0, "{} tripped on one failure", tier.label);
+        }
+        for _ in 1..TRIP_AFTER {
+            assert!(matches!(upstream.lookup(name.clone(), RecordType::A).await, Err(None)));
+        }
+        for tier in &upstream.tiers {
+            assert!(tier.down_until.load(Ordering::Relaxed) >= BREAKER_SECS, "{} should be down", tier.label);
+        }
+        // Fresh process: the fail-open flag needs FAIL_OPEN_SECS of silence first.
+        assert!(!UPSTREAM_DOWN.load(Ordering::Relaxed));
+
+        // With every breaker open a query still tries the primary, once: a
+        // dead upstream costs one attempt, not three and not an instant refusal.
+        // Three attempts would include the UDP tier's full timeout.
+        let started = Instant::now();
+        assert!(matches!(upstream.lookup(name, RecordType::A).await, Err(None)));
+        assert!(started.elapsed() < UPSTREAM_TIMEOUT);
+        assert_eq!(upstream.tiers[0].failures.load(Ordering::Relaxed), TRIP_AFTER + 1);
+        assert_eq!(upstream.tiers[1].failures.load(Ordering::Relaxed), TRIP_AFTER);
+    }
+
+    #[test]
+    fn upstream_tiers_match_the_firewall_exemptions() {
+        // firewall_manager carves Quad9 out of :53 and :443 and never blocks
+        // Quad9 :853; a tier on any other port would be sealed by our own rules.
+        let upstream = build_upstream().expect("upstream should build");
+        let labels: Vec<_> = upstream.tiers.iter().map(|t| t.label).collect();
+        assert_eq!(labels, ["DoT", "DoH", "UDP"]);
+        assert!(!UPSTREAM_DOWN.load(Ordering::Relaxed));
     }
 
     #[test]

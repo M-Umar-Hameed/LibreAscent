@@ -16,6 +16,8 @@ import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/s
 import * as FreedomVpn from "@/modules/freedom-vpn-service/src";
 
 const SUSPENDED_PKGS_KEY = "libreascent.suspendedPkgs";
+/** Per-category fingerprint of what native was last given; see categoryFingerprint. */
+const PUSHED_FP_PREFIX = "libreascent.pushedFp:";
 import {
   getActiveExcludedUrls,
   getActiveIncludedUrls,
@@ -681,6 +683,24 @@ export const BlocklistService = {
   },
 
   /**
+   * Content hashes of the enabled sources feeding a category. Changes exactly
+   * when a refetch replaced the category's cached rows, so it says whether the
+   * copy native holds on disk is still the one the cache describes.
+   */
+  categoryFingerprint: (categoryId: string): string =>
+    useBlockingStore
+      .getState()
+      .sources.filter(
+        (s) =>
+          s.enabled &&
+          s.format !== "keywords" &&
+          BlocklistService.getCategoryForSource(s) === categoryId,
+      )
+      .map((s) => `${s.id}=${getSourceCache(s.id)?.contentHash ?? ""}`)
+      .sort()
+      .join("|"),
+
+  /**
    * Push ALL enabled categories from SQLite cache to native on app launch.
    * Fast path: skips if cache is empty (fresh install — updateBlocklists will fill it).
    */
@@ -689,6 +709,11 @@ export const BlocklistService = {
     nativeCounts?: Record<string, number>;
   }): Promise<void> => {
     const state = useBlockingStore.getState();
+    // The tunnel reloads its category files when it starts, so only a running
+    // tunnel holding nothing proves the disk copy is gone.
+    const vpnLoaded =
+      !(await FreedomVpn.isVpnActive()) ||
+      (await FreedomVpn.getBlocklistSize()) > 0;
 
     for (const category of state.categories) {
       const masterOn =
@@ -696,6 +721,30 @@ export const BlocklistService = {
       if (!masterOn || !category.enabled) continue;
       const cached = getCachedDomainCount(category.id);
       if (cached === 0) continue;
+
+      const fp = BlocklistService.categoryFingerprint(category.id);
+      const fpKey = PUSHED_FP_PREFIX + category.id;
+      const existingNativeCount = VPN_ONLY_CATEGORIES.has(category.id)
+        ? cached
+        : (options?.nativeCounts?.[category.id] ??
+          (options?.skipMatchingNative
+            ? await FreedomAccessibility.getCategoryDomainCount(category.id)
+            : 0));
+      // Both native sides persist categories to disk and reload them on their
+      // own, so a launch re-pushes only when the cache changed since the last
+      // push. Re-sending every time cost 72 s and ~250 MB of JS heap per UI
+      // open on a 515k-domain category.
+      if (
+        options?.skipMatchingNative &&
+        vpnLoaded &&
+        existingNativeCount > 0 &&
+        (await AsyncStorage.getItem(fpKey)) === fp
+      ) {
+        useBlockingStore
+          .getState()
+          .setCategoryDomainCount(category.id, existingNativeCount);
+        continue;
+      }
 
       if (VPN_ONLY_CATEGORIES.has(category.id)) {
         try {
@@ -711,17 +760,9 @@ export const BlocklistService = {
           syncAccessibility: false,
         });
         useBlockingStore.getState().setCategoryDomainCount(category.id, cached);
+        await AsyncStorage.setItem(fpKey, fp);
         continue;
       }
-
-      const existingNativeCount =
-        options?.nativeCounts?.[category.id] ??
-        (options?.skipMatchingNative
-          ? await FreedomAccessibility.getCategoryDomainCount(category.id)
-          : 0);
-
-      const accessibilityAlreadyCurrent =
-        options?.skipMatchingNative && existingNativeCount === cached;
 
       try {
         await FreedomVpn.removeCategory(category.id);
@@ -731,19 +772,8 @@ export const BlocklistService = {
 
       await BlocklistService.syncCategoryFromCache(category.id, {
         syncVpn: true,
-        syncAccessibility: !accessibilityAlreadyCurrent,
+        syncAccessibility: true,
       });
-
-      if (accessibilityAlreadyCurrent) {
-        useBlockingStore
-          .getState()
-          .setCategoryDomainCount(category.id, existingNativeCount);
-        // eslint-disable-next-line no-console
-        console.log(
-          `[BlocklistService] ${category.id}: accessibility cache already current (${existingNativeCount}); VPN cache reloaded`,
-        );
-        continue;
-      }
 
       try {
         await FreedomAccessibility.finalizeCategorySync(category.id);
@@ -757,6 +787,7 @@ export const BlocklistService = {
       useBlockingStore
         .getState()
         .setCategoryDomainCount(category.id, nativeCount);
+      await AsyncStorage.setItem(fpKey, fp);
     }
   },
 
@@ -900,6 +931,10 @@ export const BlocklistService = {
             console.warn("[BlocklistService] finalizeCategorySync warning:", e);
           }
         }
+        await AsyncStorage.setItem(
+          PUSHED_FP_PREFIX + categoryId,
+          BlocklistService.categoryFingerprint(categoryId),
+        );
       }
 
       // Update counts: use native count for dirty categories (just re-synced),

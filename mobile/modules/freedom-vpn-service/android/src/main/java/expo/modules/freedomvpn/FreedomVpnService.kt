@@ -103,11 +103,54 @@ class FreedomVpnService : VpnService() {
         private const val VPN_PREFS = "freedom_vpn_state"
         private const val KEY_WANTED = "vpn_wanted"
 
+        // Also read by VpnWatchdog, which must not restart the tunnel mid-pause.
+        private const val KEY_PAUSED_UNTIL = "vpn_paused_until"
+
         fun setVpnWanted(context: Context, wanted: Boolean) {
             context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean(KEY_WANTED, wanted)
                 .apply()
+        }
+
+        private fun pausedUntil(context: Context): Long =
+            context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
+                .getLong(KEY_PAUSED_UNTIL, 0L)
+
+        fun isPaused(context: Context): Boolean =
+            System.currentTimeMillis() < pausedUntil(context)
+
+        /**
+         * Takes the tunnel down for [durationMs] without clearing vpn_wanted, so
+         * the watchdog brings it back if the resume below never runs. Banking
+         * apps refuse to start while any VPN is up.
+         */
+        fun pause(context: Context, durationMs: Long) {
+            val app = context.applicationContext
+            app.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(KEY_PAUSED_UNTIL, System.currentTimeMillis() + durationMs)
+                .commit()
+            app.stopService(Intent(app, FreedomVpnService::class.java))
+            android.os.Handler(android.os.Looper.getMainLooper())
+                .postDelayed({ resume(app) }, durationMs)
+            Log.i(TAG, "VPN paused for ${durationMs / 1000}s")
+        }
+
+        /** Ends a pause now, restarting the tunnel if it is meant to be up. */
+        fun resume(context: Context) {
+            val app = context.applicationContext
+            val prefs = app.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
+            if (prefs.getLong(KEY_PAUSED_UNTIL, 0L) == 0L) return
+            prefs.edit().remove(KEY_PAUSED_UNTIL).commit()
+            if (!prefs.getBoolean(KEY_WANTED, false) || android.net.VpnService.prepare(app) != null) return
+            try {
+                app.startForegroundService(Intent(app, FreedomVpnService::class.java))
+                Log.i(TAG, "VPN resumed after pause")
+            } catch (e: Exception) {
+                // Background start refused; the watchdog retries within 30s.
+                Log.w(TAG, "VPN resume deferred to watchdog: ${e.message}")
+            }
         }
 
         /**
@@ -516,6 +559,14 @@ class FreedomVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (isPaused(this)) {
+            // Always-on can restart the service mid-pause. startForeground first:
+            // a foreground-service start that never calls it crashes the app.
+            startForeground(NOTIFICATION_ID, createNotification())
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         if (running.get()) {
             Log.w(TAG, "VPN already running, ignoring start command")
             return START_STICKY

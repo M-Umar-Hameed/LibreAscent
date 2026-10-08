@@ -34,7 +34,11 @@ void SplashScreen.preventAutoHideAsync().catch((_e: unknown) => {
 export default function RootLayout(): ReactNode {
   const isOnboarded = useAppStore((s) => s.isOnboarded);
   const hydrateStats = useAppStore((s) => s.hydrateStats);
-  const appLockEnabled = useAppStore((s) => s.appLockEnabled);
+  // EXPO_PUBLIC_TEST_NO_APP_LOCK=1 at build time lets adb drive a test build
+  // without a fingerprint; release builds never set it.
+  const appLockEnabled =
+    useAppStore((s) => s.appLockEnabled) &&
+    process.env.EXPO_PUBLIC_TEST_NO_APP_LOCK !== "1";
   const controlMode = useAppStore((s) => s.controlMode);
   const navigationState = useRootNavigationState();
   const segments = useSegments();

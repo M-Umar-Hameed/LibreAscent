@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use windows_service::{
@@ -110,10 +111,40 @@ fn run_service_loop() -> anyhow::Result<()> {
                 if config.control_mode != libreascent_shared::config::ControlMode::Flexible {
                     let _ = crate::dns_manager::enforce_system_dns("127.0.0.1");
 
+                    // Locked promises friction, not an outage: when every upstream
+                    // tier is dead the pin is released until one answers again.
+                    // Hardcore stays pinned, since a user could otherwise make the
+                    // outage themselves (filtered hotspot, router rule) to free DNS.
+                    let fail_open =
+                        config.control_mode == libreascent_shared::config::ControlMode::Locked;
                     enforce_task = Some(tokio::spawn(async move {
                         let mut interval = tokio::time::interval(Duration::from_secs(2));
+                        let mut released = false;
+                        let mut last_probe = Instant::now();
                         loop {
                             interval.tick().await;
+                            if fail_open && crate::dns::UPSTREAM_DOWN.load(Ordering::Relaxed) {
+                                if !released {
+                                    crate::dns_manager::log_tamper_event(
+                                        "Upstream unreachable for 60s in Locked mode: releasing the DNS pin until it answers again.",
+                                    );
+                                    let _ = crate::dns_manager::reset_system_dns();
+                                    released = true;
+                                }
+                                // Nothing reaches the proxy while released, so ask
+                                // the upstream directly.
+                                if last_probe.elapsed() >= Duration::from_secs(30) {
+                                    last_probe = Instant::now();
+                                    crate::dns::upstream_probe().await;
+                                }
+                                continue;
+                            }
+                            if released {
+                                crate::dns_manager::log_tamper_event(
+                                    "Upstream answered again: re-pinning DNS.",
+                                );
+                                released = false;
+                            }
                             if let Err(e) = crate::dns_manager::enforce_system_dns("127.0.0.1") {
                                 crate::dns_manager::log_tamper_event(&format!(
                                     "DNS enforcement failed: {e}"
@@ -139,7 +170,11 @@ fn run_service_loop() -> anyhow::Result<()> {
             let mut sys = crate::process_manager::create_system_handle();
             let mut runtime_blocked_paths: Vec<PathBuf> = Vec::new();
             let mut last_firewall_refresh = Instant::now() - Duration::from_secs(60);
-            let mut firewall_enforcement_failed = false;
+            // A failed netsh run pauses enforcement instead of latching it off
+            // until restart: one bad rule used to silently disable every rule,
+            // bypass guard included, for the rest of the session.
+            let mut firewall_failed_at: Option<Instant> = None;
+            let mut last_dns_enforced: Option<bool> = None;
 
             loop {
                 interval.tick().await;
@@ -155,26 +190,38 @@ fn run_service_loop() -> anyhow::Result<()> {
                         }
                     }
 
-                    if !firewall_enforcement_failed
+                    // Only seal DNS bypass paths when the proxy is up and the
+                    // system resolver is pinned to it. In Flexible mode DNS is
+                    // not redirected, so sealing :53 would break resolution, and
+                    // Locked drops the seal while the pin is released (see the
+                    // enforce task above).
+                    let dns_enforced = dns_proxy_ready_for_firewall
+                        && config.control_mode != libreascent_shared::config::ControlMode::Flexible
+                        && !(config.control_mode == libreascent_shared::config::ControlMode::Locked
+                            && crate::dns::UPSTREAM_DOWN.load(Ordering::Relaxed));
+                    let firewall_paused = firewall_failed_at
+                        .is_some_and(|at| at.elapsed() < Duration::from_secs(600));
+
+                    if !firewall_paused
                         && (!newly_blocked_paths.is_empty()
-                        || last_firewall_refresh.elapsed() >= Duration::from_secs(60)
-                        )
+                            || last_dns_enforced != Some(dns_enforced)
+                            || last_firewall_refresh.elapsed() >= Duration::from_secs(60))
                     {
-                        // Only seal DNS bypass paths when the proxy is up and the
-                        // system resolver is pinned to it. In Flexible mode DNS is
-                        // not redirected, so sealing :53 would break resolution.
-                        let dns_enforced = dns_proxy_ready_for_firewall
-                            && config.control_mode
-                                != libreascent_shared::config::ControlMode::Flexible;
-                        if let Err(e) = crate::firewall_manager::ensure_firewall_protection(
+                        match crate::firewall_manager::ensure_firewall_protection(
                             &config,
                             &runtime_blocked_paths,
                             dns_enforced,
                         ) {
-                            crate::dns_manager::log_tamper_event(&format!(
-                                "Firewall enforcement disabled until service restart after failure: {e}"
-                            ));
-                            firewall_enforcement_failed = true;
+                            Ok(()) => {
+                                firewall_failed_at = None;
+                                last_dns_enforced = Some(dns_enforced);
+                            }
+                            Err(e) => {
+                                crate::dns_manager::log_tamper_event(&format!(
+                                    "Firewall enforcement failed, retrying in 10 minutes: {e}"
+                                ));
+                                firewall_failed_at = Some(Instant::now());
+                            }
                         }
 
                         // Browser DoH and VPN extensions both bypass the proxy
@@ -212,6 +259,19 @@ fn run_service_loop() -> anyhow::Result<()> {
         // enforcing 127.0.0.1 when the local DNS proxy is gone.
         let event = rx.recv().await;
 
+        // The resets below run dozens of netsh/reg/PowerShell children. Without
+        // a wait hint the SCM kills the process 5s into a shutdown, and the
+        // firewall seal then outlives the reboot with no proxy behind it.
+        let _ = status_handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::StopPending,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::from_secs(60),
+            process_id: None,
+        });
+
         // Stop all background tasks before resetting DNS
         if let Some(handle) = enforce_task {
             handle.abort();
@@ -219,21 +279,25 @@ fn run_service_loop() -> anyhow::Result<()> {
         blocker_task.abort();
         dns_task.abort();
 
-        // Reset system DNS on stop, unless Hardcore
+        // Reset system DNS on stop, unless Hardcore. A proxy that died is the
+        // exception in every mode: a pin with nothing behind it protects
+        // nothing and only takes the machine offline.
         let config_path = libreascent_shared::config::default_config_path();
         let config = libreascent_shared::config::load_or_create(&config_path).ok();
         let is_hardcore = config
             .map(|c| c.control_mode == libreascent_shared::config::ControlMode::Hardcore)
             .unwrap_or(false);
+        let proxy_died = matches!(event, Some(ServiceEvent::DnsProxyStopped));
 
-        if !is_hardcore {
+        if !is_hardcore || proxy_died {
             let _ = crate::dns_manager::reset_system_dns();
             let _ = crate::firewall_manager::reset_firewall_protection();
             crate::browser_policy::reset_browser_policy();
-        } else if matches!(event, Some(ServiceEvent::DnsProxyStopped)) {
-            crate::dns_manager::log_tamper_event(
-                "DNS proxy stopped in Hardcore mode. DNS NOT reset.",
-            );
+            if is_hardcore {
+                crate::dns_manager::log_tamper_event(
+                    "DNS proxy stopped in Hardcore mode: DNS and firewall reset so the machine keeps a resolver. Protection resumes when the service restarts.",
+                );
+            }
         } else if matches!(event, Some(ServiceEvent::ShutdownRequested)) {
             crate::dns_manager::log_tamper_event(
                 "Service shutdown requested in Hardcore mode. DNS NOT reset.",
@@ -295,28 +359,37 @@ pub fn install_service() -> anyhow::Result<()> {
 }
 
 pub fn uninstall_service() -> anyhow::Result<()> {
+    let removed = (|| -> anyhow::Result<()> {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+        let service = manager.open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
+        )?;
+
+        if service.query_status()?.current_state != ServiceState::Stopped {
+            println!("Stopping service before uninstall...");
+            let _ = service.stop();
+        }
+        for _ in 0..30 {
+            if service.query_status()?.current_state == ServiceState::Stopped {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        service.delete()?;
+        Ok(())
+    })();
+
+    // After the stop, so the enforce loops cannot re-apply what is being undone,
+    // and unconditional, since a Hardcore stop leaves everything in place on
+    // purpose. Leaving DoH disabled machine-wide after uninstall would be a
+    // surprise.
     let _ = crate::dns_manager::reset_system_dns();
     let _ = crate::firewall_manager::reset_firewall_protection();
-    // Leaving DoH disabled machine-wide after uninstall would be a surprise.
     crate::browser_policy::reset_browser_policy();
-
-    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-    let service = manager.open_service(
-        SERVICE_NAME,
-        ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
-    )?;
-
-    let status = service.query_status()?;
-    if status.current_state != ServiceState::Stopped {
-        println!("Stopping service before uninstall...");
-        let _ = service.stop();
-        // Give it a moment to stop
-        std::thread::sleep(Duration::from_secs(2));
-    }
-
-    service.delete()?;
-    let _ = crate::dns_manager::reset_system_dns();
-    Ok(())
+    removed
 }
 
 pub fn start_service() -> anyhow::Result<()> {

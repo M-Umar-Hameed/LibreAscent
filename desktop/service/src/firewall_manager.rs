@@ -16,13 +16,17 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const FIREWALL_NAME_PREFIX: &str = "LibreAscent ";
 
 // Public resolver IPs users commonly point apps/browsers at to bypass the local
-// proxy. Quad9 is our own DoT upstream (see dns.rs), so it is kept reachable on
-// :853 but still sealed on plaintext :53 and DoH :443.
+// proxy. Quad9 is our own upstream (see dns.rs), reachable on :853, :443 and
+// :53 so the proxy can fall back when DoT is dead; the exposure is the same on
+// each port, since a local stub to Quad9 bypasses filtering over any of them.
 const CLOUDFLARE_IPS: &str = "1.1.1.1,1.0.0.1,2606:4700:4700::1111,2606:4700:4700::1001";
 const GOOGLE_IPS: &str = "8.8.8.8,8.8.4.4,2001:4860:4860::8888,2001:4860:4860::8844";
-const QUAD9_IPS: &str = "9.9.9.9,149.112.112.112,2620:fe::fe,2620:fe::9";
 const OPENDNS_IPS: &str = "208.67.222.222,208.67.220.220,2620:119:35::35,2620:119:53::53";
 const ADGUARD_IPS: &str = "94.140.14.14,94.140.15.15,2a10:50c0::ad1:ff,2a10:50c0::ad2:ff";
+
+// Every remote except Quad9's two IPv4 endpoints. Block rules cannot carry an
+// exception, so the blanket :53 seal is written as the ranges around them.
+const ALL_REMOTES_EXCEPT_QUAD9: &str = "0.0.0.0-9.9.9.8,9.9.9.10-149.112.112.111,149.112.112.113-255.255.255.255,::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff";
 
 const DNS_BYPASS_RULE_NAMES: [&str; 5] = [
     DNS_BYPASS_SEAL_RULE_NAMES[0],
@@ -198,20 +202,28 @@ fn dns_block_rule(
 // Seals every DNS bypass path around the local proxy. Loopback traffic
 // (client -> 127.0.0.1:53) is exempt from Windows Firewall, so blocking
 // plaintext :53 to all remotes does not touch the proxy itself. The proxy's
-// upstream leg is Quad9 DoT (:853), which is deliberately left reachable.
+// upstream legs all go to Quad9 (:853, :443, :53), which stays reachable.
 fn dns_bypass_block_rules() -> Vec<FirewallRuleSpec> {
-    let all_resolvers =
-        format!("{CLOUDFLARE_IPS},{GOOGLE_IPS},{QUAD9_IPS},{OPENDNS_IPS},{ADGUARD_IPS}");
-    // Quad9 excluded: our proxy forwards to it over DoT/:853.
+    // Quad9 excluded: our proxy forwards to it.
     let bypass_resolvers = format!("{CLOUDFLARE_IPS},{GOOGLE_IPS},{OPENDNS_IPS},{ADGUARD_IPS}");
 
     vec![
-        dns_block_rule(DNS_BYPASS_SEAL_RULE_NAMES[0], "UDP", None, "53"),
-        dns_block_rule(DNS_BYPASS_SEAL_RULE_NAMES[1], "TCP", None, "53"),
+        dns_block_rule(
+            DNS_BYPASS_SEAL_RULE_NAMES[0],
+            "UDP",
+            Some(ALL_REMOTES_EXCEPT_QUAD9.to_string()),
+            "53",
+        ),
+        dns_block_rule(
+            DNS_BYPASS_SEAL_RULE_NAMES[1],
+            "TCP",
+            Some(ALL_REMOTES_EXCEPT_QUAD9.to_string()),
+            "53",
+        ),
         dns_block_rule(
             "LibreAscent Block DoH",
             "TCP",
-            Some(all_resolvers),
+            Some(bypass_resolvers.clone()),
             "443",
         ),
         dns_block_rule(
@@ -252,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_dns_block_applies_to_all_remotes() {
+    fn plaintext_dns_block_covers_every_remote_except_quad9() {
         let rules = dns_bypass_block_rules();
 
         for name in [
@@ -260,25 +272,30 @@ mod tests {
             "LibreAscent Block Plaintext DNS TCP",
         ] {
             let rule = rules.iter().find(|r| r.name == name).expect("rule exists");
-            // No remoteip scope: a blanket :53 seal so no resolver is reachable in the clear.
-            assert!(remoteip_of(&rules, name).is_none());
             assert!(rule.args.contains(&"remoteport=53".to_string()));
             assert!(rule.args.contains(&"action=block".to_string()));
+            // The ranges must run edge to edge with only Quad9's two addresses
+            // missing, or a public resolver becomes reachable in the clear.
+            let remoteip = remoteip_of(&rules, name).expect("scoped to all but Quad9");
+            assert_eq!(
+                remoteip,
+                "remoteip=0.0.0.0-9.9.9.8,9.9.9.10-149.112.112.111,149.112.112.113-255.255.255.255,::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+            );
         }
     }
 
     #[test]
-    fn dot_block_leaves_quad9_reachable_but_doh_block_seals_it() {
+    fn quad9_stays_reachable_on_every_proxy_upstream_port() {
+        // The proxy falls back DoT -> DoH -> UDP, all to Quad9 (dns.rs); a seal
+        // on any of those ports would cut the fallback it exists to provide.
         let rules = dns_bypass_block_rules();
 
-        // Proxy upstream is Quad9 DoT; it must survive the :853 seal.
-        let dot = remoteip_of(&rules, "LibreAscent Block DoT").expect("DoT rule exists");
-        assert!(!dot.contains("9.9.9.9"), "Quad9 DoT must stay reachable: {dot}");
-        assert!(dot.contains("1.1.1.1"), "Cloudflare DoT must be blocked: {dot}");
-
-        // But Quad9 DoH (:443) is a bypass path and must be blocked.
-        let doh = remoteip_of(&rules, "LibreAscent Block DoH").expect("DoH rule exists");
-        assert!(doh.contains("9.9.9.9"), "Quad9 DoH must be blocked: {doh}");
+        for name in ["LibreAscent Block DoT", "LibreAscent Block DoH", "LibreAscent Block DoQ"] {
+            let scope = remoteip_of(&rules, name).expect("rule is scoped");
+            assert!(!scope.contains("9.9.9.9"), "{name} must leave Quad9 reachable: {scope}");
+            assert!(scope.contains("1.1.1.1"), "{name} must still seal Cloudflare: {scope}");
+            assert!(scope.contains("8.8.8.8"), "{name} must still seal Google: {scope}");
+        }
     }
 
     #[test]

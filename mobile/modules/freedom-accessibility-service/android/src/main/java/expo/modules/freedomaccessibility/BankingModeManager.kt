@@ -9,9 +9,10 @@ import android.provider.Settings
 import android.util.Log
 
 /**
- * Time-boxed pause of LibreAscent's own accessibility service so that
- * accessibility-hostile banking apps can run. Only the accessibility service
- * is touched; the VPN/DNS blocklist and device admin stay active.
+ * Time-boxed pause so that accessibility- and VPN-hostile banking apps can run:
+ * the accessibility service for BANKING_DURATION_MS, the DNS tunnel only for
+ * VPN_PAUSE_MS, which is long enough for the bank app's launch check. Device
+ * admin stays active.
  */
 object BankingModeManager {
     private const val TAG = "BankingMode"
@@ -21,7 +22,8 @@ object BankingModeManager {
     private const val KEY_ATTEMPTS = "banking_attempt_times"
     private const val ALARM_REQUEST_CODE = 24603
 
-    const val BANKING_DURATION_MS = 120_000L
+    const val BANKING_DURATION_MS = 60_000L
+    const val VPN_PAUSE_MS = 15_000L
     const val ATTEMPT_LIMIT = 3
     const val ATTEMPT_WINDOW_MS = 30 * 60 * 1000L // 30 min rolling window
     const val ACTION_RESTORE = "expo.modules.freedomaccessibility.BANKING_RESTORE"
@@ -104,6 +106,7 @@ object BankingModeManager {
             resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, filtered
         )
         scheduleAlarm(context, until)
+        expo.modules.freedomvpn.FreedomVpnService.pause(context, VPN_PAUSE_MS)
         Log.i(TAG, "Banking mode started until $until")
     }
 
@@ -126,6 +129,9 @@ object BankingModeManager {
         Settings.Secure.putInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
         prefs(context).edit().remove(KEY_UNTIL).remove(KEY_SAVED).apply()
         cancelAlarm(context)
+        // Ending banking early must not leave the tunnel down for the rest of
+        // its pause. No-op once the pause has already been resumed.
+        expo.modules.freedomvpn.FreedomVpnService.resume(context)
         Log.i(TAG, "Banking mode restored")
     }
 

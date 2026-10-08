@@ -50,6 +50,8 @@ class VpnWatchdog(private val context: Context) {
             blockedWarned = false
             return
         }
+        // Banking mode pauses the tunnel briefly; FreedomVpnService.resume ends it.
+        if (System.currentTimeMillis() < pausedUntil(context)) return
 
         // Non-null means another VPN holds the slot, or consent is gone.
         if (VpnService.prepare(context) != null) {
@@ -82,5 +84,10 @@ class VpnWatchdog(private val context: Context) {
         fun isVpnWanted(context: Context): Boolean = context
             .getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_WANTED, false)
+
+        // Written by FreedomVpnService.pause.
+        private fun pausedUntil(context: Context): Long = context
+            .getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
+            .getLong("vpn_paused_until", 0L)
     }
 }

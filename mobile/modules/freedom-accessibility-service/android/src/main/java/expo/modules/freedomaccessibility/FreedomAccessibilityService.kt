@@ -779,7 +779,11 @@ class FreedomAccessibilityService : AccessibilityService() {
 
         Log.i(TAG, "Blocked URL: $blockedCandidate (${blockedResult.matchType}: ${blockedResult.matchedValue}) - Attempt $consecutiveBlockCount")
 
-        // Show instant overlay with the actual blocked reason
+        // Show instant overlay with the actual blocked reason. Held until "I
+        // understand", like the reels and NSFW overlays: the navigation below
+        // brings the launcher forward, and the app-switch handler used to hide
+        // the overlay ~0.3s after it appeared.
+        reelsOverlayPackage = packageName
         showInstantOverlay(packageName, "${blockedResult.matchedValue} is blocked")
 
         // Suppress further checks for 3s so background events don't re-trigger

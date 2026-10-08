@@ -531,7 +531,7 @@ export default function SettingsScreen(): ReactNode {
                       ? `Accessibility paused - ${bankingCountdown()} left`
                       : bankingCooldownMs > 0
                         ? `Limit reached - retry in ${bankingCountdown(bankingCooldownMs)}`
-                        : `Pause accessibility 2 min to use banking apps (${bankingAttemptsRemaining} left)`}
+                        : `Pause VPN 15 s and accessibility 1 min to use banking apps (${bankingAttemptsRemaining} left)`}
                 </Text>
               </View>
               <Switch

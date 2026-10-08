@@ -146,4 +146,85 @@ export const BROWSERS: BrowserConfig[] = [
     package: "org.plus18.android",
     urlBarId: "url_bar",
   },
+  {
+    name: "Chrome Beta",
+    package: "com.chrome.beta",
+    urlBarId: "url_bar",
+  },
+  {
+    name: "Chrome Dev",
+    package: "com.chrome.dev",
+    urlBarId: "url_bar",
+  },
+  {
+    name: "Chrome Canary",
+    package: "com.chrome.canary",
+    urlBarId: "url_bar",
+  },
+  {
+    name: "Chromium",
+    package: "org.chromium.chrome",
+    urlBarId: "url_bar",
+  },
+  {
+    name: "Cromite",
+    package: "org.cromite.cromite",
+    urlBarId: "url_bar",
+  },
+  {
+    name: "Bromite",
+    package: "org.bromite.bromite",
+    urlBarId: "url_bar",
+  },
+  {
+    name: "Brave Beta",
+    package: "com.brave.browser_beta",
+    urlBarId: "url_bar",
+  },
+  {
+    name: "Brave Nightly",
+    package: "com.brave.browser_nightly",
+    urlBarId: "url_bar",
+  },
+  {
+    name: "Edge Beta",
+    package: "com.microsoft.emmx.beta",
+    urlBarId: "url_bar",
+  },
+  {
+    name: "Opera Beta",
+    package: "com.opera.browser.beta",
+    urlBarId: "url_field",
+  },
+  {
+    name: "Samsung Internet Beta",
+    package: "com.sec.android.app.sbrowser.beta",
+    urlBarId: "location_bar_edit_text",
+  },
+  {
+    name: "Yandex Browser",
+    package: "com.yandex.browser",
+    urlBarId: "bro_omnibar_address_title_text",
+  },
+  {
+    name: "Firefox Klar",
+    package: "org.mozilla.klar",
+    urlBarId: "mozac_browser_toolbar_url_view",
+  },
+  {
+    name: "IronFox",
+    package: "org.ironfoxoss.ironfox",
+    urlBarId: "mozac_browser_toolbar_url_view",
+  },
+  {
+    name: "Fennec DOS",
+    package: "us.spotco.fennec_dos",
+    urlBarId: "mozac_browser_toolbar_url_view",
+  },
+  // URL bar id unverified; the universal fallback ids cover it when this one is absent.
+  {
+    name: "Pi Browser",
+    package: "pi.browser",
+    urlBarId: "url_bar",
+  },
 ];

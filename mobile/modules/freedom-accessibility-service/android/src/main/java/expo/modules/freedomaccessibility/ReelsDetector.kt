@@ -1,6 +1,7 @@
 package expo.modules.freedomaccessibility
 
 import android.content.Context
+import android.graphics.Rect
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONArray
@@ -73,6 +74,10 @@ class ReelsDetector {
     fun isReelsApp(packageName: String): Boolean {
         return reelsApps.containsKey(packageName)
     }
+
+    /** The enabled reels app whose short videos [url] opens on the web, if any. */
+    fun enabledAppForUrl(url: String): ReelsAppConfig? =
+        shortVideoPackages(url).firstNotNullOfOrNull { reelsApps[it] }
 
     /**
      * Detect if the user is currently in a reels/shorts section.
@@ -171,6 +176,7 @@ class ReelsDetector {
         if (node == null) return false
 
         try {
+            val windowBounds = Rect().also { node.getBoundsInScreen(it) }
             for (keyword in REELS_KEYWORDS) {
                 if (overDeadline(deadline)) return null
                 val matches = node.findAccessibilityNodeInfosByText(keyword)
@@ -189,7 +195,8 @@ class ReelsDetector {
                             found = true
                         } else {
                             // General swiping logic: check for scrollable ancestor
-                            found = hasScrollableReelsAncestor(match, packageName)
+                            val label = match.text?.toString() ?: match.contentDescription?.toString()
+                            found = hasScrollableReelsAncestor(match, packageName, label, windowBounds.height())
                             if (found) Log.d(TAG, "Reels detected in $packageName via keyword: $keyword")
                         }
                     }
@@ -205,19 +212,20 @@ class ReelsDetector {
     }
 
     /**
-     * Walk up to 5 ancestors looking for a scrollable ViewPager or RecyclerView.
+     * Walk up to 10 ancestors looking for a scrollable reels feed container.
      */
-    private fun hasScrollableReelsAncestor(node: AccessibilityNodeInfo, packageName: String): Boolean {
+    private fun hasScrollableReelsAncestor(
+        node: AccessibilityNodeInfo,
+        packageName: String,
+        label: String?,
+        windowHeight: Int
+    ): Boolean {
         var current = node.parent ?: return false
+        val bounds = Rect()
         for (i in 0 until 10) {
             val className = current.className?.toString() ?: ""
-            // Only match ViewPager - the swipeable video container used by
-            // reels/shorts feeds. RecyclerView is too broad for Instagram,
-            // but Facebook often uses RecyclerView for its reels.
-            val isViewPager = className.contains("ViewPager")
-            val isFacebookRecycler = packageName.contains("com.facebook.") && className.contains("RecyclerView")
-            
-            if ((isViewPager || isFacebookRecycler) && current.isScrollable) {
+            current.getBoundsInScreen(bounds)
+            if (current.isScrollable && isReelsFeedContainer(className, packageName, label, bounds.height(), windowHeight)) {
                 current.recycle()
                 return true
             }
@@ -251,6 +259,52 @@ class ReelsDetector {
         private const val TAG = "ReelsDetector"
         private const val PREFS_NAME = "freedom_settings"
         private const val KEY_REELS_CONFIGS = "reels_configs"
+        private const val YOUTUBE = "com.google.android.youtube"
+
+        /**
+         * Whether a scrollable ancestor of a visible reels label is the reels feed.
+         * ViewPager is the swipeable video container reels feeds use; RecyclerView
+         * is too broad for Instagram, but Facebook often uses it for reels.
+         * YouTube's Shorts feed is a RecyclerView too, which only counts for a
+         * label reading exactly "Shorts" (titles contain the word, "Watch later"
+         * the other keywords) in a list taller than half the window (search
+         * filter chips sit in a short horizontal one).
+         */
+        internal fun isReelsFeedContainer(
+            className: String,
+            packageName: String,
+            label: String?,
+            height: Int,
+            windowHeight: Int
+        ): Boolean {
+            if (className.contains("ViewPager")) return true
+            if (!className.contains("RecyclerView")) return false
+            if (packageName.contains("com.facebook.")) return true
+            return packageName == YOUTUBE &&
+                    label?.trim().equals("Shorts", ignoreCase = true) &&
+                    height * 2 > windowHeight
+        }
+
+        /**
+         * Packages of the apps whose short videos [url] opens on the web. Matches
+         * the host and any subdomain (m., www.) and the first path segment.
+         */
+        internal fun shortVideoPackages(url: String): List<String> {
+            val u = url.trim().lowercase().substringAfter("://").substringBefore(' ')
+            val hostEnd = u.indexOfAny(charArrayOf('/', '?', '#')).let { if (it < 0) u.length else it }
+            val host = u.substring(0, hostEnd)
+            val firstSegment = u.substring(hostEnd).substringBefore('?').substringBefore('#')
+                .removePrefix("/").substringBefore('/')
+            fun on(domain: String) = host == domain || host.endsWith(".$domain")
+            return when {
+                on("youtube.com") && firstSegment == "shorts" -> listOf(YOUTUBE)
+                on("instagram.com") && (firstSegment == "reel" || firstSegment == "reels") ->
+                    listOf("com.instagram.android")
+                on("facebook.com") && firstSegment == "reel" -> listOf("com.facebook.katana")
+                on("tiktok.com") -> listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
+                else -> emptyList()
+            }
+        }
 
         fun serializeConfigs(configs: List<ReelsAppConfig>): String {
             val array = JSONArray()

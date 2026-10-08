@@ -28,8 +28,15 @@ class BrowserUrlMonitor {
         val urlBarId: String
     )
 
+    /** URL candidates from one event, and the one read from the URL bar itself, if any. */
+    data class Extraction(val candidates: Set<String>, val urlBar: String?)
+
     // Written from the JS thread via updateConfigs, read from the accessibility thread.
     private val browsers = ConcurrentHashMap<String, BrowserConfig>()
+    // Unlisted packages reach extraction only through WebView events, mostly
+    // from apps that embed one, so a universal id sweep that found no URL bar
+    // holds off the next sweep for that package instead of repeating per event.
+    private val universalMissAt = ConcurrentHashMap<String, Long>()
     private var lastDetectedUrl: String = ""
 
     // Per-event scan budget. Every tree walk and every cross-process lookup
@@ -172,14 +179,16 @@ class BrowserUrlMonitor {
      * @param event The accessibility event from the browser
      * @param rootNode The root node of the active window
      * @param packageName The browser's package name
-     * @return The extracted URL, or null if not found
+     * @return The extracted URLs, or null if not found
      */
-    fun extractUrlCandidates(
+    private fun extractUrlCandidates(
         event: AccessibilityEvent,
         rootNode: AccessibilityNodeInfo?,
         packageName: String
-    ): Set<String>? {
-        val config = browsers[packageName] ?: return null
+    ): Extraction? {
+        val config = browsers[packageName]
+            ?: return unlistedUrlBar(rootNode, packageName)?.let { normalizeUrl(it) }
+                ?.takeIf { it.isNotBlank() }?.let { Extraction(setOf(it), it) }
 
         val candidates = mutableSetOf<String>()
 
@@ -188,18 +197,21 @@ class BrowserUrlMonitor {
         val mozillaId = tryFallbackUrlBarIds(rootNode, packageName, config.urlBarId)
         mozillaId?.let { candidates.add(it) }
         findUrlFromEventText(event)?.let { candidates.add(it) }
-        extractUrlFromToolbarDescription(rootNode, packageName)?.let { candidates.add(it) }
+        val toolbarDescription = extractUrlFromToolbarDescription(rootNode, packageName)
+        toolbarDescription?.let { candidates.add(it) }
 
         // The universal ids stand in for a configured id that has drifted across
         // browser versions, so they only run once the browser's own id has failed.
-        if (primaryId == null && mozillaId == null) {
-            tryUniversalFallbackId(rootNode, packageName)?.let { candidates.add(it) }
-        }
+        val universalId = if (primaryId == null && mozillaId == null) {
+            tryUniversalFallbackId(rootNode, packageName)?.also { candidates.add(it) }
+        } else null
 
         // Explicit Samsung Toolbar Search (bypasses event.packageName mismatch)
-        if (packageName == "com.sec.android.app.sbrowser") {
-            findUrlByResourceId(rootNode, "com.sec.android.app.sbrowser", "location_bar_edit_text")?.let { candidates.add(it) }
-        }
+        val samsungBar = if (packageName == "com.sec.android.app.sbrowser") {
+            findUrlByResourceId(rootNode, "com.sec.android.app.sbrowser", "location_bar_edit_text")?.also { candidates.add(it) }
+        } else null
+        val urlBar = (primaryId ?: mozillaId ?: universalId ?: samsungBar ?: toolbarDescription)
+            ?.let { normalizeUrl(it) }?.takeIf { it.isNotBlank() }
 
         // Local tree scan. The per-indicator IPC searches this can also run are
         // held back until everything above has come up empty.
@@ -213,12 +225,29 @@ class BrowserUrlMonitor {
         findUrlFromWindowEvent(event)?.let { candidates.add(it) }
 
         val resolved = finalizeCandidates(candidates)
-        if (resolved != null) return resolved
+        if (resolved != null) return Extraction(resolved, urlBar)
 
         // Nothing resolved, so pay for the indicator searches. The tree scan above
         // already covered this root, so only the searches run here.
         if (rootNode != null) searchIndicatorsForUrls(rootNode, emptySet(), candidates)
-        return finalizeCandidates(candidates)
+        return finalizeCandidates(candidates)?.let { Extraction(it, urlBar) }
+    }
+
+    /**
+     * A browser missing from the configured list still has a URL bar, and the
+     * universal ids are how one is found without knowing its id.
+     */
+    private fun unlistedUrlBar(rootNode: AccessibilityNodeInfo?, packageName: String): String? {
+        if (rootNode == null) return null
+        val now = android.os.SystemClock.uptimeMillis()
+        if (universalMissAt[packageName]?.let { now - it < UNLISTED_RETRY_MS } == true) return null
+        // Generic ids such as edit_text exist in apps that are not browsers, so
+        // only a value that reads as a URL counts.
+        val urlBar = firstUrlBarMatch(UNIVERSAL_URL_BAR_FALLBACKS) { id ->
+            if (overBudget()) null else findUrlByResourceId(rootNode, packageName, id)?.takeIf { looksLikeUrl(it) }
+        }
+        if (urlBar == null) universalMissAt[packageName] = now else universalMissAt.remove(packageName)
+        return urlBar
     }
 
     private fun scanSamsungToolbar(root: AccessibilityNodeInfo, candidates: MutableSet<String>) {
@@ -296,27 +325,31 @@ class BrowserUrlMonitor {
         windowsProvider: () -> List<android.view.accessibility.AccessibilityWindowInfo>?,
         activeRoot: AccessibilityNodeInfo?,
         targetPackageName: String
-    ): Set<String>? {
+    ): Extraction? {
         beginBudget()
         val candidates = mutableSetOf<String>()
         
         // 1. Try standard extraction on active root provided by the service.
         // This is the window that holds the URL bar, and it contains the event
         // source whenever the event came from the foreground window.
-        extractUrlCandidates(event, activeRoot, targetPackageName)?.forEach { candidates.add(it) }
+        var extraction = extractUrlCandidates(event, activeRoot, targetPackageName)
 
         // 2. Only if that found nothing, retry on the event source, which is the
         // narrower detached-toolbar / separate-window case.
-        if (candidates.isEmpty() && !overBudget()) {
+        if (extraction == null && !overBudget()) {
             val eventRoot = event.source
             if (eventRoot != null && eventRoot != activeRoot) {
-                extractUrlCandidates(event, eventRoot, targetPackageName)?.forEach { candidates.add(it) }
+                extraction = extractUrlCandidates(event, eventRoot, targetPackageName)
                 eventRoot.recycle()
             }
         }
+        extraction?.let { candidates.addAll(it.candidates) }
+        var urlBar = extraction?.urlBar
 
-        // 2. If empty, scavenge ALL windows
-        val windows = if (candidates.isEmpty() && !overBudget()) windowsProvider() else null
+        // 2. If empty, scavenge ALL windows. An unlisted package has at most a URL
+        // bar from the universal ids, which must not cost it the page scavenge.
+        val scavenge = candidates.isEmpty() || !isBrowser(targetPackageName)
+        val windows = if (scavenge && !overBudget()) windowsProvider() else null
         if (windows != null) {
             for (window in windows) {
                 if (overBudget()) break
@@ -331,10 +364,13 @@ class BrowserUrlMonitor {
                         // Try direct resource ID on this root too
                         val config = browsers[targetPackageName]
                         if (config != null) {
-                            findUrlByResourceId(root, targetPackageName, config.urlBarId)?.let { candidates.add(it) }
-                            if (targetPackageName == "com.sec.android.app.sbrowser") {
-                                findUrlByResourceId(root, "com.sec.android.app.sbrowser", "location_bar_edit_text")?.let { candidates.add(it) }
-                            }
+                            val bar = findUrlByResourceId(root, targetPackageName, config.urlBarId)
+                            bar?.let { candidates.add(it) }
+                            val samsungBar = if (targetPackageName == "com.sec.android.app.sbrowser") {
+                                findUrlByResourceId(root, "com.sec.android.app.sbrowser", "location_bar_edit_text")
+                            } else null
+                            samsungBar?.let { candidates.add(it) }
+                            if (urlBar == null) urlBar = (bar ?: samsungBar)?.let { normalizeUrl(it) }?.takeIf { it.isNotBlank() }
                         }
                     }
                     root.recycle()
@@ -342,7 +378,7 @@ class BrowserUrlMonitor {
             }
         }
 
-        return finalizeCandidates(candidates)
+        return finalizeCandidates(candidates)?.let { Extraction(it, urlBar) }
     }
 
     private fun finalizeCandidates(candidates: Set<String>): Set<String>? {
@@ -773,6 +809,7 @@ class BrowserUrlMonitor {
                packageName == "com.cookiedev.mull" ||
                packageName == "org.gnu.icecat" ||
                packageName == "io.github.forkmaintainers.iceraven" ||
+               packageName == "org.ironfoxoss.ironfox" ||
                packageName.contains("fennec")
     }
 
@@ -842,6 +879,33 @@ class BrowserUrlMonitor {
         // measurement to size one against.
         private const val MAX_SCAN_DEPTH = 60
         private const val SCAN_BUDGET_MS = 800L
+        private const val UNLISTED_RETRY_MS = 5000L
+
+        private val GOOGLE_HOST = Regex("(?:[a-z0-9-]+\\.)*google\\.(?:(?:co|com)\\.)?[a-z]{2,3}")
+
+        /**
+         * Whether [url] is a search engine's image or video results. Search URLs
+         * are exempt from keyword checks, yet there the thumbnails are the
+         * content, so the page text has to be checked instead.
+         */
+        internal fun isSearchMediaVertical(url: String): Boolean {
+            val u = url.trim().lowercase().substringAfter("://").substringBefore(' ')
+            val hostEnd = u.indexOfAny(charArrayOf('/', '?', '#')).let { if (it < 0) u.length else it }
+            val host = u.substring(0, hostEnd)
+            val rest = u.substring(hostEnd)
+            val firstSegment = rest.substringBefore('?').substringBefore('#').removePrefix("/").substringBefore('/')
+            val params = rest.substringAfter('?', "").substringBefore('#').split('&')
+            fun on(domain: String) = host == domain || host.endsWith(".$domain")
+            return when {
+                GOOGLE_HOST.matches(host) ->
+                    params.any { it == "tbm=isch" || it == "tbm=vid" || it == "udm=2" || it == "udm=7" }
+                on("bing.com") -> firstSegment == "images" || firstSegment == "videos"
+                on("duckduckgo.com") -> params.any {
+                    it == "ia=images" || it == "ia=videos" || it == "iax=images" || it == "iax=videos"
+                }
+                else -> false
+            }
+        }
 
         /**
          * First id in [ids] whose [lookup] yields text. An id that is present but

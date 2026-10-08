@@ -408,7 +408,8 @@ class FreedomAccessibilityService : AccessibilityService() {
         // Always intercept raw webview events even if the OS attributes them to a different package
         // (Samsung Internet often delegates rendering to Android System Webview in a detached process)
         val classNameStr = event.className?.toString()?.lowercase() ?: ""
-        val isDetachedWebview = classNameStr.contains("chromium") || classNameStr.contains("webview") || classNameStr.contains("sandboxed_process")
+        val isDetachedWebview = classNameStr.contains("chromium") || classNameStr.contains("webview") ||
+                classNameStr.contains("geckoview") || classNameStr.contains("sandboxed_process")
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             Log.d(TAG, "WINDOW STATE CHANGED | Pkg: $packageName | Class: $classNameStr")
@@ -608,9 +609,9 @@ class FreedomAccessibilityService : AccessibilityService() {
         // and prevent background CONTENT_CHANGED events from re-triggering the block
         if (System.currentTimeMillis() < blockCooldownUntil) return
 
-        val candidates = mutableSetOf<String>()
-
-        browserMonitor.extractUrlCandidatesWithWindows(event, { windows }, rootNode, packageName)?.let { candidates.addAll(it) }
+        val extraction = browserMonitor.extractUrlCandidatesWithWindows(event, { windows }, rootNode, packageName)
+        val candidates = extraction?.candidates.orEmpty()
+        val urlBar = extraction?.urlBar
 
         if (candidates.isEmpty()) {
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
@@ -625,40 +626,29 @@ class FreedomAccessibilityService : AccessibilityService() {
             return
         }
 
-        // Check if we should perform a broader visual scan (if we only found search engine URLs)
+        // Check if we should perform a broader visual scan (if we only found search engine URLs).
+        // An image or video search always gets it: its results carry captions and
+        // source sites that read as other URLs, and the query is not checked there.
         val searchWebViews = candidates.all { url ->
             SEARCH_ENGINE_PATTERNS.any { pattern -> url.contains(pattern) }
-        }
+        } || candidates.any { BrowserUrlMonitor.isSearchMediaVertical(it) }
 
 
         val now = System.currentTimeMillis()
         var blockedResult: ContentMatcher.MatchResult? = null
         var blockedCandidate = ""
+        var blockMessage: String? = null
         var allowedCandidate = candidates.first()
 
-        // Determine if ANY candidate contains a whitelisted domain.
-        // Check all candidates - URL bar, title, toolbar text - not just the first.
-        // Also check embedded domains in text (e.g. "2026 mangaread.org inc.")
+        // Only the URL bar says which site this is. Page text names other sites
+        // in links, captions and footers, and a whitelisted one there switched
+        // keyword checks off for the whole page.
         var pageWhitelisted = false
         var contextDomain: String? = null
-        for (c in candidates) {
-            val d = c.lowercase().removePrefix("https://").removePrefix("http://").removePrefix("www.")
-                .substringBefore('/').substringBefore('?').substringBefore(' ')
-            if (d.contains('.') && d.isNotEmpty() && contentMatcher.isWhitelisted(d)) {
-                pageWhitelisted = true
-                contextDomain = d
-                break
-            }
-        }
-        // Fallback: scan all candidate text for embedded whitelisted domains
-        if (!pageWhitelisted) {
-            for (c in candidates) {
-                if (contentMatcher.containsWhitelistedDomainPublic(c)) {
-                    pageWhitelisted = true
-                    contextDomain = "embedded-whitelist"
-                    break
-                }
-            }
+        val urlBarDomain = urlBar?.substringBefore('/')?.substringBefore('?')?.substringBefore(' ')
+        if (urlBarDomain != null && urlBarDomain.contains('.') && contentMatcher.isWhitelisted(urlBarDomain)) {
+            pageWhitelisted = true
+            contextDomain = urlBarDomain
         }
         // Cache: remember whitelisted domain for this browser so text-only events inherit it.
         // Clear cache when we see a real URL that is NOT whitelisted (user navigated away).
@@ -694,6 +684,16 @@ class FreedomAccessibilityService : AccessibilityService() {
             }
         }
 
+        // Shorts and reels on the web, for the apps whose reels the user blocked.
+        // URL bar only: a results page links to them without playing them.
+        if (blockedResult == null && urlBar != null) {
+            reelsDetector.enabledAppForUrl(urlBar)?.let { app ->
+                blockedResult = ContentMatcher.MatchResult(true, ContentMatcher.MatchType.DOMAIN, urlBar.substringBefore('/'))
+                blockedCandidate = urlBar
+                blockMessage = "${app.name} Reels blocked"
+            }
+        }
+
         // Secondary fallback for Chrome/Samsung Internet hidden URLs or AMP masks
         // If current URL bar just says "google.com", we scan the entire visible screen
         // as a large string blob and check for any blocked domains or keywords.
@@ -726,7 +726,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         // We have a Block!
         if (blockedCandidate == lastCheckUrl && now - lastUrlCheckTime < 300) return
 
-        applyBlock(packageName, blockedCandidate, matched)
+        applyBlock(packageName, blockedCandidate, matched, blockMessage ?: "${matched.matchedValue} is blocked")
     }
 
     /**
@@ -838,7 +838,8 @@ class FreedomAccessibilityService : AccessibilityService() {
     private fun applyBlock(
         packageName: String,
         blockedCandidate: String,
-        blockedResult: ContentMatcher.MatchResult
+        blockedResult: ContentMatcher.MatchResult,
+        message: String = "${blockedResult.matchedValue} is blocked"
     ) {
         val now = System.currentTimeMillis()
         lastCheckUrl = blockedCandidate
@@ -852,7 +853,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         // brings the launcher forward, and the app-switch handler used to hide
         // the overlay ~0.3s after it appeared.
         reelsOverlayPackage = packageName
-        showInstantOverlay(packageName, "${blockedResult.matchedValue} is blocked")
+        showInstantOverlay(packageName, message)
 
         // Suppress further checks for 3s so background events don't re-trigger
         blockCooldownUntil = now + 3000

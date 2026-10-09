@@ -175,6 +175,7 @@ fn run_service_loop() -> anyhow::Result<()> {
             // bypass guard included, for the rest of the session.
             let mut firewall_failed_at: Option<Instant> = None;
             let mut last_dns_enforced: Option<bool> = None;
+            let mut last_vpn_dns: Option<Vec<std::net::Ipv4Addr>> = None;
 
             loop {
                 interval.tick().await;
@@ -201,20 +202,37 @@ fn run_service_loop() -> anyhow::Result<()> {
                             && crate::dns::UPSTREAM_DOWN.load(Ordering::Relaxed));
                     let firewall_paused = firewall_failed_at
                         .is_some_and(|at| at.elapsed() < Duration::from_secs(600));
+                    // A VPN app's resolver has to stay reachable: it blocks
+                    // every other DNS server, this proxy included, and the
+                    // browser blocker takes over domain checks meanwhile.
+                    let vpn_dns = if dns_enforced {
+                        crate::dns_manager::vpn_dns_servers()
+                    } else {
+                        Vec::new()
+                    };
+                    let vpn_changed = last_vpn_dns.as_ref() != Some(&vpn_dns);
 
                     if !firewall_paused
                         && (!newly_blocked_paths.is_empty()
                             || last_dns_enforced != Some(dns_enforced)
+                            || vpn_changed
                             || last_firewall_refresh.elapsed() >= Duration::from_secs(60))
                     {
+                        if vpn_changed && !vpn_dns.is_empty() {
+                            crate::dns_manager::log_tamper_event(&format!(
+                                "VPN resolver {vpn_dns:?} in use: DNS opened to it, browser blocker checks domains."
+                            ));
+                        }
                         match crate::firewall_manager::ensure_firewall_protection(
                             &config,
                             &runtime_blocked_paths,
                             dns_enforced,
+                            &vpn_dns,
                         ) {
                             Ok(()) => {
                                 firewall_failed_at = None;
                                 last_dns_enforced = Some(dns_enforced);
+                                last_vpn_dns = Some(vpn_dns.clone());
                             }
                             Err(e) => {
                                 crate::dns_manager::log_tamper_event(&format!(
@@ -229,8 +247,17 @@ fn run_service_loop() -> anyhow::Result<()> {
                         // by policy whenever DNS is enforced. Logged but not
                         // latched: unlike the firewall this is idempotent and
                         // safe to retry each pass.
-                        if dns_enforced {
-                            if let Err(e) = crate::browser_policy::enforce_browser_policy() {
+                        if dns_enforced && !vpn_dns.is_empty() {
+                            crate::dns_manager::remove_nrpt();
+                        } else if dns_enforced {
+                            if let Err(e) = crate::dns_manager::ensure_nrpt("127.0.0.1") {
+                                crate::dns_manager::log_tamper_event(&format!(
+                                    "Failed to add name resolution policy: {e}"
+                                ));
+                            }
+                            if let Err(e) =
+                                crate::browser_policy::enforce_browser_policy(&config)
+                            {
                                 crate::dns_manager::log_tamper_event(&format!(
                                     "Failed to apply browser lockdown policy: {e}"
                                 ));

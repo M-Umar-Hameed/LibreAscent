@@ -91,6 +91,8 @@ pub struct DesktopConfig {
     pub friction_window: FrictionWindow,
     #[serde(default = "default_friction_mode")]
     pub friction_mode: FrictionMode,
+    #[serde(default = "default_allowed_browser_extensions")]
+    pub allowed_browser_extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +115,33 @@ pub fn default_friction_window() -> FrictionWindow {
 
 pub fn default_friction_mode() -> FrictionMode {
     FrictionMode::Timer
+}
+
+/// Add-on ids LibreWolf may still install while every other add-on is blocked.
+/// None of these can set a proxy, so the VPN add-on seal still holds.
+pub fn default_allowed_browser_extensions() -> Vec<String> {
+    [
+        "uBlock0@raymondhill.net",
+        "jid1-ZAdIEUB7XOzOJw@jetpack",
+        "jid1-MnnxcxisBPnSXQ@jetpack",
+        "{99c277af-d778-4a0b-9faa-b1d8165f0a55}",
+        "enhancerforyoutube@maximerf.addons.mozilla.org",
+        "{c3c10168-4186-445c-9c5b-63f12b8e2c87}",
+        "languagetool-webextension@languagetool.org",
+        "CanvasBlocker@kkapsner.de",
+        "{8bac35b3-1fe1-481a-b4c0-d1f0d683ab96}",
+        "addon@darkreader.org",
+        "{a453e19c-a1cd-4df0-9dfc-1a3b233cf19b}",
+        "{2e5ff8c8-32fe-46d0-9fc8-6b8986621f3c}",
+        "extension@one-tab.com",
+        "jid1-93WyvpgvxzGATw@jetpack",
+        "{22b0eca1-8c02-4c0d-a5d7-6604ddd9836e}",
+        "private-relay@firefox.com",
+        "webextension@metamask.io",
+    ]
+    .iter()
+    .map(|id| id.to_string())
+    .collect()
 }
 
 pub fn default_config() -> DesktopConfig {
@@ -146,6 +175,7 @@ pub fn default_config() -> DesktopConfig {
         },
         friction_window: default_friction_window(),
         friction_mode: default_friction_mode(),
+        allowed_browser_extensions: default_allowed_browser_extensions(),
     }
 }
 
@@ -299,6 +329,10 @@ mod tests {
         assert_eq!(config.control_mode, ControlMode::Flexible);
         assert_eq!(config.friction.countdown_seconds, 60);
         assert_eq!(config.friction.click_count, 50);
+        assert!(config
+            .allowed_browser_extensions
+            .contains(&"uBlock0@raymondhill.net".to_string()));
+        assert_eq!(config.allowed_browser_extensions.len(), 17);
     }
 
     #[test]
@@ -486,6 +520,7 @@ mod tests {
         std::fs::write(&path, json).expect("write legacy config");
         let loaded = load_or_create(&path).expect("legacy config should load");
         assert_eq!(loaded.friction_mode, FrictionMode::Timer);
+        assert_eq!(loaded.allowed_browser_extensions, default_allowed_browser_extensions());
         let _ = std::fs::remove_file(path);
     }
 

@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::oneshot;
 use tokio::time::{timeout, Duration};
 
@@ -200,6 +201,55 @@ pub async fn upstream_probe() -> bool {
     !matches!(upstream.lookup(name, RecordType::A).await, Err(None))
 }
 
+/// Where the browser blocker asks whether a host is blocked. Plain TCP on a
+/// port of its own: a VPN app blocks DNS to this machine, not this.
+const DOMAIN_CHECK_ADDR: &str = "127.0.0.1:47713";
+
+/// Keeps blocked sites blocked in the browser while a VPN app owns DNS and the
+/// proxy is out of the path. Answers `GET /check?host=<name>` with 1 or 0.
+async fn serve_domain_checks(blocklist: Arc<RwLock<DomainBlocklist>>) {
+    let listener = match TcpListener::bind(DOMAIN_CHECK_ADDR).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            crate::dns_manager::log_tamper_event(&format!(
+                "Domain check endpoint cannot bind {DOMAIN_CHECK_ADDR}: {error}"
+            ));
+            return;
+        }
+    };
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            continue;
+        };
+        let blocklist = Arc::clone(&blocklist);
+        tokio::spawn(async move {
+            let mut buffer = [0_u8; 1024];
+            let Ok(Ok(read)) = timeout(Duration::from_secs(2), stream.read(&mut buffer)).await else {
+                return;
+            };
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            let blocked = check_host(&request)
+                .map(|host| blocklist.read().map(|list| list.is_blocked(host)).unwrap_or(false))
+                .unwrap_or(false);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{}",
+                if blocked { "1" } else { "0" }
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+    }
+}
+
+fn check_host(request: &str) -> Option<&str> {
+    let host = request
+        .lines()
+        .next()?
+        .strip_prefix("GET /check?host=")?
+        .split(' ')
+        .next()?;
+    (!host.is_empty() && host.len() < 256).then_some(host)
+}
+
 pub struct BlockedDnsResponse {
     pub domain: String,
     pub response: Vec<u8>,
@@ -278,6 +328,7 @@ pub async fn run_local_dns_proxy_with_ready(
     let resolver = upstream()?;
     crate::dns_manager::log_tamper_event("DNS proxy started. Blocklist loaded.");
     tokio::spawn(watch_blocklist_file(config_path.clone(), Arc::clone(&blocklist)));
+    tokio::spawn(serve_domain_checks(Arc::clone(&blocklist)));
 
     loop {
         let (size, peer) = match socket.recv_from(&mut buffer).await {
@@ -596,5 +647,12 @@ mod tests {
             RecordType::A,
         ));
         message.to_bytes().expect("query should encode")
+    }
+
+    #[test]
+    fn domain_check_requests_name_one_host() {
+        assert_eq!(check_host("GET /check?host=pornhub.com HTTP/1.1\r\nHost: x\r\n"), Some("pornhub.com"));
+        assert_eq!(check_host("GET /check?host= HTTP/1.1"), None);
+        assert_eq!(check_host("POST /check?host=a.com HTTP/1.1"), None);
     }
 }

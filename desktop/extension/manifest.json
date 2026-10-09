@@ -1,0 +1,24 @@
+{
+  "manifest_version": 2,
+  "name": "LibreAscent Blocker",
+  "version": "1.1.0",
+  "description": "Blocks Reels, Shorts, NSFW posts and adult keywords while LibreAscent protection is on.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "blocker@libreascent.app",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": ["storage", "webNavigation", "webRequest", "webRequestBlocking", "tabs", "<all_urls>"],
+  "background": {
+    "scripts": ["default-keywords.js", "matcher.js", "background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["default-keywords.js", "matcher.js", "content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

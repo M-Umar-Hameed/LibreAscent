@@ -9,12 +9,24 @@ use chrono::Local;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// netsh's `name="..."`, passed verbatim. As a normal argument Rust escapes the
+/// quotes, and an interface name with a space ("Ethernet 4") then matches
+/// nothing while netsh still exits 0.
+fn name_arg(command: &mut Command, interface: &str) {
+    #[cfg(windows)]
+    command.raw_arg(format!("name=\"{interface}\""));
+    #[cfg(not(windows))]
+    command.arg(format!("name={interface}"));
+}
+
 pub fn set_system_dns(addr: &str) -> Result<()> {
     let interfaces = get_managed_interfaces()?;
     for interface in interfaces {
         log_tamper_event(&format!("Setting DNS for interface {} to {}", interface, addr));
         let mut command = Command::new("netsh");
-        command.args(&["interface", "ipv4", "set", "dnsservers", &format!("name=\"{}\"", interface), "static", addr, "primary"]);
+        command.args(&["interface", "ipv4", "set", "dnsservers"]);
+        name_arg(&mut command, &interface);
+        command.args(&["static", addr, "primary"]);
 
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
@@ -47,8 +59,91 @@ pub fn log_tamper_event(message: &str) {
     }
 }
 
+const NRPT_COMMENT: &str = "LibreAscent";
+const NRPT_KEY: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
+
+/// A name resolution policy sending every name to the proxy. It outranks any
+/// adapter's DNS, so a VPN app that sets its own resolver still resolves
+/// through the blocklist while its tunnel carries the traffic. A company VPN's
+/// own rules for its internal names are more specific and still win.
+pub fn ensure_nrpt(addr: &str) -> Result<()> {
+    if nrpt_present() {
+        return Ok(());
+    }
+    log_tamper_event(&format!("Adding name resolution policy: all names to {addr}."));
+    let status = powershell(&format!(
+        "Add-DnsClientNrptRule -Namespace '.' -NameServers '{addr}' -Comment '{NRPT_COMMENT}'"
+    ))
+    .status()
+    .context("failed to add NRPT rule")?;
+    if !status.success() {
+        return Err(anyhow!("Add-DnsClientNrptRule failed with exit code {:?}", status.code()));
+    }
+    Ok(())
+}
+
+/// IPv4 resolvers of the VPN adapters, which the proxy leaves alone. A VPN app
+/// such as Proton blocks every DNS server but its own, this proxy included.
+pub fn vpn_dns_servers() -> Vec<std::net::Ipv4Addr> {
+    let mut command = Command::new("netsh");
+    command.args(&["interface", "ipv4", "show", "dnsservers"]);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    match command.output() {
+        Ok(output) => parse_vpn_dns(&String::from_utf8_lossy(&output.stdout)),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn parse_vpn_dns(output: &str) -> Vec<std::net::Ipv4Addr> {
+    let mut servers = Vec::new();
+    for section in output.split("Configuration for interface \"").skip(1) {
+        let Some((name, body)) = section.split_once('"') else {
+            continue;
+        };
+        if is_managed_dns_interface(name) {
+            continue;
+        }
+        for token in body.split_whitespace() {
+            if let Ok(ip) = token.parse::<std::net::Ipv4Addr>() {
+                if !ip.is_loopback() && !servers.contains(&ip) {
+                    servers.push(ip);
+                }
+            }
+        }
+    }
+    servers
+}
+
+pub fn remove_nrpt() {
+    if !nrpt_present() {
+        return;
+    }
+    let _ = powershell(&format!(
+        "Get-DnsClientNrptRule | Where-Object Comment -eq '{NRPT_COMMENT}' | Remove-DnsClientNrptRule -Force"
+    ))
+    .status();
+}
+
+fn nrpt_present() -> bool {
+    let mut command = Command::new("reg");
+    command.args(&["query", NRPT_KEY, "/s", "/f", NRPT_COMMENT, "/d"]);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+fn powershell(script: &str) -> Command {
+    let mut command = Command::new("powershell");
+    command.args(&["-NoProfile", "-NonInteractive", "-Command", script]);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
 pub fn reset_system_dns() -> Result<()> {
     log_tamper_event("Resetting system DNS to DHCP/Automatic (IPv4 and IPv6).");
+    remove_nrpt();
     
     // IPv4
     if let Ok(interfaces) = get_connected_interfaces() {
@@ -57,7 +152,9 @@ pub fn reset_system_dns() -> Result<()> {
                 continue;
             }
             let mut command = Command::new("netsh");
-            command.args(&["interface", "ipv4", "set", "dnsservers", &format!("name=\"{}\"", interface), "dhcp"]);
+            command.args(&["interface", "ipv4", "set", "dnsservers"]);
+            name_arg(&mut command, &interface);
+            command.arg("dhcp");
 
             #[cfg(windows)]
             command.creation_flags(CREATE_NO_WINDOW);
@@ -73,7 +170,9 @@ pub fn reset_system_dns() -> Result<()> {
                 continue;
             }
             let mut command = Command::new("netsh");
-            command.args(&["interface", "ipv6", "set", "dnsservers", &format!("name=\"{}\"", interface), "dhcp"]);
+            command.args(&["interface", "ipv6", "set", "dnsservers"]);
+            name_arg(&mut command, &interface);
+            command.arg("dhcp");
 
             #[cfg(windows)]
             command.creation_flags(CREATE_NO_WINDOW);
@@ -254,5 +353,11 @@ Idx     Met         MTU          State                Name
         assert!(!super::is_managed_dns_interface("ProtonVPN"));
         assert!(!super::is_managed_dns_interface("OpenVPN TAP-Windows6"));
         assert!(!super::is_managed_dns_interface("Loopback Pseudo-Interface 1"));
+    }
+
+    #[test]
+    fn vpn_resolvers_come_only_from_vpn_adapters() {
+        let output = "\nConfiguration for interface \"ProtonVPN\"\n    Statically Configured DNS Servers:    10.2.0.1\n    Register with which suffix:           Primary only\n\nConfiguration for interface \"Ethernet\"\n    Statically Configured DNS Servers:    127.0.0.1\n    Register with which suffix:           Primary only\n\nConfiguration for interface \"Loopback Pseudo-Interface 1\"\n    Statically Configured DNS Servers:    None\n";
+        assert_eq!(super::parse_vpn_dns(output), vec![std::net::Ipv4Addr::new(10, 2, 0, 1)]);
     }
 }

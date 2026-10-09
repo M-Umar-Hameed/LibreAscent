@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use libreascent_shared::config::{BlockedAppRule, DesktopConfig, DNS_BYPASS_SEAL_RULE_NAMES};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -24,9 +25,33 @@ const GOOGLE_IPS: &str = "8.8.8.8,8.8.4.4,2001:4860:4860::8888,2001:4860:4860::8
 const OPENDNS_IPS: &str = "208.67.222.222,208.67.220.220,2620:119:35::35,2620:119:53::53";
 const ADGUARD_IPS: &str = "94.140.14.14,94.140.15.15,2a10:50c0::ad1:ff,2a10:50c0::ad2:ff";
 
-// Every remote except Quad9's two IPv4 endpoints. Block rules cannot carry an
-// exception, so the blanket :53 seal is written as the ranges around them.
-const ALL_REMOTES_EXCEPT_QUAD9: &str = "0.0.0.0-9.9.9.8,9.9.9.10-149.112.112.111,149.112.112.113-255.255.255.255,::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff";
+const QUAD9: [Ipv4Addr; 2] = [Ipv4Addr::new(9, 9, 9, 9), Ipv4Addr::new(149, 112, 112, 112)];
+
+/// Every remote except Quad9's two IPv4 endpoints and [exempt]. Block rules
+/// cannot carry an exception, so the blanket :53 seal is written as the ranges
+/// around them.
+fn remotes_except(exempt: &[Ipv4Addr]) -> String {
+    let mut holes: Vec<u32> = QUAD9.iter().chain(exempt).map(|ip| u32::from(*ip)).collect();
+    holes.sort_unstable();
+    holes.dedup();
+    let mut ranges = Vec::new();
+    let mut start: u64 = 0;
+    for hole in holes.into_iter().map(u64::from) {
+        if hole > start {
+            ranges.push(format!("{}-{}", ipv4(start), ipv4(hole - 1)));
+        }
+        start = hole + 1;
+    }
+    if start <= u64::from(u32::MAX) {
+        ranges.push(format!("{}-255.255.255.255", ipv4(start)));
+    }
+    ranges.push("::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".to_string());
+    ranges.join(",")
+}
+
+fn ipv4(value: u64) -> Ipv4Addr {
+    Ipv4Addr::from(value as u32)
+}
 
 const DNS_BYPASS_RULE_NAMES: [&str; 5] = [
     DNS_BYPASS_SEAL_RULE_NAMES[0],
@@ -45,17 +70,19 @@ struct FirewallRuleSpec {
 /// `dns_enforced` must be true only when the local DNS proxy is up and the
 /// system resolver is pinned to it (non-Flexible mode). When false, the DNS
 /// bypass rules are removed so normal resolution keeps working through the
-/// machine's real resolver.
+/// machine's real resolver. `vpn_dns` are a connected VPN app's resolvers,
+/// left reachable on :53 because the VPN blocks every other DNS server.
 pub fn ensure_firewall_protection(
     config: &DesktopConfig,
     runtime_app_paths: &[PathBuf],
     dns_enforced: bool,
+    vpn_dns: &[Ipv4Addr],
 ) -> Result<()> {
     let mut specs = configured_app_rules(config);
     specs.extend(runtime_app_paths.iter().map(|path| app_rule_for_path(path)));
 
     if dns_enforced {
-        specs.extend(dns_bypass_block_rules());
+        specs.extend(dns_bypass_block_rules(vpn_dns));
     } else {
         for name in DNS_BYPASS_RULE_NAMES {
             delete_firewall_rule_by_name(name);
@@ -203,21 +230,22 @@ fn dns_block_rule(
 // (client -> 127.0.0.1:53) is exempt from Windows Firewall, so blocking
 // plaintext :53 to all remotes does not touch the proxy itself. The proxy's
 // upstream legs all go to Quad9 (:853, :443, :53), which stays reachable.
-fn dns_bypass_block_rules() -> Vec<FirewallRuleSpec> {
+fn dns_bypass_block_rules(vpn_dns: &[Ipv4Addr]) -> Vec<FirewallRuleSpec> {
     // Quad9 excluded: our proxy forwards to it.
     let bypass_resolvers = format!("{CLOUDFLARE_IPS},{GOOGLE_IPS},{OPENDNS_IPS},{ADGUARD_IPS}");
+    let plaintext = remotes_except(vpn_dns);
 
     vec![
         dns_block_rule(
             DNS_BYPASS_SEAL_RULE_NAMES[0],
             "UDP",
-            Some(ALL_REMOTES_EXCEPT_QUAD9.to_string()),
+            Some(plaintext.clone()),
             "53",
         ),
         dns_block_rule(
             DNS_BYPASS_SEAL_RULE_NAMES[1],
             "TCP",
-            Some(ALL_REMOTES_EXCEPT_QUAD9.to_string()),
+            Some(plaintext),
             "53",
         ),
         dns_block_rule(
@@ -265,7 +293,7 @@ mod tests {
 
     #[test]
     fn plaintext_dns_block_covers_every_remote_except_quad9() {
-        let rules = dns_bypass_block_rules();
+        let rules = dns_bypass_block_rules(&[]);
 
         for name in [
             "LibreAscent Block Plaintext DNS UDP",
@@ -288,7 +316,7 @@ mod tests {
     fn quad9_stays_reachable_on_every_proxy_upstream_port() {
         // The proxy falls back DoT -> DoH -> UDP, all to Quad9 (dns.rs); a seal
         // on any of those ports would cut the fallback it exists to provide.
-        let rules = dns_bypass_block_rules();
+        let rules = dns_bypass_block_rules(&[]);
 
         for name in ["LibreAscent Block DoT", "LibreAscent Block DoH", "LibreAscent Block DoQ"] {
             let scope = remoteip_of(&rules, name).expect("rule is scoped");
@@ -300,7 +328,7 @@ mod tests {
 
     #[test]
     fn dns_bypass_rule_names_match_deletion_list() {
-        let rules = dns_bypass_block_rules();
+        let rules = dns_bypass_block_rules(&[]);
         let names: Vec<&str> = rules.iter().map(|rule| rule.name.as_str()).collect();
         assert_eq!(names, super::DNS_BYPASS_RULE_NAMES.to_vec());
     }
@@ -324,7 +352,7 @@ mod tests {
         // firewall_enforcement_failed and disables every rule until restart. That
         // shipped, so the bypass guard read Missing on every run and no app rule
         // was ever created either.
-        let mut specs = dns_bypass_block_rules();
+        let mut specs = dns_bypass_block_rules(&[]);
         specs.push(app_rule_for_path(Path::new(r"C:\app.exe")));
 
         for spec in specs {
@@ -343,7 +371,7 @@ mod tests {
 
     #[test]
     fn seal_rules_use_shared_bypass_guard_names() {
-        let rules = dns_bypass_block_rules();
+        let rules = dns_bypass_block_rules(&[]);
         let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
         for seal in DNS_BYPASS_SEAL_RULE_NAMES {
             assert!(names.contains(&seal), "missing seal rule {seal}");
@@ -379,4 +407,16 @@ mod tests {
         assert!(configured_app_rules(&config).is_empty());
     }
 
+
+    #[test]
+    fn a_vpn_resolver_is_cut_out_of_the_plaintext_seal() {
+        assert_eq!(
+            remotes_except(&[]),
+            "0.0.0.0-9.9.9.8,9.9.9.10-149.112.112.111,149.112.112.113-255.255.255.255,::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+        );
+        assert_eq!(
+            remotes_except(&[Ipv4Addr::new(10, 2, 0, 1)]),
+            "0.0.0.0-9.9.9.8,9.9.9.10-10.2.0.0,10.2.0.2-149.112.112.111,149.112.112.113-255.255.255.255,::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+        );
+    }
 }

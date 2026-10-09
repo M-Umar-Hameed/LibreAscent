@@ -358,15 +358,16 @@ class ContentMatcher {
         "dick" to setOf("dickens", "dickson", "moby-dick", "ridiculous")
     )
 
-    fun findMatchingKeywordDirectly(text: String): String? {
-        val direct = findMatchingKeyword(text)
+    fun findMatchingKeywordDirectly(text: String, keywords: Collection<String> = blockedKeywords): String? {
+        val direct = findMatchingKeyword(text, keywords)
         if (direct != null) return direct
         
-        // Compact matching pass: handles "p o r n" or "p-o-r-n" or "p\u200Eo\u200Er\u200En"
-        // We strip whitespace, common separators, and Unicode directional/invisible separators
-        val compactText = text.lowercase().replace(compactTextPattern, "")
+        // Compact matching pass: handles "p o r n" or "p-o-r-n" or letters split by
+        // invisible separators. Only letters spaced out one by one are joined:
+        // joining whole words turned "shop ornaments" into a match for "porn".
+        val compactText = spacedOutRuns(text.lowercase())
         val foldedCompactText = foldLookalikes(compactText)
-        for (keyword in blockedKeywords) {
+        for (keyword in keywords) {
             val lowerKeyword = keyword.lowercase()
             if (lowerKeyword.length > 3 &&
                 (compactText.contains(lowerKeyword) ||
@@ -377,6 +378,37 @@ class ContentMatcher {
             }
         }
         return null
+    }
+
+    /**
+     * The first keyword in [text] if it holds [count] unrelated ones. A keyword
+     * found takes every keyword overlapping it out of the running, so one word
+     * such as "pornography" never counts as "porn" and "porno" too.
+     */
+    fun findDistinctKeywords(text: String, count: Int): String? {
+        val remaining = blockedKeywords.toMutableSet()
+        var first: String? = null
+        repeat(count) {
+            val found = findMatchingKeywordDirectly(text, remaining)?.lowercase() ?: return null
+            if (first == null) first = found
+            remaining.removeAll { it.contains(found) || found.contains(it) }
+        }
+        return first
+    }
+
+    /** Runs of single characters split by separators, each run joined, runs space-separated. */
+    private fun spacedOutRuns(text: String): String {
+        val out = StringBuilder()
+        val run = StringBuilder()
+        fun flush() {
+            if (run.length > 1) out.append(run).append(' ')
+            run.setLength(0)
+        }
+        for (token in text.split(compactTextPattern)) {
+            if (token.length == 1) run.append(token) else flush()
+        }
+        flush()
+        return out.toString()
     }
 
     /** Maps leetspeak digits/symbols and Cyrillic look-alikes to Latin letters. */
@@ -408,22 +440,27 @@ class ContentMatcher {
         return false
     }
 
-    private fun findMatchingKeyword(url: String): String? {
+    private fun findMatchingKeyword(url: String, keywords: Collection<String> = blockedKeywords): String? {
         val lowerUrl = url.lowercase()
-        matchKeywords(lowerUrl, minKeywordLength = 0)?.let { return it }
+        matchKeywords(lowerUrl, minKeywordLength = 0, keywords = keywords)?.let { return it }
         // Second pass catches "p0rn" and Cyrillic look-alikes. Keywords of three
         // characters or fewer stay out: they need an exact token, and folding
         // digits would let IDs such as "5ex" match "sex".
         val folded = foldLookalikes(lowerUrl)
         if (folded === lowerUrl) return null
-        return matchKeywords(folded, minKeywordLength = 4, original = lowerUrl)
+        return matchKeywords(folded, minKeywordLength = 4, original = lowerUrl, keywords = keywords)
     }
 
     /** [original] is the unfolded text when [lowerUrl] is a folded copy. */
-    private fun matchKeywords(lowerUrl: String, minKeywordLength: Int, original: String? = null): String? {
+    private fun matchKeywords(
+        lowerUrl: String,
+        minKeywordLength: Int,
+        original: String? = null,
+        keywords: Collection<String> = blockedKeywords
+    ): String? {
         var textBlocks: List<String>? = null
 
-        for (keyword in blockedKeywords) {
+        for (keyword in keywords) {
             val lowerKeyword = keyword.lowercase()
             if (lowerKeyword.length < minKeywordLength) continue
 

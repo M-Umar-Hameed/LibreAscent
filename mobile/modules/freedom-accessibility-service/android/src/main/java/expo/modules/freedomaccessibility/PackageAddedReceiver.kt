@@ -16,6 +16,8 @@ class PackageAddedReceiver : BroadcastReceiver() {
             intent.action == Intent.ACTION_PACKAGE_REMOVED
         ) {
             InstalledAppsCache.invalidate()
+            expo.modules.freedomvpn.BankingApps.invalidate()
+            Thread { expo.modules.freedomvpn.BankingApps.installed(context.applicationContext) }.start()
             Log.i("PackageAddedReceiver", "Package list changed, installed-app cache invalidated")
         }
     }

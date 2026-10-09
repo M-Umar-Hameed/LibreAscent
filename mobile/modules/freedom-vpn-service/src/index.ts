@@ -19,6 +19,8 @@ interface FreedomVpnModuleInterface {
   setCategoryEnabled?(name: string, enabled: boolean): Promise<boolean>;
   getCategorySize?(name: string): Promise<number>;
   setWhitelist(domains: string[]): Promise<void>;
+  // Absent on native builds older than the JS bundle.
+  setKeywords?(keywords: string[]): Promise<void>;
   setSafeSearch(enabled: boolean): Promise<void>;
   getBlockedCount(): Promise<number>;
   getBlocklistSize(): Promise<number>;
@@ -130,6 +132,12 @@ export async function getCategorySize(name: string): Promise<number | null> {
 export async function setWhitelist(domains: string[]): Promise<void> {
   if (!FreedomVpnNative) return;
   return FreedomVpnNative.setWhitelist(domains);
+}
+
+/** Domains containing one of these keywords are blocked in the DNS tunnel. */
+export async function setKeywords(keywords: string[]): Promise<void> {
+  if (!FreedomVpnNative?.setKeywords) return;
+  return FreedomVpnNative.setKeywords(keywords);
 }
 
 /**

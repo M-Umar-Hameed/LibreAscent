@@ -19,7 +19,6 @@ object ProtectionCheck {
 
     fun decide(
         vpnWanted: Boolean,
-        vpnPaused: Boolean,
         tunnelUp: Boolean,
         alwaysOnApp: String?,
         vpnSlotLost: Boolean,
@@ -28,7 +27,7 @@ object ProtectionCheck {
         bankingActive: Boolean
     ): List<String> {
         val problems = mutableListOf<String>()
-        if (vpnWanted && !vpnPaused && !tunnelUp) problems += VPN_DOWN
+        if (vpnWanted && !tunnelUp) problems += VPN_DOWN
         if (!alwaysOnApp.isNullOrEmpty()) {
             if (alwaysOnApp != ownPackage) problems += VPN_TAKEN + alwaysOnApp
         } else if (vpnWanted && vpnSlotLost) {
@@ -75,7 +74,6 @@ object ProtectionCheck {
         val now = System.currentTimeMillis()
         return decide(
             vpnWanted = VpnWatchdog.isVpnWanted(context),
-            vpnPaused = now < VpnWatchdog.pausedUntil(context),
             tunnelUp = isTunnelUp(context),
             alwaysOnApp = try {
                 Settings.Secure.getString(context.contentResolver, "always_on_vpn_app")

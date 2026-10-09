@@ -9,23 +9,20 @@ import android.provider.Settings
 import android.util.Log
 
 /**
- * Time-boxed pause so that accessibility- and VPN-hostile banking apps can run:
- * the accessibility service for BANKING_DURATION_MS, the DNS tunnel only for
- * VPN_PAUSE_MS, which is long enough for the bank app's launch check. Device
- * admin stays active.
+ * Steps the accessibility service aside while a banking app is open: banks
+ * refuse to sign in while any accessibility service is on. The tunnel already
+ * bypasses them. Device admin stays active.
  */
 object BankingModeManager {
     private const val TAG = "BankingMode"
     private const val PREFS = "freedom_settings"
     private const val KEY_UNTIL = "banking_until"
     private const val KEY_SAVED = "banking_saved_services"
-    private const val KEY_ATTEMPTS = "banking_attempt_times"
+    // Read by BankingAppGuard, which restores once this app leaves the foreground.
+    private const val KEY_AUTO_PACKAGE = "banking_auto_package"
     private const val ALARM_REQUEST_CODE = 24603
 
-    const val BANKING_DURATION_MS = 60_000L
-    const val VPN_PAUSE_MS = 15_000L
-    const val ATTEMPT_LIMIT = 3
-    const val ATTEMPT_WINDOW_MS = 30 * 60 * 1000L // 30 min rolling window
+    const val AUTO_MAX_MS = 30 * 60_000L
     const val ACTION_RESTORE = "expo.modules.freedomaccessibility.BANKING_RESTORE"
 
     private fun prefs(context: Context) =
@@ -43,49 +40,14 @@ object BankingModeManager {
         return until > 0L && System.currentTimeMillis() < until
     }
 
-    fun remainingMs(context: Context): Long {
-        val until = prefs(context).getLong(KEY_UNTIL, 0L)
-        return if (until > 0L) maxOf(0L, until - System.currentTimeMillis()) else 0L
-    }
-
-    // --- Rate limiting: max ATTEMPT_LIMIT starts per rolling ATTEMPT_WINDOW_MS ---
-
-    /** Attempt timestamps still inside the rolling window. Pure (testable). */
-    fun prunedFor(times: List<Long>, now: Long): List<Long> =
-        times.filter { now - it in 0 until ATTEMPT_WINDOW_MS }
-
-    /** ms until a new start is allowed; 0 if allowed now. Pure (testable). */
-    fun cooldownRemainingMsFor(times: List<Long>, now: Long): Long {
-        val active = prunedFor(times, now)
-        if (active.size < ATTEMPT_LIMIT) return 0L
-        val oldest = active.minOrNull() ?: return 0L
-        return maxOf(0L, oldest + ATTEMPT_WINDOW_MS - now)
-    }
-
-    /** Starts left in the current window. Pure (testable). */
-    fun attemptsRemainingFor(times: List<Long>, now: Long): Int =
-        maxOf(0, ATTEMPT_LIMIT - prunedFor(times, now).size)
-
-    private fun attemptTimes(context: Context): List<Long> =
-        (prefs(context).getString(KEY_ATTEMPTS, "") ?: "")
-            .split(",")
-            .mapNotNull { it.toLongOrNull() }
-
-    fun cooldownRemainingMs(context: Context): Long =
-        cooldownRemainingMsFor(attemptTimes(context), System.currentTimeMillis())
-
-    fun attemptsRemaining(context: Context): Int =
-        attemptsRemainingFor(attemptTimes(context), System.currentTimeMillis())
-
-    fun start(context: Context) {
-        if (!hasWriteSecureSettings(context)) {
-            throw SecurityException("WRITE_SECURE_SETTINGS not granted")
-        }
-        val now = System.currentTimeMillis()
-        val times = prunedFor(attemptTimes(context), now)
-        if (times.size >= ATTEMPT_LIMIT) {
-            throw IllegalStateException("Banking attempt limit reached")
-        }
+    /**
+     * Steps the service aside while [bankPackage] is in front. BankingAppGuard
+     * restores it once the user has left the bank, which it can only see with
+     * usage access, so without that grant nothing happens.
+     */
+    fun startAuto(context: Context, bankPackage: String) {
+        if (!hasWriteSecureSettings(context) || !hasUsageAccess(context) || isActive(context)) return
+        val until = System.currentTimeMillis() + AUTO_MAX_MS
         val resolver = context.contentResolver
         val current = Settings.Secure.getString(
             resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
@@ -95,19 +57,30 @@ object BankingModeManager {
             .filter { it.isNotBlank() && it != component }
             .joinToString(":")
 
-        val until = now + BANKING_DURATION_MS
         prefs(context).edit()
             .putString(KEY_SAVED, current)
             .putLong(KEY_UNTIL, until)
-            .putString(KEY_ATTEMPTS, (times + now).joinToString(","))
+            .putString(KEY_AUTO_PACKAGE, bankPackage)
             .commit()
 
-        Settings.Secure.putString(
-            resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, filtered
-        )
+        try {
+            Settings.Secure.putString(
+                resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, filtered
+            )
+        } catch (e: SecurityException) {
+            prefs(context).edit().remove(KEY_UNTIL).remove(KEY_SAVED).remove(KEY_AUTO_PACKAGE).commit()
+            Log.w(TAG, "Banking pause refused: ${e.message}")
+            return
+        }
         scheduleAlarm(context, until)
-        expo.modules.freedomvpn.FreedomVpnService.pause(context, VPN_PAUSE_MS)
-        Log.i(TAG, "Banking mode started until $until")
+        Log.i(TAG, "Banking pause for $bankPackage")
+    }
+
+    private fun hasUsageAccess(context: Context): Boolean {
+        val ops = context.getSystemService(Context.APP_OPS_SERVICE) as? android.app.AppOpsManager ?: return false
+        return ops.unsafeCheckOpNoThrow(
+            android.app.AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), context.packageName
+        ) == android.app.AppOpsManager.MODE_ALLOWED
     }
 
     fun restore(context: Context) {
@@ -123,15 +96,18 @@ object BankingModeManager {
             saved.split(":").any { it == component } -> saved
             else -> "$saved:$component"
         }
-        Settings.Secure.putString(
-            resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, target
-        )
-        Settings.Secure.putInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
-        prefs(context).edit().remove(KEY_UNTIL).remove(KEY_SAVED).apply()
+        // The window closes even if the write fails, so the user can still
+        // turn the service back on by hand.
+        try {
+            Settings.Secure.putString(
+                resolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, target
+            )
+            Settings.Secure.putInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Banking restore could not re-enable the service: ${e.message}")
+        }
+        prefs(context).edit().remove(KEY_UNTIL).remove(KEY_SAVED).remove(KEY_AUTO_PACKAGE).commit()
         cancelAlarm(context)
-        // Ending banking early must not leave the tunnel down for the rest of
-        // its pause. No-op once the pause has already been resumed.
-        expo.modules.freedomvpn.FreedomVpnService.resume(context)
         Log.i(TAG, "Banking mode restored")
     }
 

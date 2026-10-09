@@ -3,6 +3,7 @@ package expo.modules.freedomaccessibility
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * Covers ContentMatcher's private findMatchingKeyword: exact/substring/token
@@ -122,5 +123,27 @@ class ContentMatcherKeywordTest {
         assertNull(matcher.findMatchingKeywordDirectly("Price: \$71.75"))
         assertEquals("tits", matcher.findMatchingKeywordForTest("example.com/t1ts"))
         assertEquals("tits", matcher.findMatchingKeywordDirectly("see t 1 t s"))
+    }
+
+    @Test
+    fun spacedOutLettersMatchButWordsAreNeverJoined() {
+        val matcher = ContentMatcher()
+        matcher.setKeywordsForTest(listOf("porn", "incest", "threesome"))
+
+        assertEquals("porn", matcher.findMatchingKeywordDirectly("watch p o r n here"))
+        assertEquals("porn", matcher.findMatchingKeywordDirectly("p-o-r-n"))
+        assertNull(matcher.findMatchingKeywordDirectly("Shop ornaments for the top ornate doors"))
+        assertNull(matcher.findMatchingKeywordDirectly("Ever since starting my new job"))
+        assertNull(matcher.findMatchingKeywordDirectly("Three something"))
+    }
+
+    @Test
+    fun anOrdinaryPageNeedsTwoUnrelatedKeywords() {
+        val matcher = ContentMatcher()
+        matcher.setKeywordsForTest(listOf("porn", "porno", "pornography", "hentai", "nude"))
+
+        assertNull(matcher.findDistinctKeywords("Pornography (colloquially porn or porno) is a subject of study.", 2))
+        assertTrue(matcher.findDistinctKeywords("Free hentai and nude galleries", 2) in setOf("hentai", "nude"))
+        assertNull(matcher.findDistinctKeywords("Nothing to see here", 2))
     }
 }

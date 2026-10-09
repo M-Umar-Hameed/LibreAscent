@@ -52,4 +52,14 @@ export const REELS_APPS: ReelsAppConfig[] = [
       "spotlight_player",
     ],
   },
+  {
+    name: "X (Twitter)",
+    packageName: "com.twitter.android",
+    detectionNodes: ["VideoTab"],
+  },
+  {
+    name: "Reddit",
+    packageName: "com.reddit.frontpage",
+    detectionNodes: ["fbp_vertical_pager"],
+  },
 ];

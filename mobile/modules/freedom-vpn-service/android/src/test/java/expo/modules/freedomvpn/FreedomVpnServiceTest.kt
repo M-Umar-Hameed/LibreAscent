@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -275,5 +276,14 @@ class FreedomVpnServiceTest {
         if (i < 40 + udpLength) sum += (packet[i].toInt() and 0xFF) shl 8
         while (sum shr 16 > 0) sum = (sum and 0xFFFF) + (sum shr 16)
         return sum
+    }
+
+    @Test
+    fun bankingAppsAreRecognisedByListOrName() {
+        assertTrue(BankingApps.isBanking("com.sadapay.app", "SadaPay"))
+        assertTrue(BankingApps.isBanking("com.hbl.android.hblmobilebanking", null))
+        assertTrue(BankingApps.isBanking("com.example.app", "Meezan Bank"))
+        assertFalse(BankingApps.isBanking("org.mozilla.firefox", "Firefox"))
+        assertFalse(BankingApps.isBanking("com.reddit.frontpage", "Reddit"))
     }
 }

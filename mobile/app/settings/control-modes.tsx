@@ -589,7 +589,7 @@ export default function ControlModesScreen(): ReactNode {
               >
                 Hardcore mode uses the Accessibility Service to bounce you away
                 from uninstall and admin settings. Protection is best-effort and
-                is paused during Banking Mode.
+                is paused while a banking app is open.
               </Text>
               <Text
                 className="text-xs font-semibold mb-1"
@@ -606,7 +606,8 @@ export default function ControlModesScreen(): ReactNode {
                   className="text-xs"
                   style={{ color: t.accentColor, fontFamily: "monospace" }}
                 >
-                  adb shell dpm set-device-owner com.libreascent.app/expo.modules.freedomdeviceadmin.FreedomDeviceAdminReceiver
+                  adb shell dpm set-device-owner
+                  com.libreascent.app/expo.modules.freedomdeviceadmin.FreedomDeviceAdminReceiver
                 </Text>
               </View>
             </View>

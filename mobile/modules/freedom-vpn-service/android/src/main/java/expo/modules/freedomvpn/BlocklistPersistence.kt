@@ -24,6 +24,7 @@ object BlocklistPersistence {
     private const val STAGING_SUFFIX = ".tmp"
     private const val USER_FILE = "user_domains.txt"
     private const val WHITELIST_FILE = "whitelist.txt"
+    private const val KEYWORDS_FILE = "keywords.txt"
 
 
     private fun dir(context: Context): File =
@@ -118,6 +119,9 @@ object BlocklistPersistence {
     fun saveWhitelist(context: Context, domains: List<String>) =
         saveList(context, WHITELIST_FILE, domains)
 
+    fun saveKeywords(context: Context, keywords: List<String>) =
+        saveList(context, KEYWORDS_FILE, keywords)
+
     private fun saveList(context: Context, fileName: String, domains: List<String>) {
         try {
             File(dir(context), fileName).bufferedWriter().use { writer ->
@@ -155,6 +159,7 @@ object BlocklistPersistence {
                             Log.i(TAG, "Whitelist already pushed; skipping disk copy")
                         }
                     }
+                    name == KEYWORDS_FILE -> blocklist.setKeywordsIfAbsent(readLines(file))
                 }
             }
         } catch (e: Exception) {

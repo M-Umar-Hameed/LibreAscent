@@ -118,9 +118,6 @@ class FreedomVpnService : VpnService() {
         private const val VPN_PREFS = "freedom_vpn_state"
         private const val KEY_WANTED = "vpn_wanted"
 
-        // Also read by VpnWatchdog, which must not restart the tunnel mid-pause.
-        private const val KEY_PAUSED_UNTIL = "vpn_paused_until"
-
         private const val KEY_SAFE_SEARCH = "safe_search"
         private const val KEY_DISABLED_CATEGORIES = "disabled_categories"
 
@@ -165,60 +162,6 @@ class FreedomVpnService : VpnService() {
                 .edit()
                 .putBoolean(KEY_WANTED, wanted)
                 .apply()
-        }
-
-        @Volatile
-        private var instance: FreedomVpnService? = null
-
-        private fun pausedUntil(context: Context): Long =
-            context.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
-                .getLong(KEY_PAUSED_UNTIL, 0L)
-
-        fun isPaused(context: Context): Boolean =
-            System.currentTimeMillis() < pausedUntil(context)
-
-        /**
-         * Takes the tunnel down for [durationMs] without clearing vpn_wanted, so
-         * the watchdog brings it back if the resume below never runs. Banking
-         * apps refuse to start while any VPN is up.
-         */
-        fun pause(context: Context, durationMs: Long) {
-            val app = context.applicationContext
-            app.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
-                .edit()
-                .putLong(KEY_PAUSED_UNTIL, System.currentTimeMillis() + durationMs)
-                .commit()
-            val main = android.os.Handler(android.os.Looper.getMainLooper())
-            // stopService alone left the tunnel up: the system stays bound to an
-            // established VpnService, so it is never destroyed. Closing the TUN is
-            // what takes the VPN down.
-            val running = instance
-            if (running != null) {
-                main.post {
-                    running.closeTunnel()
-                    running.stopSelf()
-                }
-            } else {
-                app.stopService(Intent(app, FreedomVpnService::class.java))
-            }
-            main.postDelayed({ resume(app) }, durationMs)
-            Log.i(TAG, "VPN paused for ${durationMs / 1000}s")
-        }
-
-        /** Ends a pause now, restarting the tunnel if it is meant to be up. */
-        fun resume(context: Context) {
-            val app = context.applicationContext
-            val prefs = app.getSharedPreferences(VPN_PREFS, Context.MODE_PRIVATE)
-            if (prefs.getLong(KEY_PAUSED_UNTIL, 0L) == 0L) return
-            prefs.edit().remove(KEY_PAUSED_UNTIL).commit()
-            if (!prefs.getBoolean(KEY_WANTED, false) || android.net.VpnService.prepare(app) != null) return
-            try {
-                app.startForegroundService(Intent(app, FreedomVpnService::class.java))
-                Log.i(TAG, "VPN resumed after pause")
-            } catch (e: Exception) {
-                // Background start refused; the watchdog retries within 30s.
-                Log.w(TAG, "VPN resume deferred to watchdog: ${e.message}")
-            }
         }
 
         /**
@@ -622,20 +565,11 @@ class FreedomVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
-        instance = this
         dnsInterceptor = DnsInterceptor(blocklist)
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (isPaused(this)) {
-            // Always-on can restart the service mid-pause. startForeground first:
-            // a foreground-service start that never calls it crashes the app.
-            startForeground(NOTIFICATION_ID, createNotification())
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
         if (running.get()) {
             Log.w(TAG, "VPN already running, ignoring start command")
             return START_STICKY
@@ -750,6 +684,7 @@ class FreedomVpnService : VpnService() {
 
             addBypassedApplication(builder, packageName)
             DEFAULT_BYPASSED_PACKAGES.forEach { addBypassedApplication(builder, it) }
+            BankingApps.installed(this).forEach { addBypassedApplication(builder, it) }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
@@ -1082,7 +1017,6 @@ class FreedomVpnService : VpnService() {
     override fun onDestroy() {
         Log.i(TAG, "Stopping Freedom VPN Service")
         closeTunnel()
-        if (instance === this) instance = null
         super.onDestroy()
     }
 

@@ -18,8 +18,15 @@ class BrowserCoverageTest {
         assertEquals(instagram, ReelsDetector.shortVideoPackages("instagram.com/reel/Cx1/"))
         assertEquals(instagram, ReelsDetector.shortVideoPackages("instagram.com/reels/Cx1"))
         assertEquals(instagram, ReelsDetector.shortVideoPackages("www.instagram.com/reels"))
+        assertEquals(instagram, ReelsDetector.shortVideoPackages("instagram.com/someone/reel/Cx1/"))
+        assertEquals(instagram, ReelsDetector.shortVideoPackages("instagram.com/someone/reels/"))
 
         assertEquals(listOf("com.facebook.katana"), ReelsDetector.shortVideoPackages("m.facebook.com/reel/123"))
+        assertEquals(listOf("com.facebook.katana"), ReelsDetector.shortVideoPackages("www.facebook.com/reels/"))
+        val snapchat = listOf("com.snapchat.android")
+        assertEquals(snapchat, ReelsDetector.shortVideoPackages("www.snapchat.com/spotlight/abc"))
+        assertEquals(snapchat, ReelsDetector.shortVideoPackages("snapchat.com/discover"))
+        assertEquals(snapchat, ReelsDetector.shortVideoPackages("story.snapchat.com/p/abc"))
         assertEquals(
             listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill"),
             ReelsDetector.shortVideoPackages("tiktok.com/@someone/video/1")
@@ -34,7 +41,10 @@ class BrowserCoverageTest {
         assertTrue(ReelsDetector.shortVideoPackages("youtube.com").isEmpty())
         assertTrue(ReelsDetector.shortVideoPackages("instagram.com/someone").isEmpty())
         assertTrue(ReelsDetector.shortVideoPackages("instagram.com/p/Cx1").isEmpty())
+        assertTrue(ReelsDetector.shortVideoPackages("instagram.com/someone/p/Cx1").isEmpty())
         assertTrue(ReelsDetector.shortVideoPackages("facebook.com/someone/videos/1").isEmpty())
+        assertTrue(ReelsDetector.shortVideoPackages("web.snapchat.com").isEmpty())
+        assertTrue(ReelsDetector.shortVideoPackages("snapchat.com/add/someone").isEmpty())
     }
 
     @Test

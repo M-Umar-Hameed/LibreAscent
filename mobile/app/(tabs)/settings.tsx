@@ -9,7 +9,6 @@ import {
   type BlockingState,
 } from "@/stores/useBlockingStore";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
-import * as FreedomDeviceAdmin from "@/modules/freedom-device-admin/src";
 import * as FreedomForeground from "@/modules/freedom-foreground-service/src";
 import * as FreedomVpn from "@/modules/freedom-vpn-service/src";
 import { Ionicons } from "@expo/vector-icons";
@@ -74,127 +73,24 @@ export default function SettingsScreen(): ReactNode {
     "boot" | "applock" | "adblock" | null
   >(null);
 
-  const [bankingActive, setBankingActive] = useState(false);
-  const [bankingRemainingMs, setBankingRemainingMs] = useState(0);
   const [bankingHasPermission, setBankingHasPermission] = useState(true);
-  const [bankingCooldownMs, setBankingCooldownMs] = useState(0);
-  const [bankingAttemptsRemaining, setBankingAttemptsRemaining] = useState(3);
+  const [bankingHasUsageAccess, setBankingHasUsageAccess] = useState(true);
 
   useFocusEffect(
     useCallback(() => {
-      const poll = async (): Promise<void> => {
-        try {
-          const [state, perm] = await Promise.all([
-            FreedomAccessibility.getBankingState(),
-            FreedomAccessibility.hasWriteSecureSettings(),
-          ]);
-          setBankingActive(state.active);
-          setBankingRemainingMs(state.remainingMs);
-          setBankingCooldownMs(state.cooldownRemainingMs);
-          setBankingAttemptsRemaining(state.attemptsRemaining);
+      void Promise.all([
+        FreedomAccessibility.hasWriteSecureSettings(),
+        FreedomForeground.hasUsageStatsPermission(),
+      ])
+        .then(([perm, usage]) => {
           setBankingHasPermission(perm);
-        } catch {
+          setBankingHasUsageAccess(usage);
+        })
+        .catch(() => {
           /* ignore */
-        }
-      };
-      void poll();
-      const interval = setInterval(() => void poll(), 2000);
-      return () => {
-        clearInterval(interval);
-      };
+        });
     }, []),
   );
-
-  const startBanking = async (): Promise<void> => {
-    setPendingAction(null);
-
-    // Banking mode switches the accessibility service off, and app blocking
-    // lives inside it. Without usage-stats access the foreground guard cannot
-    // see what is on screen, so every blocked app would open freely for the
-    // whole window. Refuse rather than hand out an unguarded window.
-    const isDeviceOwner = await FreedomDeviceAdmin.isDeviceOwner().catch(
-      () => false,
-    );
-    if (
-      !isDeviceOwner &&
-      !(await FreedomForeground.hasUsageStatsPermission())
-    ) {
-      Alert.alert(
-        "Usage access required",
-        "Banking mode turns off the accessibility service, so LibreAscent needs usage access to keep blocked apps blocked during that time. Without it, blocked apps would open freely.",
-        [
-          { text: "Cancel", style: "cancel" },
-          {
-            text: "Grant access",
-            onPress: () => {
-              void FreedomForeground.openUsageStatsSettings();
-            },
-          },
-        ],
-      );
-      return;
-    }
-
-    try {
-      try {
-        await FreedomDeviceAdmin.setSelfUninstallBlocked(true);
-      } catch {
-        // ERR_NOT_DEVICE_OWNER: allow banking with WS-A friction
-      }
-      await FreedomAccessibility.startBankingMode();
-      const state = await FreedomAccessibility.getBankingState();
-      setBankingActive(state.active);
-      setBankingRemainingMs(state.remainingMs);
-      setBankingCooldownMs(state.cooldownRemainingMs);
-      setBankingAttemptsRemaining(state.attemptsRemaining);
-    } catch (e) {
-      console.error("[Settings] Banking mode toggle failed:", e);
-      Alert.alert(
-        "Banking mode unavailable",
-        "Grant the one-time permission with adb, then try again.",
-      );
-    }
-  };
-
-  const endBanking = async (): Promise<void> => {
-    try {
-      await FreedomAccessibility.endBankingMode();
-      const state = await FreedomAccessibility.getBankingState();
-      setBankingActive(state.active);
-      setBankingRemainingMs(state.remainingMs);
-      setBankingCooldownMs(state.cooldownRemainingMs);
-      setBankingAttemptsRemaining(state.attemptsRemaining);
-    } catch (e) {
-      console.error("[Settings] Banking mode toggle failed:", e);
-      Alert.alert(
-        "Banking mode unavailable",
-        "Grant the one-time permission with adb, then try again.",
-      );
-    }
-  };
-
-  const handleBankingToggle = (enable: boolean): void => {
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    if (enable && bankingCooldownMs > 0) {
-      Alert.alert(
-        "Banking limit reached",
-        `You've used all 3 sessions. Try again in ${bankingCountdown(bankingCooldownMs)}.`,
-      );
-      return;
-    }
-    if (enable) {
-      void startBanking();
-    } else {
-      void endBanking();
-    }
-  };
-
-  const bankingCountdown = (ms: number = bankingRemainingMs): string => {
-    const total = Math.max(0, Math.ceil(ms / 1000));
-    const m = Math.floor(total / 60);
-    const s = total % 60;
-    return `${m}:${s.toString().padStart(2, "0")}`;
-  };
 
   const handleBootToggle = (isEnabling: boolean): void => {
     if (controlMode === "flexible" || isEnabling) {
@@ -521,31 +417,26 @@ export default function SettingsScreen(): ReactNode {
             )}
           </View>
           <View className="p-4 border-t border-gray-800">
-            <View className="flex-row items-center justify-between">
-              <View className="flex-1 pr-3">
-                <Text style={{ color: t.textColor }}>Banking Mode</Text>
-                <Text className="text-sm" style={{ color: t.mutedTextColor }}>
-                  {!bankingHasPermission
-                    ? "One-time setup required (see below)"
-                    : bankingActive
-                      ? `Accessibility paused - ${bankingCountdown()} left`
-                      : bankingCooldownMs > 0
-                        ? `Limit reached - retry in ${bankingCountdown(bankingCooldownMs)}`
-                        : `Pause VPN 15 s and accessibility 1 min to use banking apps (${bankingAttemptsRemaining} left)`}
+            <Text style={{ color: t.textColor }}>Banking Apps</Text>
+            <Text className="text-sm" style={{ color: t.mutedTextColor }}>
+              {!bankingHasPermission
+                ? "One-time setup required (see below)"
+                : !bankingHasUsageAccess
+                  ? "Needs usage access to resume protection after a banking app"
+                  : "Protection pauses while a banking app is open and resumes 2 minutes after you leave it"}
+            </Text>
+            {bankingHasPermission && !bankingHasUsageAccess && (
+              <Pressable
+                onPress={() => void FreedomForeground.openUsageStatsSettings()}
+                className="mt-3 p-3 rounded-lg"
+                style={{ backgroundColor: t.bgColor }}
+                aria-label="Grant usage access"
+              >
+                <Text className="text-sm" style={{ color: t.accentColor }}>
+                  Grant usage access
                 </Text>
-              </View>
-              <Switch
-                value={bankingActive}
-                disabled={
-                  !bankingHasPermission ||
-                  (!bankingActive && bankingCooldownMs > 0)
-                }
-                onValueChange={handleBankingToggle}
-                trackColor={{ false: "#ccc", true: t.accentColor }}
-                thumbColor={bankingActive ? "#fff" : "#999"}
-                aria-label="Toggle banking mode"
-              />
-            </View>
+              </Pressable>
+            )}
             {!bankingHasPermission && (
               <View
                 className="mt-3 p-3 rounded-lg"

@@ -96,4 +96,21 @@ class BankingAppGuardTest {
         // showed battery problems, so it must stay well clear of a busy loop.
         assertTrue(idle >= 5_000L, "idle polling must stay cheap")
     }
+
+    @Test
+    fun theBankingPauseOnlySurvivesSignInTrips() {
+        val bank = "com.hbl.android.hblmobilebanking"
+        val trips = setOf("com.google.android.apps.messaging", "com.google.android.apps.nexuslauncher")
+        fun stop(pkg: String, activity: String? = null) = BankingAppGuard.pauseStop(pkg, activity, bank, trips)
+
+        assertEquals(BankingAppGuard.Companion.PauseStop.NONE, stop(bank))
+        assertEquals(BankingAppGuard.Companion.PauseStop.NONE, stop("com.google.android.gms"))
+        assertEquals(
+            BankingAppGuard.Companion.PauseStop.NONE,
+            stop("com.android.settings", "com.android.settings.password.ConfirmDeviceCredentialActivity")
+        )
+        assertEquals(BankingAppGuard.Companion.PauseStop.AFTER_GRACE, stop("com.google.android.apps.messaging"))
+        assertEquals(BankingAppGuard.Companion.PauseStop.NOW, stop("org.mozilla.firefox"))
+        assertEquals(BankingAppGuard.Companion.PauseStop.NOW, stop("com.android.settings", "com.android.settings.Settings"))
+    }
 }

@@ -38,6 +38,8 @@ class BankingAppGuard(private val context: Context) {
     private var running = false
     private var restoreRequested = false
     private var grantWarned = false
+    private var bankSeenAt = 0L
+    private var lastForeground: Pair<String, String?>? = null
 
     private val tick = object : Runnable {
         override fun run() {
@@ -67,11 +69,12 @@ class BankingAppGuard(private val context: Context) {
 
     /** Returns true when the banking window is open, so the caller can poll faster. */
     private fun pollOnce(): Boolean {
-        val until = context
-            .getSharedPreferences(BANKING_PREFS, Context.MODE_PRIVATE)
-            .getLong(KEY_BANKING_UNTIL, 0L)
+        val prefs = context.getSharedPreferences(BANKING_PREFS, Context.MODE_PRIVATE)
+        val until = prefs.getLong(KEY_BANKING_UNTIL, 0L)
         if (!isWindowPending(until)) {
             restoreRequested = false
+            bankSeenAt = 0L
+            lastForeground = null
             grantWarned = false
             return false
         }
@@ -84,11 +87,8 @@ class BankingAppGuard(private val context: Context) {
         // a backstop. Same-package broadcast reaches the non-exported receiver.
         // This needs no permission, so it runs before the usage-stats check.
         if (shouldRequestRestore(until, System.currentTimeMillis(), restoreRequested)) {
-            restoreRequested = true
             Log.i(TAG, "Banking deadline passed, requesting restore now")
-            context.sendBroadcast(
-                Intent(ACTION_BANKING_RESTORE).setPackage(context.packageName)
-            )
+            requestRestore()
         }
 
         if (!hasUsageStatsPermission(context)) {
@@ -101,17 +101,27 @@ class BankingAppGuard(private val context: Context) {
             return true
         }
 
-        val foreground = foregroundPackage() ?: return true
+        // The lookback only sees recent switches; staying in one app keeps it.
+        val (foreground, activity) = (foregroundActivity() ?: lastForeground)
+            ?.also { lastForeground = it } ?: return true
         if (foreground == context.packageName) return true
 
-        // Device admin blocks uninstall, but not the deactivation that precedes
-        // it, and SettingsProtector — the only thing that guards that screen —
-        // dies with the accessibility service. Two minutes is ample time to walk
-        // Settings > Security > Device admin apps > Deactivate > Uninstall, so
-        // keep Settings and the package installer off screen for the window.
-        if (isTamperSurface(foreground)) {
-            Log.w(TAG, "Banking window: $foreground can reach uninstall, sending home")
-            sendHome()
+        // The pause outlives a short trip to fetch an OTP, since a bank still
+        // running notices the service coming back. Any other app ends it at
+        // once: the pause turns every content check off, and hopping between a
+        // bank and a browser would otherwise keep it off for good. A window
+        // left by an older build carries no bank and ends at once.
+        val bank = prefs.getString(KEY_BANKING_AUTO_PACKAGE, null) ?: ""
+        val now = android.os.SystemClock.elapsedRealtime()
+        val stop = pauseStop(foreground, activity, bank, tripTargets())
+        if (stop == PauseStop.NONE || bankSeenAt == 0L) bankSeenAt = now
+        val ends = bank.isEmpty() || stop == PauseStop.NOW ||
+            (stop == PauseStop.AFTER_GRACE && now - bankSeenAt >= AWAY_GRACE_MS)
+        if (!restoreRequested && ends) {
+            Log.i(TAG, "Banking pause for $bank over at $foreground, requesting restore")
+            requestRestore()
+            // Settings stays unguarded until the service reconnects.
+            if (isTamperSurface(foreground)) sendHome()
             return true
         }
 
@@ -123,20 +133,43 @@ class BankingAppGuard(private val context: Context) {
         return true
     }
 
-    private fun foregroundPackage(): String? {
+    private fun requestRestore() {
+        restoreRequested = true
+        context.sendBroadcast(Intent(ACTION_BANKING_RESTORE).setPackage(context.packageName))
+    }
+
+    /** Package and activity class of the last resumed activity. */
+    private fun foregroundActivity(): Pair<String, String?>? {
         val usage = context.getSystemService(Context.USAGE_STATS_SERVICE)
             as? UsageStatsManager ?: return null
         val end = System.currentTimeMillis()
         val events = usage.queryEvents(end - EVENT_LOOKBACK_MS, end)
         val event = UsageEvents.Event()
-        var last: String? = null
+        var last: Pair<String, String?>? = null
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
             if (event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
-                last = event.packageName
+                last = event.packageName to event.className
             }
         }
         return last
+    }
+
+    /** Apps a sign-in sends the user to and back from: launcher, SMS, authenticators. */
+    private fun tripTargets(): Set<String> {
+        val home = try {
+            context.packageManager.resolveActivity(
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0
+            )?.activityInfo?.packageName
+        } catch (_: Exception) {
+            null
+        }
+        val sms = try {
+            android.provider.Telephony.Sms.getDefaultSmsPackage(context)
+        } catch (_: Exception) {
+            null
+        }
+        return AUTHENTICATORS + listOfNotNull(home, sms)
     }
 
     private fun sendHome() {
@@ -160,6 +193,39 @@ class BankingAppGuard(private val context: Context) {
         // Written by BankingModeManager in the accessibility module.
         private const val BANKING_PREFS = "freedom_settings"
         private const val KEY_BANKING_UNTIL = "banking_until"
+        private const val KEY_BANKING_AUTO_PACKAGE = "banking_auto_package"
+
+        // Screens a bank's sign-in can open without leaving the bank app.
+        private val SIGN_IN_HELPERS = setOf(
+            "com.google.android.gms",
+            "com.google.android.permissioncontroller",
+            "com.android.permissioncontroller",
+        )
+
+        private val AUTHENTICATORS = setOf(
+            "com.google.android.apps.authenticator2",
+            "com.azure.authenticator",
+            "com.authy.authy",
+        )
+
+        const val AWAY_GRACE_MS = 2 * 60_000L
+
+        enum class PauseStop { NONE, AFTER_GRACE, NOW }
+
+        /**
+         * How the banking pause reacts to [foreground]: the bank, its sign-in
+         * screens and the device-credential prompt (served from Settings) keep
+         * it; [tripTargets] end it only after AWAY_GRACE_MS; anything else ends
+         * it now.
+         */
+        fun pauseStop(foreground: String, activity: String?, bank: String, tripTargets: Set<String>): PauseStop =
+            when {
+                foreground == bank || foreground in SIGN_IN_HELPERS -> PauseStop.NONE
+                activity?.contains("ConfirmDeviceCredential") == true ||
+                    activity?.contains("ConfirmLock") == true -> PauseStop.NONE
+                foreground in tripTargets -> PauseStop.AFTER_GRACE
+                else -> PauseStop.NOW
+            }
 
         // Written by ContentMatcher.persistApps, so the list outlives the
         // accessibility service that normally owns it.
@@ -199,10 +265,9 @@ class BankingAppGuard(private val context: Context) {
          * shows up as com.google.android.settings.intelligence).
          *
          * ponytail: whole-package granularity, because UsageStatsManager only
-         * reports the foreground package, not the screen inside it. Blocking
-         * all of Settings for the 2-minute window is coarse but the user needs
-         * their banking app, not Settings. Narrowing it needs the accessibility
-         * service, which is exactly what is switched off here.
+         * reports the foreground package, not the screen inside it, so any of
+         * them ends the banking pause and hands Settings back to the
+         * accessibility service's own protection.
          */
         private val TAMPER_SURFACES = listOf(
             "com.android.settings",

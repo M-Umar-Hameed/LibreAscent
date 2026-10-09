@@ -97,38 +97,4 @@ class ScanSlotTest {
         assertEquals(100, wait)
         assertEquals(0, limit.acquire("com.reddit.frontpage", 400 + wait))
     }
-
-    @Test
-    fun keywordOrderStartsAtTheResumeIndexAndWraps() {
-        val keywords = listOf("a", "b", "c", "d")
-
-        assertEquals(listOf("a", "b", "c", "d"), KeywordRotation.order(keywords, 0))
-        assertEquals(listOf("c", "d", "a", "b"), KeywordRotation.order(keywords, 2))
-        // The list can shrink between scans; a stale index still wraps.
-        assertEquals(listOf("b", "c", "d", "a"), KeywordRotation.order(keywords, 5))
-        assertEquals(emptyList(), KeywordRotation.order(emptyList<String>(), 3))
-    }
-
-    @Test
-    fun scansThatRunOutOfBudgetTogetherCoverEveryKeyword() {
-        val keywords = listOf("a", "b", "c", "d", "e")
-        val searched = mutableListOf<String>()
-        var resumeAt = 0
-        // Each scan only gets through two keywords before its budget runs out.
-        repeat(3) {
-            val order = KeywordRotation.order(keywords, resumeAt)
-            searched.addAll(order.take(2))
-            resumeAt = KeywordRotation.resumeAt(resumeAt, 2, keywords.size)
-        }
-
-        assertEquals(listOf("a", "b", "c", "d", "e", "a"), searched)
-        assertEquals(1, resumeAt)
-    }
-
-    @Test
-    fun resumeIndexWrapsAndToleratesAnEmptyList() {
-        assertEquals(3, KeywordRotation.resumeAt(1, 2, 5))
-        assertEquals(1, KeywordRotation.resumeAt(4, 2, 5))
-        assertEquals(0, KeywordRotation.resumeAt(4, 2, 0))
-    }
 }

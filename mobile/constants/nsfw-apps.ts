@@ -28,4 +28,12 @@ export const NSFW_APPS: NsfwAppConfig[] = [
     name: "Facebook",
     packageName: "com.facebook.katana",
   },
+  {
+    name: "Threads",
+    packageName: "com.instagram.barcelona",
+  },
+  {
+    name: "Telegram",
+    packageName: "org.telegram.messenger",
+  },
 ];

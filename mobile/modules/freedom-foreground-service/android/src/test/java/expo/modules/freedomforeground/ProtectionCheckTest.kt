@@ -9,13 +9,12 @@ class ProtectionCheckTest {
 
     private fun decide(
         wanted: Boolean = true,
-        paused: Boolean = false,
         up: Boolean = true,
         alwaysOn: String? = null,
         a11y: Boolean = true,
         banking: Boolean = false,
         slotLost: Boolean = false
-    ) = ProtectionCheck.decide(wanted, paused, up, alwaysOn, slotLost, "com.me", a11y, banking)
+    ) = ProtectionCheck.decide(wanted, up, alwaysOn, slotLost, "com.me", a11y, banking)
 
     @Test
     fun healthyHasNoProblems() {
@@ -24,9 +23,8 @@ class ProtectionCheckTest {
     }
 
     @Test
-    fun tunnelDownOnlyCountsWhenWantedAndNotPaused() {
+    fun tunnelDownOnlyCountsWhenWanted() {
         assertEquals(listOf("vpn_down"), decide(up = false))
-        assertEquals(emptyList(), decide(up = false, paused = true))
         assertEquals(emptyList(), decide(up = false, wanted = false))
     }
 

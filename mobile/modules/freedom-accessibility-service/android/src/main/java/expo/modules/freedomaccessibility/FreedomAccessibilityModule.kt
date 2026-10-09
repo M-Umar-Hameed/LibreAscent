@@ -487,66 +487,6 @@ class FreedomAccessibilityModule : Module() {
             promise.resolve(context != null && BankingModeManager.hasWriteSecureSettings(context))
         }
 
-        AsyncFunction("getBankingState") { promise: Promise ->
-            val context = appContext.reactContext
-            if (context == null) {
-                promise.resolve(mapOf(
-                    "active" to false,
-                    "remainingMs" to 0.0,
-                    "cooldownRemainingMs" to 0.0,
-                    "attemptsRemaining" to BankingModeManager.ATTEMPT_LIMIT
-                ))
-                return@AsyncFunction
-            }
-            BankingModeManager.enforceExpiry(context)
-            promise.resolve(
-                mapOf(
-                    "active" to BankingModeManager.isActive(context),
-                    "remainingMs" to BankingModeManager.remainingMs(context).toDouble(),
-                    "cooldownRemainingMs" to BankingModeManager.cooldownRemainingMs(context).toDouble(),
-                    "attemptsRemaining" to BankingModeManager.attemptsRemaining(context)
-                )
-            )
-        }
-
-        AsyncFunction("startBankingMode") { promise: Promise ->
-            val context = appContext.reactContext
-                ?: run {
-                    promise.reject("ERR_NO_CONTEXT", "No context", null)
-                    return@AsyncFunction
-                }
-            if (!BankingModeManager.hasWriteSecureSettings(context)) {
-                promise.reject(
-                    "ERR_NO_WRITE_SECURE_SETTINGS",
-                    "WRITE_SECURE_SETTINGS not granted",
-                    null
-                )
-                return@AsyncFunction
-            }
-            try {
-                BankingModeManager.start(context)
-                promise.resolve(null)
-            } catch (e: IllegalStateException) {
-                promise.reject("ERR_BANKING_COOLDOWN", e.message, e)
-            } catch (e: Exception) {
-                promise.reject("ERR_BANKING_START", e.message, e)
-            }
-        }
-
-        AsyncFunction("endBankingMode") { promise: Promise ->
-            val context = appContext.reactContext
-                ?: run {
-                    promise.reject("ERR_NO_CONTEXT", "No context", null)
-                    return@AsyncFunction
-                }
-            try {
-                BankingModeManager.restore(context)
-                promise.resolve(null)
-            } catch (e: Exception) {
-                promise.reject("ERR_BANKING_END", e.message, e)
-            }
-        }
-
         AsyncFunction("enforceBankingExpiry") { promise: Promise ->
             val context = appContext.reactContext
             try {

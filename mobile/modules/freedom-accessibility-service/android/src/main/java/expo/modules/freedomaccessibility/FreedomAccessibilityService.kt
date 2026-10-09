@@ -78,8 +78,10 @@ class FreedomAccessibilityService : AccessibilityService() {
     // Main thread only: a trailing-scan token per package, so a browser's NSFW
     // scans and an app's never cancel each other's trailing scan.
     private val nsfwTrailingTokens = HashMap<String, Any>()
-    // Scan thread only: where the next NSFW scan resumes after one ran out of budget.
-    private var nsfwResumeAt = 0
+    // Main thread only: the same pair for reels content changes, which arrive
+    // about ten a second while a feed scrolls.
+    private val reelsRateLimit = PerKeyRateLimit(REELS_SCAN_MIN_INTERVAL_MS)
+    private val reelsTrailingTokens = HashMap<String, Any>()
     private var packageAddedReceiver: PackageAddedReceiver? = null
     @Volatile private var lastUrlCheckTime: Long = 0
     @Volatile private var consecutiveBlockCount = 0
@@ -91,6 +93,10 @@ class FreedomAccessibilityService : AccessibilityService() {
     // read the URL bar still get context. Read and written on the scan thread
     // only; a foreground change clears it through a post to that thread.
     private var whitelistMemory: PageWhitelist.Memory? = null
+    // Scan thread only: whether a browser's current page gets the NSFW labels.
+    private val browserLabelScan = HashMap<String, Boolean>()
+    // Scan thread only: whether a browser's current page is on a manga site.
+    private val browserMangaPage = HashMap<String, Boolean>()
     // True while the expensive event/flag set is subscribed. Guards setServiceInfo
     // so it runs on scope transitions only, never per event.
     private var deepInspectionEnabled = false
@@ -154,16 +160,59 @@ class FreedomAccessibilityService : AccessibilityService() {
         // scrolling and each scan is one node search per keyword; a missed
         // frame is fine because scrolling keeps producing events.
         private const val NSFW_SCAN_MIN_INTERVAL_MS = 500L
+        private const val REELS_SCAN_MIN_INTERVAL_MS = 250L
 
         // Built-in keywords for NSFW app scanning (Reddit, Twitter labels)
         private val NSFW_BUILTIN_KEYWORDS = listOf(
             "NSFW",
             "18+",
+            "\uD83D\uDD1E",
             "Sensitive content",
             "Content warning",
             "Adult content",
             "Mature content"
         )
+        private const val MAX_SCAN_NODES = 1500
+        private const val ORDINARY_PAGE_KEYWORDS = 2
+        internal val UNINSPECTED_PACKAGES = setOf("com.whatsapp", "com.whatsapp.w4b")
+
+        internal fun builtinNsfwLabel(text: String): String? =
+            NSFW_BUILTIN_KEYWORDS.firstOrNull { text.contains(it, ignoreCase = true) }
+
+        // An explicit site missing from every list still gates its door; an
+        // article about the subject does not. Alcohol, vaping, gambling and game
+        // sites gate theirs too, so a gate counts only beside explicit terms.
+        private val AGE_GATE_LABELS = listOf(
+            "I am 18 or older",
+            "I'm 18 or older",
+            "I am over 18",
+            "I'm over 18",
+            "18+ only",
+            "website contains adult content",
+            "site contains adult content",
+            "contains sexually explicit material"
+        )
+
+        private val EXPLICIT_TERMS = setOf(
+            "porn", "xxx", "sex", "nude", "naked", "hentai", "nsfw", "milf",
+            "fetish", "erotic", "onlyfans", "camgirl", "horny", "slut", "pussy", "cock",
+            "boobs", "tits", "anal", "blowjob", "cumshot", "creampie", "gangbang"
+        )
+        // Matched as a word start; every other term only as a word or its
+        // plural, so "cocktails" and "analysis" stay clear.
+        private val EXPLICIT_PREFIX_TERMS = setOf("porn", "hentai", "erotic", "fetish")
+        private const val EXPLICIT_TERMS_FOR_GATE = 2
+        private val NON_ALPHANUMERIC = Regex("[^a-z0-9]+")
+
+        internal fun ageGateLabel(text: String): String? {
+            val gate = AGE_GATE_LABELS.firstOrNull { text.contains(it, ignoreCase = true) } ?: return null
+            val tokens = text.lowercase().split(NON_ALPHANUMERIC)
+            val terms = EXPLICIT_TERMS.count { term ->
+                if (term in EXPLICIT_PREFIX_TERMS) tokens.any { it.startsWith(term) }
+                else tokens.any { it == term || it == term + "s" }
+            }
+            return gate.takeIf { terms >= EXPLICIT_TERMS_FOR_GATE }
+        }
 
         @Volatile
         var isRunning: Boolean = false
@@ -224,6 +273,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         browserMonitor.loadPersistedConfigs(this)
         reelsDetector.loadPersistedConfigs(this)
         contentMatcher.loadPersistedData(this)
+        scanHandler.post { expo.modules.freedomvpn.BankingApps.installed(applicationContext) }
 
         sharedBrowserMonitor = browserMonitor
         sharedReelsDetector = reelsDetector
@@ -418,8 +468,8 @@ class FreedomAccessibilityService : AccessibilityService() {
             Log.d(TAG, "WINDOW STATE CHANGED | Pkg: $packageName | Class: $classNameStr")
         }
 
-        val isBlockedApp = contentMatcher.getAppConfig(packageName) != null
-        val isSettingsApp = isSettingsPackage(packageName)
+        val isBlockedApp = contentMatcher.getAppConfig(packageName) != null || ExplicitApps.matches(packageName)
+        val isSettingsApp = settingsProtector.isHardcoreEnabled() && isSettingsPackage(packageName)
 
         // Track current foreground app
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
@@ -431,6 +481,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 !TransientWindows.isTransient(packageName, imePackages)) {
                 foregroundAppPackage = packageName
                 nsfwTrailingTokens.values.forEach(handler::removeCallbacksAndMessages)
+                reelsTrailingTokens.values.forEach(handler::removeCallbacksAndMessages)
                 // Queued behind any scan of the previous app, ahead of the new app's.
                 scanHandler.post { whitelistMemory = null }
             }
@@ -464,6 +515,21 @@ class FreedomAccessibilityService : AccessibilityService() {
         foregroundAppPackage = TransientWindows.seed(
             foregroundAppPackage, packageName, applicationContext.packageName, imePackages)
 
+        // Banking apps and WhatsApp are only tracked as the foreground app,
+        // never inspected, unless the user blocked them.
+        if (!isBlockedApp && packageName in UNINSPECTED_PACKAGES) return
+        val banks = expo.modules.freedomvpn.BankingApps.cached()
+        if (!isBlockedApp &&
+            banks?.contains(packageName) ?: expo.modules.freedomvpn.BankingApps.isKnown(packageName)) {
+            // Banks refuse to sign in while any accessibility service is on.
+            // A toast is not the bank coming to the front.
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                event.className?.contains("Toast") != true) {
+                BankingModeManager.startAuto(this, packageName)
+            }
+            return
+        }
+
         val isNsfwMonitored = contentMatcher.isNsfwMonitoredApp(packageName)
         val shouldHandleAsBrowser =
             browserMonitor.isBrowser(packageName) || isDetachedWebview
@@ -492,6 +558,15 @@ class FreedomAccessibilityService : AccessibilityService() {
             // Route to appropriate handler
             val appConfig = contentMatcher.getAppConfig(packageName)
             when {
+                ExplicitApps.matches(packageName) -> {
+                    // Also on content changes: a single-activity reader turning
+                    // pages after a reconnect emits nothing else.
+                    if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                        foregroundAppPackage == packageName) {
+                        showInstantOverlay(packageName, "Explicit app blocked")
+                        performGlobalAction(GLOBAL_ACTION_HOME)
+                    }
+                }
                 appConfig != null -> {
                     // Block only on actual foreground launch (window-state change).
                     // System popups that render under a blocked app's package —
@@ -513,8 +588,16 @@ class FreedomAccessibilityService : AccessibilityService() {
                     val scan = BrowserScan(AccessibilityEvent.obtain(event), packageName, scopeUpgradedThisEvent)
                     postScan(browserSlot, scan, ::runBrowserScan) { it.event.recycle() }
                 }
+                // Nothing to learn while our block overlay covers the app.
+                isInstantOverlayShowing && reelsOverlayPackage == packageName -> {}
                 reelsDetector.isReelsApp(packageName) -> {
-                    postScan(reelsSlot, packageName, ::handleReelsEvent)
+                    if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                        reelsRateLimit.acquire(packageName, android.os.SystemClock.uptimeMillis())
+                        postScan(reelsSlot, packageName, ::handleReelsEvent)
+                    } else {
+                        requestReelsScan(packageName)
+                    }
+                    if (isNsfwMonitored) requestNsfwScan(packageName)
                 }
                 isNsfwMonitored -> {
                     requestNsfwScan(packageName)
@@ -588,15 +671,28 @@ class FreedomAccessibilityService : AccessibilityService() {
      * rejected event gets one trailing scan when the interval ends, so the
      * screen a scroll burst stops on is still checked.
      */
-    private fun requestNsfwScan(packageName: String) {
-        val wait = nsfwRateLimit.acquire(packageName, android.os.SystemClock.uptimeMillis())
+    private fun requestNsfwScan(packageName: String) =
+        requestRateLimitedScan(nsfwRateLimit, nsfwTrailingTokens, nsfwSlot, packageName, ::handleNsfwScan)
+
+    private fun requestReelsScan(packageName: String) =
+        requestRateLimitedScan(reelsRateLimit, reelsTrailingTokens, reelsSlot, packageName, ::handleReelsEvent)
+
+    /** Scans now if [limit] allows, else once when it next does, so a burst's last screen is scanned. */
+    private fun requestRateLimitedScan(
+        limit: PerKeyRateLimit,
+        tokens: HashMap<String, Any>,
+        slot: ScanSlot<String>,
+        packageName: String,
+        scan: (String) -> Unit
+    ) {
+        val wait = limit.acquire(packageName, android.os.SystemClock.uptimeMillis())
         if (wait == 0L) {
-            postScan(nsfwSlot, packageName, ::handleNsfwScan)
+            postScan(slot, packageName, scan)
             return
         }
-        val token = nsfwTrailingTokens.getOrPut(packageName) { Any() }
+        val token = tokens.getOrPut(packageName) { Any() }
         handler.removeCallbacksAndMessages(token)
-        handler.postAtTime({ requestNsfwScan(packageName) }, token,
+        handler.postAtTime({ requestRateLimitedScan(limit, tokens, slot, packageName, scan) }, token,
             android.os.SystemClock.uptimeMillis() + wait)
     }
 
@@ -711,11 +807,17 @@ class FreedomAccessibilityService : AccessibilityService() {
                 lastUrlCheckTime = now
                 Log.d(TAG, "URL allowed: $allowedCandidate (from ${candidates.size} candidates)")
             }
-            // The web side of an NSFW-monitored app gets the same page scan,
-            // keyed by the browser package so it and the app never share a slot.
-            if (NsfwWeb.shouldScan(urlBar, pageWhitelisted, contentMatcher::isNsfwMonitoredApp)) {
-                handler.post { requestNsfwScan(packageName) }
+            // Every page gets the keyword scan: an explicit site missing from
+            // the lists names itself in its text. The NSFW labels apply only on
+            // the sites of NSFW-monitored apps, decided by the last URL bar read,
+            // since browsers hide it while scrolling. Keyed by the browser
+            // package so it and the app never share a slot.
+            if (urlBar != null) {
+                browserLabelScan[packageName] =
+                    NsfwWeb.shouldScan(urlBar, pageWhitelisted, contentMatcher::isNsfwMonitoredApp)
+                browserMangaPage[packageName] = MangaPages.isMangaSite(urlBar)
             }
+            if (!pageWhitelisted) handler.post { requestNsfwScan(packageName) }
             return
         }
 
@@ -926,45 +1028,100 @@ class FreedomAccessibilityService : AccessibilityService() {
         packageName: String,
         now: Long
     ) {
-        // Combine built-in NSFW labels with user keywords
-        val allKeywords = NSFW_BUILTIN_KEYWORDS + contentMatcher.getKeywords()
-        val deadline = android.os.SystemClock.uptimeMillis() + APP_SCAN_BUDGET_MS
-
-        // ponytail: one IPC per keyword; a single tree walk would mean
-        // reimplementing Android's own text-match semantics
-        for ((i, keyword) in KeywordRotation.order(allKeywords, nsfwResumeAt).withIndex()) {
-            if (android.os.SystemClock.uptimeMillis() > deadline) {
-                nsfwResumeAt = KeywordRotation.resumeAt(nsfwResumeAt, i, allKeywords.size)
-                return
-            }
-            try {
-                val matches = rootNode.findAccessibilityNodeInfosByText(keyword)
-                if (matches.isNullOrEmpty()) continue
-
-                var found = false
-                for (match in matches) {
-                    if (!found && match.isVisibleToUser) {
-                        found = true
-                    }
-                    match.recycle()
-                }
-
-                if (found) {
-                    Log.i(TAG, "NSFW keyword '$keyword' found in $packageName")
-                    nsfwResumeAt = 0
-                    // On main against foregroundAppPackage, as for reels. A match
-                    // dropped as stale must not start the cooldown.
-                    handler.post {
-                        if (foregroundAppPackage != packageName) return@post
-                        lastNsfwBlockTime = now
-                        reelsOverlayPackage = packageName
-                        showInstantOverlay(packageName, "Explicit content blocked", requireForeground = true)
-                    }
-                    return
-                }
-            } catch (_: Exception) {}
+        // One walk over visible text: Compose screens (X) expose no text to
+        // findAccessibilityNodeInfosByText, so a per-keyword search misses them.
+        val text = visibleText(
+            rootNode,
+            android.os.SystemClock.uptimeMillis() + APP_SCAN_BUDGET_MS,
+            ContentSettingGuard.RULES[packageName]
+        )
+        if (text.isBlank()) return
+        val browser = browserMonitor.isBrowser(packageName)
+        val labels = !browser || browserLabelScan[packageName] == true
+        val manga = browser && browserMangaPage[packageName] == true
+        // An ordinary or manga page needs two unrelated keywords: an article
+        // or a safe title that names the subject once is not explicit content.
+        val keyword = (if (labels) builtinNsfwLabel(text) else null)
+            ?: (if (manga) MangaPages.adultGenre(text) else null)
+            ?: ageGateLabel(text)
+            ?: (if (browser && !labels) contentMatcher.findDistinctKeywords(text, ORDINARY_PAGE_KEYWORDS)
+                else contentMatcher.findMatchingKeywordDirectly(text))
+            ?: return
+        Log.i(TAG, "NSFW keyword '$keyword' found in $packageName")
+        // On main against foregroundAppPackage, as for reels. A match
+        // dropped as stale must not start the cooldown.
+        handler.post {
+            if (foregroundAppPackage != packageName) return@post
+            lastNsfwBlockTime = now
+            reelsOverlayPackage = packageName
+            showInstantOverlay(packageName, "Explicit content blocked", requireForeground = true)
         }
-        nsfwResumeAt = 0
+    }
+
+    private fun holdSetting(label: android.view.accessibility.AccessibilityNodeInfo, rule: ContentSettingGuard.Rule) {
+        // A Compose row merges its label into the checkable row itself; only a
+        // label that is not checkable looks to its own row, never past a list.
+        if (label.isCheckable) {
+            if (label.isChecked != rule.safeChecked) {
+                Log.i(TAG, "Content setting '${rule.labelPrefix}' reset")
+                label.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+            }
+            return
+        }
+        val row = label.parent ?: return
+        if (row.isScrollable) {
+            row.recycle()
+            return
+        }
+        val toggle = findCheckable(row)
+        if (toggle != null && toggle.isChecked != rule.safeChecked) {
+            Log.i(TAG, "Content setting '${rule.labelPrefix}' reset")
+            toggle.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)
+        }
+        if (toggle !== row) toggle?.recycle()
+        row.recycle()
+    }
+
+    /** [row] itself when checkable (Compose rows), else its first checkable descendant (a CheckBox or Switch). */
+    private fun findCheckable(row: android.view.accessibility.AccessibilityNodeInfo): android.view.accessibility.AccessibilityNodeInfo? {
+        if (row.isCheckable) return row
+        for (i in 0 until row.childCount) {
+            val child = row.getChild(i) ?: continue
+            val hit = findCheckable(child)
+            if (hit !== child) child.recycle()
+            if (hit != null) return hit
+        }
+        return null
+    }
+
+    /**
+     * Text and descriptions of on-screen nodes, stopping at [deadline] or
+     * [MAX_SCAN_NODES]. An app's own content settings name 18+ content, so a
+     * setting in [settings] is flipped back to its safe state and left out of
+     * the text, keeping its page open.
+     */
+    private fun visibleText(
+        root: android.view.accessibility.AccessibilityNodeInfo,
+        deadline: Long,
+        settings: List<ContentSettingGuard.Rule>?
+    ): String {
+        val sb = StringBuilder()
+        var visited = 0
+        fun walk(node: android.view.accessibility.AccessibilityNodeInfo) {
+            if (++visited > MAX_SCAN_NODES || android.os.SystemClock.uptimeMillis() > deadline) return
+            if (!node.isVisibleToUser) return
+            val label = node.text?.toString()
+            val rule = if (settings != null && label != null) ContentSettingGuard.ruleFor(settings, label) else null
+            if (rule != null) holdSetting(node, rule) else label?.let { sb.append(it).append('\n') }
+            node.contentDescription?.let { sb.append(it).append('\n') }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                walk(child)
+                child.recycle()
+            }
+        }
+        try { walk(root) } catch (_: Exception) {}
+        return sb.toString()
     }
 
     /**
@@ -1479,6 +1636,10 @@ class FreedomAccessibilityService : AccessibilityService() {
         foregroundAppPackage = TransientWindows.seed(
             foregroundAppPackage, pkg, applicationContext.packageName, imePackages)
         if (pkg.isNullOrEmpty() || pkg == applicationContext.packageName) return
+        if (ExplicitApps.matches(pkg)) {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            return
+        }
         val config = contentMatcher.getAppConfig(pkg) ?: return
         if (config.surveillanceType == "none") {
             Log.w(TAG, "Insta-stop on resume: $pkg blocked, GLOBAL_ACTION_HOME")
@@ -1558,22 +1719,6 @@ internal class PerKeyRateLimit(private val intervalMs: Long) {
 }
 
 /**
- * Keyword order for a scan that may run out of budget part way: each scan
- * starts where the previous one stopped and wraps, so every keyword is reached
- * within a few scans however long the list is.
- */
-internal object KeywordRotation {
-    fun <T> order(keywords: List<T>, start: Int): List<T> {
-        if (keywords.isEmpty()) return keywords
-        val s = start.mod(keywords.size)
-        return keywords.drop(s) + keywords.take(s)
-    }
-
-    /** Start index for the next scan after one starting at [start] searched [searched] keywords. */
-    fun resumeAt(start: Int, searched: Int, size: Int): Int = if (size == 0) 0 else (start + searched).mod(size)
-}
-
-/**
  * Which whitelisted site a browser page belongs to, decided by the URL bar alone.
  * Page text names other sites, so it never sets or clears this. Browsers hide
  * their toolbar while scrolling, so an event with no readable URL bar keeps the
@@ -1610,6 +1755,70 @@ internal object PageWhitelist {
     }
 }
 
+/**
+ * Apps blocked outright: explicit names, and the Tachiyomi family of readers,
+ * whose sideloaded extensions serve porn sources with no launcher of their own.
+ */
+internal object ExplicitApps {
+    private val NAME_TOKENS = listOf("porn", "hentai", "nsfw", "xxx", "xvideos", "xnxx", "onlyfans")
+    private val READER_PREFIXES = listOf(
+        "eu.kanade.tachiyomi", "app.mihon", "org.koitharu.kotatsu", "xyz.jmir.tachiyomi", "app.komikku"
+    )
+
+    fun matches(packageName: String): Boolean {
+        val p = packageName.lowercase()
+        return NAME_TOKENS.any { it in p } || READER_PREFIXES.any { p == it || p.startsWith("$it.") }
+    }
+}
+
+/** In-app content settings held in their safe state while the settings screen is open. */
+internal object ContentSettingGuard {
+    data class Rule(val labelPrefix: String, val safeChecked: Boolean)
+
+    val RULES = mapOf(
+        "com.reddit.frontpage" to listOf(
+            Rule("Show mature content", false),
+            Rule("Blur mature", true)
+        ),
+        "com.twitter.android" to listOf(
+            Rule("Display media that may contain sensitive content", false),
+            Rule("Hide sensitive content", true)
+        ),
+        "org.telegram.messenger" to listOf(Rule("Show 18+ Content", false))
+    )
+
+    fun ruleFor(rules: List<Rule>, label: String): Rule? = rules.firstOrNull { label.startsWith(it.labelPrefix) }
+}
+
+/**
+ * Manga and manhwa sites carry safe and 18+ titles side by side, so a page is
+ * judged by the genre tags it shows rather than by the site.
+ *
+ * ponytail: a chapter page that shows no genres passes; the title page that
+ * lists them is where the block lands.
+ */
+internal object MangaPages {
+    private val HOST_HINTS = listOf("manga", "manhwa", "manhua", "webtoon", "toon", "comic")
+    private val ADULT_GENRES = setOf("adult", "smut", "hentai", "erotica", "pornographic", "18+")
+    private val SEPARATORS = Regex("[,|/:\u00b7\u2022]|\\s[-\u2013]\\s")
+
+    fun isMangaSite(urlBar: String): Boolean {
+        val host = urlBar.trim().lowercase().substringAfter("://").substringBefore('/').substringBefore('?')
+        return HOST_HINTS.any { host.contains(it) }
+    }
+
+    /** A genre tag standing on its own in a tag list, never a word inside a sentence. */
+    fun adultGenre(text: String): String? {
+        for (line in text.lineSequence()) {
+            for (segment in line.split(SEPARATORS)) {
+                val tag = segment.trim().lowercase()
+                if (tag in ADULT_GENRES) return tag
+            }
+        }
+        return null
+    }
+}
+
 /** Sites of the NSFW-monitored apps, matched on the URL-bar host and its subdomains. */
 internal object NsfwWeb {
     private val SITES = mapOf(
@@ -1617,7 +1826,9 @@ internal object NsfwWeb {
         "com.twitter.android" to listOf("x.com", "twitter.com"),
         "com.zhiliaoapp.musically" to listOf("tiktok.com"),
         "com.ss.android.ugc.trill" to listOf("tiktok.com"),
-        "com.facebook.katana" to listOf("facebook.com")
+        "com.facebook.katana" to listOf("facebook.com"),
+        "com.instagram.barcelona" to listOf("threads.net", "threads.com"),
+        "org.telegram.messenger" to listOf("t.me", "telegram.me", "web.telegram.org")
     )
 
     /** Packages whose site [urlBar] is on. */

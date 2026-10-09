@@ -234,6 +234,16 @@ class FreedomVpnModule : Module() {
             }
         }
 
+        AsyncFunction("setKeywords") { keywords: List<String>, promise: Promise ->
+            try {
+                FreedomVpnService.blocklist.setKeywords(keywords)
+                appContext.reactContext?.let { BlocklistPersistence.saveKeywords(it, keywords) }
+                promise.resolve(null)
+            } catch (e: Exception) {
+                promise.reject("ERR_VPN_KEYWORDS", e.message, e)
+            }
+        }
+
         // Takes effect on the next pinned lookup; clients keep a pinned answer
         // until its TTL runs out.
         AsyncFunction("setSafeSearch") { enabled: Boolean, promise: Promise ->

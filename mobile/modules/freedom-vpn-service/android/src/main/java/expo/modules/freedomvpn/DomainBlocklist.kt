@@ -13,6 +13,29 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class DomainBlocklist {
     companion object {
+        private val DOMAIN_TOKEN_SEPARATORS = charArrayOf('.', '-')
+
+        // Keywords common inside ordinary names ("design", "dickssportinggoods"),
+        // matched only as a whole label part, as the accessibility matcher does.
+        private val WHOLE_PART_KEYWORDS = setOf("desi", "dick")
+
+        internal fun normalizeKeywords(values: Collection<String>): List<String> =
+            values.map { it.trim().lowercase().replace(" ", "") }.filter { it.isNotEmpty() }.distinct()
+
+        /**
+         * Whether a label of [domain] holds a keyword. As with URLs in the
+         * accessibility matcher, a keyword of three characters or fewer must be
+         * a whole label part, so "sex" leaves essex.ac.uk alone.
+         */
+        internal fun keywordInDomain(domain: String, keywords: List<String>): Boolean {
+            if (keywords.isEmpty()) return false
+            val tokens = domain.split(*DOMAIN_TOKEN_SEPARATORS)
+            return keywords.any { keyword ->
+                if (keyword.length <= 3 || keyword in WHOLE_PART_KEYWORDS) tokens.any { it == keyword }
+                else tokens.any { it.contains(keyword) }
+            }
+        }
+
         /**
          * Hostnames browsers use to reach a DoH resolver. The tunnel only routes
          * the plaintext resolver IPs, so a browser that upgrades to DoH escapes it
@@ -66,6 +89,11 @@ class DomainBlocklist {
     @Volatile
     private var whitelist: Set<String> = emptySet()
 
+    // The user's keywords: an explicit site missing from every list still has
+    // one in its name more often than not.
+    @Volatile
+    private var keywords: List<String> = emptyList()
+
     /**
      * Check if a domain should be blocked.
      *
@@ -98,6 +126,8 @@ class DomainBlocklist {
         if (matchesList(candidates, whitelist)) return false
 
         if (matchesList(candidates, blockedDomains)) return true
+
+        if (keywordInDomain(normalized, keywords)) return true
 
         for ((name, categorySet) in categories) {
             if (name !in disabledCategories && matchesList(candidates, categorySet)) return true
@@ -225,6 +255,16 @@ class DomainBlocklist {
         categories.remove(name)
     }
 
+    fun setKeywords(values: Collection<String>) {
+        keywords = normalizeKeywords(values)
+    }
+
+    fun setKeywordsIfAbsent(values: Collection<String>): Boolean {
+        if (keywords.isNotEmpty()) return false
+        keywords = normalizeKeywords(values)
+        return true
+    }
+
     /**
      * Set the whitelist (excluded domains).
      */
@@ -276,6 +316,7 @@ class DomainBlocklist {
         blockedDomains = emptySet()
         categories.clear()
         whitelist = emptySet()
+        keywords = emptyList()
     }
 
     /**

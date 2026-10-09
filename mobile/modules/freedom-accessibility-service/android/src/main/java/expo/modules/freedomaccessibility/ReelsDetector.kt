@@ -161,6 +161,17 @@ class ReelsDetector {
         // friend's story offers "Reply to <name>...".
         if (packageName == SNAPCHAT && isSnapchatDiscoverViewer(rootNode)) return true
 
+        // X's ids are Compose test tags without the package prefix, which a view-id
+        // search does not find. Its single-video viewer (MediaGallery) stays open.
+        if (packageName == X) return hasVisibleTag(rootNode, detectionNodes, deadline)
+
+        // Reddit's full-screen player is a vertical pager: the video opened stays
+        // allowed, swiping on to another post counts as reels.
+        if (packageName == REDDIT) {
+            val (pagerOpen, post) = redditPlayerPost(rootNode, deadline) ?: return null
+            return redditSwipedOn(pagerOpen, post)
+        }
+
         for (nodeId in detectionNodes) {
             if (overDeadline(deadline)) return null
             val fullResourceId = "$packageName:id/$nodeId"
@@ -252,6 +263,52 @@ class ReelsDetector {
     }
 
     @Volatile
+    private var redditFirstPost: String? = null
+
+    /**
+     * Whether Reddit's player is open and the post it shows, from its creator
+     * and title labels. @return null when the deadline passed first.
+     */
+    private fun redditPlayerPost(root: AccessibilityNodeInfo, deadline: Long): Pair<Boolean, String?>? {
+        var visited = 0
+        var pagerOpen = false
+        val post = StringBuilder()
+        fun walk(node: AccessibilityNodeInfo): Boolean {
+            if (overDeadline(deadline)) return false
+            if (++visited > MAX_TAG_SCAN_NODES || !node.isVisibleToUser) return true
+            if (node.viewIdResourceName?.substringAfterLast('/') == "fbp_vertical_pager") pagerOpen = true
+            val desc = node.contentDescription?.toString()
+            if (desc != null && (desc.startsWith("Post title, ") || desc.endsWith(", post creator"))) {
+                post.append(desc).append(' ')
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                val more = walk(child)
+                child.recycle()
+                if (!more) return false
+            }
+            return true
+        }
+        try { walk(root) } catch (_: Exception) {}
+        if (overDeadline(deadline)) return null
+        return pagerOpen to post.toString().ifEmpty { null }
+    }
+
+    internal fun redditSwipedOn(pagerOpen: Boolean, post: String?): Boolean {
+        if (!pagerOpen) {
+            redditFirstPost = null
+            return false
+        }
+        val first = redditFirstPost
+        if (post == null) return false
+        if (first == null) {
+            redditFirstPost = post
+            return false
+        }
+        return post != first
+    }
+
+    @Volatile
     private var snapchatPublicViewerSince = 0L
 
     /**
@@ -302,10 +359,29 @@ class ReelsDetector {
      * @return true if the package was last seen in reels.
      */
     fun resetState(packageName: String): Boolean {
+        if (packageName == REDDIT) redditFirstPost = null
         return lastDetectionState.remove(packageName) == true
     }
 
     private fun overDeadline(deadline: Long) = android.os.SystemClock.uptimeMillis() > deadline
+
+    /** @return null when the deadline passed before a visible node with one of [tags] was found. */
+    private fun hasVisibleTag(root: AccessibilityNodeInfo, tags: List<String>, deadline: Long): Boolean? {
+        var visited = 0
+        fun walk(node: AccessibilityNodeInfo): Boolean? {
+            if (overDeadline(deadline)) return null
+            if (++visited > MAX_TAG_SCAN_NODES || !node.isVisibleToUser) return false
+            if (node.viewIdResourceName?.substringAfterLast('/') in tags) return true
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                val found = walk(child)
+                child.recycle()
+                if (found != false) return found
+            }
+            return false
+        }
+        return try { walk(root) } catch (_: Exception) { false }
+    }
 
     data class DetectionResult(
         val appName: String,
@@ -319,6 +395,9 @@ class ReelsDetector {
         private const val KEY_REELS_CONFIGS = "reels_configs"
         private const val YOUTUBE = "com.google.android.youtube"
         private const val SNAPCHAT = "com.snapchat.android"
+        private const val X = "com.twitter.android"
+        private const val REDDIT = "com.reddit.frontpage"
+        private const val MAX_TAG_SCAN_NODES = 400
         private const val SNAPCHAT_SETTLE_MS = 800L
 
         /**
@@ -360,14 +439,20 @@ class ReelsDetector {
             val u = url.trim().lowercase().substringAfter("://").substringBefore(' ')
             val hostEnd = u.indexOfAny(charArrayOf('/', '?', '#')).let { if (it < 0) u.length else it }
             val host = u.substring(0, hostEnd)
-            val firstSegment = u.substring(hostEnd).substringBefore('?').substringBefore('#')
-                .removePrefix("/").substringBefore('/')
+            val segments = u.substring(hostEnd).substringBefore('?').substringBefore('#')
+                .removePrefix("/").split('/')
+            val firstSegment = segments[0]
             fun on(domain: String) = host == domain || host.endsWith(".$domain")
             return when {
                 on("youtube.com") && firstSegment == "shorts" -> listOf(YOUTUBE)
-                on("instagram.com") && (firstSegment == "reel" || firstSegment == "reels") ->
+                // A reel opened from a profile lives at /<user>/reel/<id>.
+                on("instagram.com") && segments.take(2).any { it == "reel" || it == "reels" } ->
                     listOf("com.instagram.android")
-                on("facebook.com") && firstSegment == "reel" -> listOf("com.facebook.katana")
+                on("facebook.com") && (firstSegment == "reel" || firstSegment == "reels") ->
+                    listOf("com.facebook.katana")
+                host == "story.snapchat.com" ||
+                    (on("snapchat.com") && (firstSegment == "spotlight" || firstSegment == "discover")) ->
+                    listOf(SNAPCHAT)
                 on("tiktok.com") -> listOf("com.zhiliaoapp.musically", "com.ss.android.ugc.trill")
                 else -> emptyList()
             }
@@ -435,14 +520,11 @@ class ReelsDetector {
         // Fallback keywords for reels detection
         private val REELS_KEYWORDS = listOf(
             "Shorts",
-            "Reels",
             "Reel",
             "Spotlight",
             "Short video",
             "Video home",
-            "Watch",
-            "Watch feed",
-            "Videos on Watch"
+            "Watch"
         )
     }
 }

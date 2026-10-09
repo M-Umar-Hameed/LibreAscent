@@ -395,6 +395,11 @@ export const BlocklistService = {
         e,
       );
     }
+    try {
+      await FreedomVpn.setKeywords(state.keywords);
+    } catch (e) {
+      console.warn("[BlocklistService] Failed to sync keywords to VPN:", e);
+    }
   },
 
   syncAppsToNative: async (): Promise<void> => {

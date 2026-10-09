@@ -1036,15 +1036,18 @@ class FreedomAccessibilityService : AccessibilityService() {
             ContentSettingGuard.RULES[packageName]
         )
         if (text.isBlank()) return
-        val browser = browserMonitor.isBrowser(packageName)
-        val labels = !browser || browserLabelScan[packageName] == true
-        val manga = browser && browserMangaPage[packageName] == true
+        // NSFW labels count only in the monitored social apps and on their
+        // sites. Any other page, an app's own web view included (Drive shows
+        // documents in one), is ordinary: "18+" in a document is not a tag.
+        val monitoredApp = contentMatcher.isNsfwMonitoredApp(packageName)
+        val labels = monitoredApp || browserLabelScan[packageName] == true
+        val manga = !monitoredApp && browserMangaPage[packageName] == true
         // An ordinary or manga page needs two unrelated keywords: an article
         // or a safe title that names the subject once is not explicit content.
         val keyword = (if (labels) builtinNsfwLabel(text) else null)
             ?: (if (manga) MangaPages.adultGenre(text) else null)
             ?: ageGateLabel(text)
-            ?: (if (browser && !labels) contentMatcher.findDistinctKeywords(text, ORDINARY_PAGE_KEYWORDS)
+            ?: (if (!labels) contentMatcher.findDistinctKeywords(text, ORDINARY_PAGE_KEYWORDS)
                 else contentMatcher.findMatchingKeywordDirectly(text))
             ?: return
         Log.i(TAG, "NSFW keyword '$keyword' found in $packageName")
@@ -1112,7 +1115,11 @@ class FreedomAccessibilityService : AccessibilityService() {
             if (!node.isVisibleToUser) return
             val label = node.text?.toString()
             val rule = if (settings != null && label != null) ContentSettingGuard.ruleFor(settings, label) else null
-            if (rule != null) holdSetting(node, rule) else label?.let { sb.append(it).append('\n') }
+            if (rule != null) {
+                holdSetting(node, rule)
+            } else if (label != null && label !in ContentSettingGuard.SAFE_LABELS) {
+                sb.append(label).append('\n')
+            }
             node.contentDescription?.let { sb.append(it).append('\n') }
             for (i in 0 until node.childCount) {
                 val child = node.getChild(i) ?: continue
@@ -1788,6 +1795,10 @@ internal object ContentSettingGuard {
     )
 
     fun ruleFor(rules: List<Rule>, label: String): Rule? = rules.firstOrNull { label.startsWith(it.labelPrefix) }
+
+    // Labels that name NSFW only to say it is hidden, such as the chip on a
+    // Reddit profile; matched whole, so a post tagged NSFW still counts.
+    val SAFE_LABELS = setOf("Hiding NSFW")
 }
 
 /**

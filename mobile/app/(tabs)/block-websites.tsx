@@ -56,7 +56,13 @@ export default function BlockWebsitesScreen(): ReactNode {
   const [activeTab, setActiveTab] = useState<Tab>("keywords");
   const [newValue, setNewValue] = useState("");
   const [pendingAction, setPendingAction] = useState<{
-    type: "add" | "remove" | "remove_multiple" | "remove_all" | "toggle";
+    type:
+      | "add"
+      | "remove"
+      | "remove_multiple"
+      | "remove_all"
+      | "toggle"
+      | "nsfw_off";
     value?: string;
     tab: Tab;
   } | null>(null);
@@ -719,7 +725,17 @@ export default function BlockWebsitesScreen(): ReactNode {
                     void Haptics.impactAsync(
                       Haptics.ImpactFeedbackStyle.Medium,
                     );
-                    toggleNsfwApp(app.packageName);
+                    // Switching a scan off weakens protection, so it goes
+                    // through the same lock as removing a keyword.
+                    if (enabled && !isEffectiveFlexible) {
+                      setPendingAction({
+                        type: "nsfw_off",
+                        value: app.packageName,
+                        tab: activeTab,
+                      });
+                    } else {
+                      toggleNsfwApp(app.packageName);
+                    }
                   }}
                   className="flex-row items-center p-4 rounded-xl mb-2"
                   style={{
@@ -1136,11 +1152,13 @@ export default function BlockWebsitesScreen(): ReactNode {
                 ? `Delete ${selectedKeywords.size} Keywords`
                 : pendingAction?.type === "toggle"
                   ? "Toggle Website"
-                  : pendingAction?.tab === "blocked"
-                    ? "Unblock Website"
-                    : pendingAction?.tab === "whitelisted"
-                      ? "Un-whitelist Website"
-                      : "Remove Keyword"
+                  : pendingAction?.type === "nsfw_off"
+                    ? "Stop Scanning App"
+                    : pendingAction?.tab === "blocked"
+                      ? "Unblock Website"
+                      : pendingAction?.tab === "whitelisted"
+                        ? "Un-whitelist Website"
+                        : "Remove Keyword"
         }
         surveillanceOverride={effectiveSurveillance}
         onSuccess={() => {
@@ -1153,7 +1171,10 @@ export default function BlockWebsitesScreen(): ReactNode {
             performRemove(pendingAction.value);
           else if (pendingAction?.type === "toggle" && pendingAction.value)
             performToggle(pendingAction.value);
-          else if (pendingAction?.type === "remove_multiple")
+          else if (pendingAction?.type === "nsfw_off" && pendingAction.value) {
+            toggleNsfwApp(pendingAction.value);
+            setPendingAction(null);
+          } else if (pendingAction?.type === "remove_multiple")
             performRemoveMultiple(false);
           else if (pendingAction?.type === "remove_all")
             performRemoveMultiple(true);

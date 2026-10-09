@@ -506,7 +506,9 @@ fn run_service_command(handle: &tauri::AppHandle, verb: &str) -> Result<(), Stri
     }
 }
 
-#[tauri::command]
+// Off the window thread: these probe DNS and spawn netsh/PowerShell, and the
+// window cannot repaint while one runs, so it went black on every poll.
+#[tauri::command(async)]
 fn get_status() -> DesktopStatus {
     let (installed, running) = service_state();
     let dns_proxy_running = is_local_dns_proxy_running();
@@ -522,38 +524,38 @@ fn get_status() -> DesktopStatus {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_config() -> Result<DesktopConfig, String> {
     load_or_create(&default_config_path()).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn update_config(mut config: DesktopConfig) -> Result<(), String> {
     config.clamp_friction();
     save(&default_config_path(), &config).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn install_service(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "install")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn uninstall_service(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "uninstall")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_service(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "start")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_service(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "stop")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn enable_dns_protection(handle: tauri::AppHandle) -> Result<(), String> {
     let (_, running) = service_state();
     if let Some(message) = dns_protection_preflight_error(running, is_local_dns_proxy_running()) {
@@ -563,7 +565,7 @@ fn enable_dns_protection(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "set-dns")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn reset_dns(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "reset-dns")
 }
@@ -571,19 +573,19 @@ fn reset_dns(handle: tauri::AppHandle) -> Result<(), String> {
 /// Restarts in place rather than reinstalling, because it runs without friction
 /// in every mode and uninstall resets DNS and firewall: a failed reinstall left
 /// protection off. The restart also loads the exe swapped in by get_service_path.
-#[tauri::command]
+#[tauri::command(async)]
 fn repair_service(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "restart")
 }
 
 /// The service fetches on start when the list is stale, and reloads the file
 /// while running, so this needs no restart.
-#[tauri::command]
+#[tauri::command(async)]
 fn update_blocklists(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "update-sources")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn test_domain(domain: String) -> bool {
     let blocklist = libreascent_shared::config::load_blocklist(&default_config_path());
     blocklist.is_blocked(&domain)

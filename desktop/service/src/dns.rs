@@ -329,6 +329,7 @@ pub async fn run_local_dns_proxy_with_ready(
     crate::dns_manager::log_tamper_event("DNS proxy started. Blocklist loaded.");
     tokio::spawn(watch_blocklist_file(config_path.clone(), Arc::clone(&blocklist)));
     tokio::spawn(serve_domain_checks(Arc::clone(&blocklist)));
+    tokio::spawn(crate::filter_proxy::serve(Arc::clone(&blocklist)));
 
     loop {
         let (size, peer) = match socket.recv_from(&mut buffer).await {

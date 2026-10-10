@@ -77,3 +77,6 @@ CLAUDE.md
 CONTRIBUTING.md
 
 /.superpowers
+
+# web-ext signing state
+desktop/extension/.amo-upload-uuid

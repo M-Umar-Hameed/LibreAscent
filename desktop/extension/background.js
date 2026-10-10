@@ -42,6 +42,8 @@ async function hostBlocked(host) {
 browser.webRequest.onBeforeRequest.addListener(
   async (details) => {
     if ((await configReady).inert) return {};
+    const safe = details.type === "main_frame" && LibreAscentMatcher.safeSearchUrl(details.url);
+    if (safe) return { redirectUrl: safe };
     const host = new URL(details.url).hostname;
     if (!(await hostBlocked(host))) return {};
     if (details.type === "main_frame") block(details.tabId, `Blocked site ${host}`, details.url);
@@ -64,3 +66,15 @@ browser.runtime.onMessage.addListener((msg, sender) => {
   if (msg.type === "config") return configReady;
   if (msg.type === "block" && sender.tab) block(sender.tab.id, msg.reason, msg.url);
 });
+
+// YouTube Restricted mode by header, the switch YouTube honours for networks.
+browser.webRequest.onBeforeSendHeaders.addListener(
+  async (details) => {
+    if ((await configReady).inert) return {};
+    const headers = details.requestHeaders.filter((h) => h.name.toLowerCase() !== "youtube-restrict");
+    headers.push({ name: "YouTube-Restrict", value: "Moderate" });
+    return { requestHeaders: headers };
+  },
+  { urls: ["*://*.youtube.com/*", "*://youtube.com/*", "*://*.youtube-nocookie.com/*", "*://youtubei.googleapis.com/*"] },
+  ["blocking", "requestHeaders"],
+);

@@ -140,7 +140,22 @@
     return hits.length >= (labelSite ? 1 : 2) ? `Keyword "${hits[0]}"` : null;
   }
 
-  const api = { REELS_REASON, isReelsUrl, findKeyword, adultGenre, blockReason };
+  // The search engines' own safe modes, as URL parameters. Returns the URL to
+  // redirect to, or null when it is already safe or not a search.
+  function safeSearchUrl(url) {
+    const u = parseWebUrl(url);
+    if (!u) return null;
+    const host = u.hostname.toLowerCase();
+    let param = null;
+    if (/(^|\.)google\.[a-z.]+$/.test(host) && /^\/(search|images)/.test(u.pathname)) param = ["safe", "active"];
+    else if (onDomain(host, "bing.com") && /^\/(search|images|videos)/.test(u.pathname)) param = ["adlt", "strict"];
+    else if (onDomain(host, "duckduckgo.com") && u.searchParams.has("q")) param = ["kp", "1"];
+    if (!param || u.searchParams.get(param[0]) === param[1]) return null;
+    u.searchParams.set(param[0], param[1]);
+    return u.toString();
+  }
+
+  const api = { REELS_REASON, isReelsUrl, findKeyword, adultGenre, blockReason, safeSearchUrl };
   globalThis.LibreAscentMatcher = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();

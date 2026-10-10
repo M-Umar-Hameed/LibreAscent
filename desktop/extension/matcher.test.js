@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert");
 require("./default-keywords.js");
-const { isReelsUrl, findKeyword, adultGenre, blockReason, REELS_REASON } = require("./matcher.js");
+const { isReelsUrl, findKeyword, adultGenre, blockReason, REELS_REASON, safeSearchUrl } = require("./matcher.js");
 
 const config = {
   keywords: globalThis.DEFAULT_ADULT_KEYWORDS.concat(["gambling", "hot singles"]),
@@ -166,4 +166,14 @@ test("age gate ignores cocktails, analysis and a lone plural", () => {
   const gate = "I am 18 or older";
   assert.equal(blockReason("https://shop.example/", `Cocktails and market analysis ${gate}`, { keywords: [], excludedDomains: [] }), null);
   assert.equal(blockReason("https://shop.example/", `Naked Grouse whisky ${gate}`, { keywords: [], excludedDomains: [] }), null);
+});
+
+test("search engines are forced into their safe modes", () => {
+  assert.match(safeSearchUrl("https://www.google.com/search?q=x"), /safe=active/);
+  assert.match(safeSearchUrl("https://www.google.co.uk/search?q=x&udm=2"), /safe=active/);
+  assert.equal(safeSearchUrl("https://www.google.com/search?q=x&safe=active"), null);
+  assert.match(safeSearchUrl("https://www.bing.com/images/search?q=x"), /adlt=strict/);
+  assert.match(safeSearchUrl("https://duckduckgo.com/?q=x"), /kp=1/);
+  assert.equal(safeSearchUrl("https://www.google.com/maps"), null);
+  assert.equal(safeSearchUrl("https://notgoogle.example/search?q=x"), null);
 });

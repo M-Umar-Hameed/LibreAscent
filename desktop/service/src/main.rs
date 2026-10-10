@@ -1,5 +1,6 @@
 mod config_loader;
 mod dns;
+mod filter_proxy;
 mod updater;
 mod service_manager;
 mod dns_manager;

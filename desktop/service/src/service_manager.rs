@@ -176,6 +176,9 @@ fn run_service_loop() -> anyhow::Result<()> {
             let mut firewall_failed_at: Option<Instant> = None;
             let mut last_dns_enforced: Option<bool> = None;
             let mut last_vpn_dns: Option<Vec<std::net::Ipv4Addr>> = None;
+            // ~150 reg.exe runs per write, so only on a config change or as a
+            // slow repair pass, not on every firewall refresh.
+            let mut last_policy: Option<(String, Instant)> = None;
 
             loop {
                 interval.tick().await;
@@ -255,12 +258,19 @@ fn run_service_loop() -> anyhow::Result<()> {
                                     "Failed to add name resolution policy: {e}"
                                 ));
                             }
-                            if let Err(e) =
-                                crate::browser_policy::enforce_browser_policy(&config)
-                            {
-                                crate::dns_manager::log_tamper_event(&format!(
-                                    "Failed to apply browser lockdown policy: {e}"
-                                ));
+                        }
+                        if dns_enforced {
+                            let snapshot = serde_json::to_string(&config).unwrap_or_default();
+                            let due = last_policy.as_ref().is_none_or(|(written, at)| {
+                                *written != snapshot || at.elapsed() >= Duration::from_secs(600)
+                            });
+                            if due {
+                                match crate::browser_policy::enforce_browser_policy(&config) {
+                                    Ok(()) => last_policy = Some((snapshot, Instant::now())),
+                                    Err(e) => crate::dns_manager::log_tamper_event(&format!(
+                                        "Failed to apply browser lockdown policy: {e}"
+                                    )),
+                                }
                             }
                         }
                         last_firewall_refresh = Instant::now();

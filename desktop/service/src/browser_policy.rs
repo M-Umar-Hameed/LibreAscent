@@ -70,9 +70,11 @@ const FIREFOX_FAMILY_POLICY_KEYS: [&str; 2] = [
 
 const BLOCK_MESSAGE: &str = "Extensions are blocked while LibreAscent protection is on.";
 
-/// The keyword and reels blocker from desktop/extension, packed by build.rs.
-/// Unsigned, so only LibreWolf (signature check turned off by policy) loads it.
+/// The keyword and reels blocker from desktop/extension, provided by build.rs.
+/// Signed by Mozilla (unlisted) when a signed copy exists for its version, so
+/// Firefox loads it too; LibreWolf has its signature check turned off by policy.
 const BLOCKER_ID: &str = "blocker@libreascent.app";
+const BLOCKER_XPI_SIGNED: &str = env!("BLOCKER_XPI_SIGNED");
 const BLOCKER_XPI: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libreascent-blocker.xpi"));
 const BLOCKER_XPI_VERSION: &str = env!("BLOCKER_XPI_VERSION");
 const BLOCKER_XPI_HASH: &str = env!("BLOCKER_XPI_HASH");
@@ -87,8 +89,12 @@ fn blocker_install_url() -> String {
     format!("file:///C:/ProgramData/LibreAscent/{}", blocker_xpi_name())
 }
 
-fn blocker_third_party_key() -> String {
-    format!(r"{LIBREWOLF_POLICY_KEY}\3rdparty\Extensions\{BLOCKER_ID}")
+fn blocker_third_party_key(browser_key: &str) -> String {
+    format!(r"{browser_key}\3rdparty\Extensions\{BLOCKER_ID}")
+}
+
+fn blocker_signed() -> bool {
+    BLOCKER_XPI_SIGNED == "1"
 }
 
 /// Chrome Web Store ids of VPN/proxy extensions found tunnelling past the DNS
@@ -120,9 +126,9 @@ pub fn doh_policy_values() -> Vec<PolicyValue> {
     values
 }
 
-/// Pins the proxy to direct. Chromium rejects a chrome.proxy override from an
-/// extension while a proxy policy is in force, which is what stops a VPN
-/// extension re-routing traffic around the local resolver.
+/// Pins Chromium's proxy to the service's filter proxy. Chromium rejects a
+/// chrome.proxy override from an extension while a proxy policy is in force,
+/// which is what stops a VPN extension re-routing traffic around the blocklist.
 ///
 /// Firefox gets the same lock, but it is not the seal there: a Firefox
 /// extension's proxy.onRequest still takes precedence over the locked
@@ -132,13 +138,15 @@ pub fn doh_policy_values() -> Vec<PolicyValue> {
 pub fn proxy_lock_values() -> Vec<PolicyValue> {
     let mut values = Vec::new();
 
+    // Chromium browses through the service's filter proxy: it has no blocker
+    // extension, and a VPN app takes the DNS blocklist away from it.
+    let filter_proxy = serde_json::json!({
+        "ProxyMode": "fixed_servers",
+        "ProxyServer": crate::filter_proxy::PROXY_ADDR,
+    })
+    .to_string();
     for key in CHROMIUM_POLICY_KEYS {
-        values.push(PolicyValue::new(
-            key,
-            "ProxySettings",
-            "REG_SZ",
-            r#"{"ProxyMode":"direct"}"#,
-        ));
+        values.push(PolicyValue::new(key, "ProxySettings", "REG_SZ", &filter_proxy));
     }
 
     for key in FIREFOX_FAMILY_POLICY_KEYS {
@@ -190,28 +198,34 @@ pub fn firefox_extension_lockdown_values(config: &DesktopConfig) -> Vec<PolicyVa
         "*": { "installation_mode": "blocked", "blocked_install_message": BLOCK_MESSAGE }
     });
 
-    let mut librewolf_settings = block_all.clone();
-    for id in &config.allowed_browser_extensions {
-        librewolf_settings[id.as_str()] = serde_json::json!({ "installation_mode": "allowed" });
-    }
-    librewolf_settings[BLOCKER_ID] = serde_json::json!({
+    let blocker = serde_json::json!({
         "installation_mode": "force_installed",
         "install_url": blocker_install_url(),
         "private_browsing": true,
     });
+    let mut firefox_settings = block_all.clone();
+    if blocker_signed() {
+        firefox_settings[BLOCKER_ID] = blocker.clone();
+    }
+    let mut librewolf_settings = block_all.clone();
+    for id in &config.allowed_browser_extensions {
+        librewolf_settings[id.as_str()] = serde_json::json!({ "installation_mode": "allowed" });
+    }
+    librewolf_settings[BLOCKER_ID] = blocker;
 
     let preferences = serde_json::json!({
         "xpinstall.signatures.required": { "Value": false, "Status": "locked", "Type": "boolean" }
     });
 
-    let third_party_key = blocker_third_party_key();
+    let keywords = serde_json::json!(config.keywords).to_string();
+    let excluded = serde_json::json!(config.excluded_domains).to_string();
 
-    vec![
+    let mut values = vec![
         PolicyValue::new(
             r"HKLM\SOFTWARE\Policies\Mozilla\Firefox",
             "ExtensionSettings",
             "REG_SZ",
-            &block_all.to_string(),
+            &firefox_settings.to_string(),
         ),
         // about:config can set network.proxy.* and network.trr.* by hand, which
         // reaches the same place a VPN add-on does without installing anything.
@@ -237,20 +251,52 @@ pub fn firefox_extension_lockdown_values(config: &DesktopConfig) -> Vec<PolicyVa
             "REG_MULTI_SZ",
             &preferences.to_string(),
         ),
-        // The blocker reads these through storage.managed.
-        PolicyValue::new(
-            &third_party_key,
-            "keywords",
-            "REG_MULTI_SZ",
-            &serde_json::json!(config.keywords).to_string(),
-        ),
-        PolicyValue::new(
-            &third_party_key,
-            "excludedDomains",
-            "REG_MULTI_SZ",
-            &serde_json::json!(config.excluded_domains).to_string(),
-        ),
-    ]
+    ];
+    // The blocker reads these through storage.managed.
+    for browser_key in FIREFOX_FAMILY_POLICY_KEYS {
+        let third_party_key = blocker_third_party_key(browser_key);
+        values.push(PolicyValue::new(&third_party_key, "keywords", "REG_MULTI_SZ", &keywords));
+        values.push(PolicyValue::new(&third_party_key, "excludedDomains", "REG_MULTI_SZ", &excluded));
+    }
+    values
+}
+
+/// Reels and shorts paths for Chromium browsers, which have no blocker
+/// extension. A URLBlocklist entry is a host plus path prefix, so "/reel" also
+/// covers "/reels".
+const CHROMIUM_REEL_URLS: [&str; 6] = [
+    "facebook.com/reel",
+    "instagram.com/reel",
+    "youtube.com/shorts",
+    "snapchat.com/spotlight",
+    "snapchat.com/discover",
+    "story.snapchat.com",
+];
+
+/// SafeSearch, YouTube Restricted mode and a URL blocklist of reels plus the
+/// user's blocked domains. Unlike DNS these hold while a VPN app owns DNS.
+pub fn chromium_safety_values(config: &DesktopConfig) -> Vec<PolicyValue> {
+    let mut values = Vec::new();
+    for key in CHROMIUM_POLICY_KEYS {
+        values.push(PolicyValue::new(key, "ForceGoogleSafeSearch", "REG_DWORD", "1"));
+        // 1 is Moderate, the level the phone pins through restrict.youtube.com.
+        values.push(PolicyValue::new(key, "ForceYouTubeRestrict", "REG_DWORD", "1"));
+        let list_key = format!(r"{key}\URLBlocklist");
+        let urls = CHROMIUM_REEL_URLS
+            .iter()
+            .map(|url| url.to_string())
+            .chain(config.included_domains.iter().cloned());
+        for (index, url) in urls.enumerate() {
+            values.push(PolicyValue::new(&list_key, &(index + 1).to_string(), "REG_SZ", &url));
+        }
+    }
+    values.push(PolicyValue::new(
+        r"HKLM\SOFTWARE\Policies\Microsoft\Edge",
+        "ForceBingSafeSearch",
+        "REG_DWORD",
+        "2",
+    ));
+    values
 }
 
 /// Every policy value this service enforces.
@@ -259,6 +305,7 @@ pub fn browser_policy_values(config: &DesktopConfig) -> Vec<PolicyValue> {
     values.extend(proxy_lock_values());
     values.extend(vpn_extension_blocklist_values());
     values.extend(firefox_extension_lockdown_values(config));
+    values.extend(chromium_safety_values(config));
     values
 }
 
@@ -346,6 +393,12 @@ pub fn reset_browser_policy() {
     for sub in [r"\DNSOverHTTPS", r"\Proxy", r"\3rdparty"] {
         let _ = reg_command(&["delete", &format!("{LIBREWOLF_POLICY_KEY}{sub}"), "/f"]).status();
     }
+    let _ = reg_command(&["delete", r"HKLM\SOFTWARE\Policies\Mozilla\Firefox\3rdparty", "/f"]).status();
+    // The URL list grows with the user's blocked domains, past what the default
+    // config names, so the whole key goes.
+    for key in CHROMIUM_POLICY_KEYS {
+        let _ = reg_command(&["delete", &format!(r"{key}\URLBlocklist"), "/f"]).status();
+    }
 
     let dir = Path::new(BLOCKER_XPI_DIR);
     let _ = std::fs::remove_file(dir.join(blocker_xpi_name()));
@@ -412,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn every_chromium_browser_gets_the_proxy_pinned_to_direct() {
+    fn every_chromium_browser_gets_the_proxy_pinned_to_the_filter_proxy() {
         // A browser VPN extension tunnels the request through chrome.proxy, so
         // the hostname resolves at the far end and neither the DNS proxy nor the
         // firewall ever sees it. Chromium refuses an extension's override while
@@ -423,7 +476,10 @@ mod tests {
                 .iter()
                 .find(|v| v.key.contains(vendor) && v.name == "ProxySettings")
                 .unwrap_or_else(|| panic!("missing proxy lock for {vendor}"));
-            assert_eq!(proxy.data, r#"{"ProxyMode":"direct"}"#);
+            assert_eq!(
+                proxy.data,
+                r#"{"ProxyMode":"fixed_servers","ProxyServer":"127.0.0.1:47714"}"#
+            );
         }
     }
 
@@ -485,6 +541,9 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&settings.data).expect("Firefox reads this as JSON; it must parse");
         assert_eq!(parsed["*"]["installation_mode"], "blocked");
+        if blocker_signed() {
+            assert_eq!(parsed[BLOCKER_ID]["installation_mode"], "force_installed");
+        }
         assert!(
             parsed["*"]["blocked_install_message"]
                 .as_str()
@@ -632,5 +691,25 @@ mod tests {
         let text = String::from_utf8_lossy(BLOCKER_XPI);
         assert!(text.contains("manifest.json"));
         assert!(!text.contains(".test.js"));
+    }
+
+    #[test]
+    fn chromium_browsers_get_safesearch_and_a_reels_and_domain_url_blocklist() {
+        let mut config = libreascent_shared::config::default_config();
+        config.included_domains = vec!["nelomanga.net".to_string()];
+        let values = chromium_safety_values(&config);
+        for key in CHROMIUM_POLICY_KEYS {
+            assert!(values.iter().any(|v| v.key == key && v.name == "ForceGoogleSafeSearch" && v.data == "1"));
+            assert!(values.iter().any(|v| v.key == key && v.name == "ForceYouTubeRestrict" && v.data == "1"));
+            let list: Vec<_> = values
+                .iter()
+                .filter(|v| v.key == format!(r"{key}\URLBlocklist"))
+                .map(|v| v.data.as_str())
+                .collect();
+            assert!(list.contains(&"facebook.com/reel"));
+            assert!(list.contains(&"youtube.com/shorts"));
+            assert!(list.contains(&"nelomanga.net"));
+        }
+        assert!(values.iter().any(|v| v.name == "ForceBingSafeSearch" && v.data == "2"));
     }
 }

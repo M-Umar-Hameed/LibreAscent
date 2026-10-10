@@ -613,6 +613,15 @@ fn get_last_block_event(state: tauri::State<'_, LastBlockEvent>) -> Option<Strin
 
 fn main() {
     tauri::Builder::default()
+        // Registered first, as the plugin requires: a second launch (Start menu
+        // while the tray copy runs) shows the running window and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .manage(LastBlockEvent(Mutex::new(None)))
         // Autostart runs the app with --minimized so it comes up hidden in the tray.
         .plugin(tauri_plugin_autostart::init(

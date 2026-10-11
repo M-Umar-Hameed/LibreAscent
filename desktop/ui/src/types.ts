@@ -51,6 +51,22 @@ export type DesktopStatus = {
   isAdmin: boolean;
 };
 
+/** Same start and end hour locks all day; end before start wraps past midnight. */
+export function windowCovers(w: Pick<FrictionWindow, "startHour" | "endHour">, hour: number) {
+  if (w.startHour === w.endHour) return true;
+  return w.startHour < w.endHour
+    ? hour >= w.startHour && hour < w.endHour
+    : hour >= w.startHour || hour < w.endHour;
+}
+
+/** True when `next` leaves any hour unlocked that `current` locked. */
+export function windowShrinks(current: FrictionWindow, next: FrictionWindow) {
+  for (let hour = 0; hour < 24; hour++) {
+    if (windowCovers(current, hour) && !windowCovers(next, hour)) return true;
+  }
+  return false;
+}
+
 export function activeFriction(
   config: DesktopConfig,
   hour: number,
@@ -71,13 +87,7 @@ export function activeFriction(
         source: "base",
       };
     case "timeBased": {
-      const w = config.frictionWindow;
-      const locked =
-        w.startHour === w.endHour
-          ? true
-          : w.startHour < w.endHour
-            ? hour >= w.startHour && hour < w.endHour
-            : hour >= w.startHour || hour < w.endHour;
+      const locked = windowCovers(config.frictionWindow, hour);
       return {
         countdownSeconds: 0,
         clickCount: 0,

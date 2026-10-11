@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { FrictionGuard } from "./FrictionGuard";
 import { Settings } from "./Settings";
 import type { DesktopConfig, DesktopStatus } from "./types";
-import { activeFriction } from "./types";
+import { activeFriction, windowShrinks } from "./types";
 import logo from "./assets/logo.png";
 
 type DomainResult = "idle" | "blocked" | "allowed" | "error";
@@ -38,6 +38,7 @@ export function App() {
     run: () => Promise<void>;
   } | null>(null);
   const [view, setView] = useState<"dashboard" | "settings">("dashboard");
+  const [recovery, setRecovery] = useState<{ ok: boolean; message: string } | null>(null);
 
   const refreshStatus = () => {
     invoke<DesktopStatus>("get_status")
@@ -100,6 +101,22 @@ export function App() {
       alert(`Action failed: ${e}`);
     } finally {
       setLoading(false);
+    }
+  }
+
+  // Never behind friction: it brings the connection back without lowering
+  // protection, and a locked-out user may have no other way online.
+  async function recoverInternet() {
+    setLoading(true);
+    setRecovery({ ok: true, message: "Recovering... this can take up to a minute." });
+    try {
+      const message = await invoke<string>("recover_internet");
+      setRecovery({ ok: true, message });
+    } catch (e) {
+      setRecovery({ ok: false, message: String(e) });
+    } finally {
+      setLoading(false);
+      refreshStatus();
     }
   }
 
@@ -264,9 +281,12 @@ export function App() {
   function changeFrictionWindow(next: DesktopConfig["frictionWindow"]) {
     if (!config) return;
     const cur = config.frictionWindow;
-    // Weakening = disabling an active window, or lowering its countdown/clicks.
+    // Weakening = disabling an active window, unlocking any hour it locked, or
+    // lowering its countdown/clicks. A 0:00-0:00 window locks all day, so any
+    // hour change shrinks it and was one ungated click from undoing the lock.
     const weaker =
       (cur.enabled && !next.enabled) ||
+      windowShrinks(cur, next) ||
       next.countdownSeconds < cur.countdownSeconds ||
       next.clickCount < cur.clickCount;
     if (weaker && config.controlMode !== "flexible") {
@@ -396,6 +416,19 @@ export function App() {
             ) : null}
 
             {lastBlock ? <p className="warning">Last block: {lastBlock}</p> : null}
+
+            {status?.serviceInstalled ? (
+              <div className="actions-row">
+                <button disabled={loading} onClick={recoverInternet}>
+                  Recover Internet
+                </button>
+              </div>
+            ) : null}
+            {recovery ? (
+              <p className={recovery.ok ? "path" : "warning"} role="status">
+                {recovery.message}
+              </p>
+            ) : null}
 
             <p className="path">
               {status?.configPath ?? "Config path unavailable"}

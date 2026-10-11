@@ -70,30 +70,73 @@ struct FirewallRuleSpec {
 /// `dns_enforced` must be true only when the local DNS proxy is up and the
 /// system resolver is pinned to it (non-Flexible mode). When false, the DNS
 /// bypass rules are removed so normal resolution keeps working through the
-/// machine's real resolver. `vpn_dns` are a connected VPN app's resolvers,
-/// left reachable on :53 because the VPN blocks every other DNS server.
+/// machine's real resolver. `open_dns` stay reachable on :53: a connected VPN
+/// app's resolvers, since the VPN blocks every other DNS server, and the
+/// network's own resolvers while the proxy falls back to them.
 pub fn ensure_firewall_protection(
     config: &DesktopConfig,
     runtime_app_paths: &[PathBuf],
     dns_enforced: bool,
-    vpn_dns: &[Ipv4Addr],
-) -> Result<()> {
+    open_dns: &[Ipv4Addr],
+) -> Result<Vec<String>> {
     let mut specs = configured_app_rules(config);
     specs.extend(runtime_app_paths.iter().map(|path| app_rule_for_path(path)));
 
     if dns_enforced {
-        specs.extend(dns_bypass_block_rules(vpn_dns));
+        specs.extend(dns_bypass_block_rules(open_dns));
     } else {
         for name in DNS_BYPASS_RULE_NAMES {
             delete_firewall_rule_by_name(name);
         }
     }
 
-    for spec in dedupe_rules(specs) {
-        replace_firewall_rule(&spec)?;
+    let specs = dedupe_rules(specs);
+    for spec in &specs {
+        replace_firewall_rule(spec)?;
     }
 
-    Ok(())
+    Ok(specs.into_iter().map(|spec| spec.name).collect())
+}
+
+/// Rules an older build wrote that this one never writes, so never replaces;
+/// one blocked chrome.exe outright. Run after a pass, so the rules this build
+/// wants are never down in between.
+pub fn remove_stale_rules(keep: &[String]) {
+    let mut command = Command::new("powershell");
+    command.args([
+        "-NoProfile",
+        "-Command",
+        &format!("Get-NetFirewallRule -DisplayName '{FIREWALL_NAME_PREFIX}*' -ErrorAction SilentlyContinue | ForEach-Object DisplayName"),
+    ]);
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let Ok(output) = command.output() else {
+        return;
+    };
+    for name in stale_rules(&String::from_utf8_lossy(&output.stdout), keep) {
+        crate::dns_manager::log_tamper_event(&format!("Removing stale firewall rule: {name}"));
+        delete_firewall_rule_by_name(&name);
+    }
+}
+
+fn stale_rules(existing: &str, keep: &[String]) -> Vec<String> {
+    let mut stale: Vec<String> = existing
+        .lines()
+        .map(str::trim)
+        .filter(|name| name.starts_with(FIREWALL_NAME_PREFIX))
+        .filter(|name| !keep.iter().any(|kept| kept == name))
+        // Only ever written when DNS is enforced; their removal follows dns_enforced.
+        .filter(|name| !DNS_BYPASS_RULE_NAMES.contains(name))
+        // Apps blocked at runtime by an earlier run are not in `keep` until
+        // they are seen running again; their rules must stay meanwhile.
+        .filter(|name| !name.starts_with(&format!("{FIREWALL_NAME_PREFIX}Block App ")))
+        .map(str::to_string)
+        .collect();
+    stale.sort();
+    stale.dedup();
+    stale
 }
 
 /// PowerShell used to remove every LibreAscent rule. Extracted so the string is
@@ -324,6 +367,31 @@ mod tests {
             assert!(scope.contains("1.1.1.1"), "{name} must still seal Cloudflare: {scope}");
             assert!(scope.contains("8.8.8.8"), "{name} must still seal Google: {scope}");
         }
+    }
+
+    #[test]
+    fn filtering_backup_upstreams_stay_reachable_over_encrypted_dns() {
+        let rules = dns_bypass_block_rules(&[]);
+        for name in ["LibreAscent Block DoT", "LibreAscent Block DoH"] {
+            let scope = remoteip_of(&rules, name).expect("rule is scoped");
+            for ip in crate::dns::BACKUP_UPSTREAM_IPS {
+                let sealed = scope
+                    .trim_start_matches("remoteip=")
+                    .split(',')
+                    .any(|entry| entry == ip.to_string());
+                assert!(!sealed, "{name} seals backup upstream {ip}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_rules_this_build_does_not_write_are_stale() {
+        let keep = vec!["LibreAscent Block App C__x_exe".to_string()];
+        let existing = "LibreAscent Block App C__x_exe\r\nLibreAscent Block App C__runtime_exe\r\nLibreAscent Block Browser During VPN C__Program_Files_Google_Chrome_Application_chrome_exe\r\nLibreAscent Block DoH\r\nSome Other Vendor Rule\r\n";
+        assert_eq!(
+            stale_rules(existing, &keep),
+            vec!["LibreAscent Block Browser During VPN C__Program_Files_Google_Chrome_Application_chrome_exe".to_string()]
+        );
     }
 
     #[test]

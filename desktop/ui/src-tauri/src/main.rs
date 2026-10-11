@@ -425,6 +425,32 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_exe_out_of_the_service_command_line() {
+        let exe = PathBuf::from(r"C:\Program Files\LibreAscent\libreascent-service.exe");
+        assert_eq!(
+            exe_from_image_path(r#""C:\Program Files\LibreAscent\libreascent-service.exe" service-run"#),
+            exe
+        );
+        assert_eq!(
+            exe_from_image_path(r"C:\Tools\libreascent-service.EXE service-run"),
+            PathBuf::from(r"C:\Tools\libreascent-service.EXE")
+        );
+    }
+
+    #[test]
+    fn recovery_message_never_claims_blocking_when_the_filter_did_not_return() {
+        assert!(recovery_message(Ok(()), true, true).unwrap().contains("Blocking is still on"));
+        assert!(recovery_message(Ok(()), true, false).unwrap().contains("DNS blocking is off"));
+        // Declining UAC on a connection that already works is not an outage.
+        assert!(recovery_message(Err("x".into()), true, true).unwrap().contains("Blocking is still on"));
+        assert!(recovery_message(Ok(()), false, true).is_err());
+        assert_eq!(
+            recovery_message(Err("UAC was declined".into()), false, false),
+            Err("Recovery failed: UAC was declined".to_string())
+        );
+    }
+
+    #[test]
     fn block_events_do_not_auto_show_overlay() {
         assert!(!should_show_overlay_for_block_event("block:app"));
         assert!(!should_show_overlay_for_block_event(
@@ -465,8 +491,39 @@ fn service_state() -> (bool, bool) {
     (installed, running)
 }
 
+/// The exe the SCM actually runs. The bundled copy goes to the admin-only
+/// C:\ProgramData\LibreAscent, which this unelevated app cannot write, so that
+/// copy can be missing while the installed service runs fine.
+fn registered_service_exe() -> Option<PathBuf> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+    let service = manager
+        .open_service("LibreAscentService", ServiceAccess::QUERY_CONFIG)
+        .ok()?;
+    let config = service.query_config().ok()?;
+    Some(exe_from_image_path(&config.executable_path.to_string_lossy()))
+}
+
+/// The SCM hands back the whole command line: `"C:\...\x.exe" service-run`.
+fn exe_from_image_path(image_path: &str) -> PathBuf {
+    let image_path = image_path.trim();
+    if let Some(quoted) = image_path.strip_prefix('"') {
+        return PathBuf::from(quoted.split('"').next().unwrap_or(quoted));
+    }
+    let end = image_path
+        .to_ascii_lowercase()
+        .find(".exe")
+        .map_or(image_path.len(), |at| at + 4);
+    PathBuf::from(&image_path[..end])
+}
+
 fn run_service_command(handle: &tauri::AppHandle, verb: &str) -> Result<(), String> {
-    let service_path = get_service_path(handle);
+    // Called first for its side effect: it swaps the bundled build into the
+    // ProgramData copy when it can. The registered exe is what actually runs,
+    // so verbs go to it; only install, with nothing registered yet, uses the copy.
+    let bundled = get_service_path(handle);
+    let service_path = registered_service_exe()
+        .filter(|path| path.exists())
+        .unwrap_or(bundled);
     if !service_path.exists() {
         return Err(format!(
             "Service binary not found at {}",
@@ -576,6 +633,70 @@ fn reset_dns(handle: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command(async)]
 fn repair_service(handle: tauri::AppHandle) -> Result<(), String> {
     run_service_command(&handle, "restart")
+}
+
+/// Ungated in every mode: it re-enables adapters, renews leases and restarts
+/// the service, none of which lowers protection. The check after it goes
+/// through system DNS, which is the proxy, so it tests the path browsing uses.
+#[tauri::command(async)]
+fn recover_internet(handle: tauri::AppHandle) -> Result<String, String> {
+    let recovered = run_service_command(&handle, "recover");
+    let online = (0..3).any(|attempt| {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        internet_reachable()
+    });
+    // Freshly restarted with an empty cache, the probe's first lookup can take
+    // longer than its 750ms, so one miss is not proof the filter is down.
+    let filtering = (0..3).any(|_| is_local_dns_proxy_running());
+    recovery_message(recovered, online, filtering)
+}
+
+fn recovery_message(
+    recovered: Result<(), String>,
+    online: bool,
+    filtering: bool,
+) -> Result<String, String> {
+    match (recovered, online) {
+        (_, true) if filtering => Ok("Internet is back. Blocking is still on.".to_string()),
+        (_, true) => Ok(
+            "Internet is back, but the DNS filter is not running, so DNS blocking is off. Run Repair Service or restart the PC to turn it back on."
+                .to_string(),
+        ),
+        (Ok(()), false) => Err(
+            "Recovery finished, but this PC still can't reach the internet. Check the cable or Wi-Fi, or restart the router, then try again."
+                .to_string(),
+        ),
+        (Err(error), false) => Err(format!("Recovery failed: {error}")),
+    }
+}
+
+fn internet_reachable() -> bool {
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+
+    let Some(addr) = ("www.msftconnecttest.com", 80)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+    else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(5)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    if stream
+        .write_all(b"GET /connecttest.txt HTTP/1.0\r\nHost: www.msftconnecttest.com\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut body = String::new();
+    let _ = stream.read_to_string(&mut body);
+    body.contains("Microsoft Connect Test")
 }
 
 /// The service fetches on start when the list is stale, and reloads the file
@@ -733,6 +854,7 @@ fn main() {
             enable_dns_protection,
             reset_dns,
             repair_service,
+            recover_internet,
             get_config,
             update_config,
             show_overlay,

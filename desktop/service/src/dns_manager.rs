@@ -115,6 +115,80 @@ fn parse_vpn_dns(output: &str) -> Vec<std::net::Ipv4Addr> {
     servers
 }
 
+/// The resolvers DHCP handed each connected adapter (the router, as a rule).
+/// The adapters themselves are pinned to 127.0.0.1, so these are read from the
+/// lease in the registry; the gateway stands in when the lease names none.
+pub fn router_dns_servers() -> Vec<std::net::Ipv4Addr> {
+    let script = r#"Get-NetAdapter | Where-Object Status -eq 'Up' | ForEach-Object { $p = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($_.InterfaceGuid)" -ErrorAction SilentlyContinue; $dns = if ($p.DhcpNameServer) { $p.DhcpNameServer } else { $p.DhcpDefaultGateway -join ' ' }; "$($_.Name)|$dns" }"#;
+    match powershell(script).output() {
+        Ok(output) => parse_router_dns(&String::from_utf8_lossy(&output.stdout)),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn parse_router_dns(output: &str) -> Vec<std::net::Ipv4Addr> {
+    let mut servers = Vec::new();
+    for line in output.lines() {
+        let Some((name, dns)) = line.trim().split_once('|') else {
+            continue;
+        };
+        // VPN adapters are handled by the VPN handover.
+        if !is_managed_dns_interface(name) {
+            continue;
+        }
+        for token in dns.split(|c: char| c.is_whitespace() || c == ',') {
+            if let Ok(ip) = token.parse::<std::net::Ipv4Addr>() {
+                if !ip.is_loopback() && !ip.is_unspecified() && !servers.contains(&ip) {
+                    servers.push(ip);
+                }
+            }
+        }
+    }
+    servers
+}
+
+/// The network side of Recover Internet. A Network Reset, or a user chasing
+/// an outage, can leave the wired or Wi-Fi adapter disabled, and after a router
+/// restart the lease can be refused until the adapter asks again.
+pub fn recover_network() {
+    log_tamper_event("Recover Internet: re-enabling adapters, renewing leases, flushing DNS.");
+    let _ = powershell(
+        "Get-NetAdapter -Physical | Where-Object AdminStatus -eq 'Down' | Enable-NetAdapter -Confirm:$false",
+    )
+    .status();
+    // An adapter just enabled needs a moment before it can ask for a lease.
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    // Physical adapters only: renewing a VPN's virtual adapter can drop its
+    // tunnel. An adapter with no DHCP server answering holds a renew for about
+    // a minute.
+    run_with_timeout(
+        &mut powershell(
+            "Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | ForEach-Object { ipconfig /renew $_.Name }",
+        ),
+        std::time::Duration::from_secs(45),
+    );
+    run_with_timeout(Command::new("ipconfig").arg("/flushdns"), std::time::Duration::from_secs(15));
+}
+
+fn run_with_timeout(command: &mut Command, limit: std::time::Duration) {
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let Ok(mut child) = command.spawn() else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let _ = child.kill();
+}
+
 pub fn remove_nrpt() {
     if !nrpt_present() {
         return;
@@ -359,5 +433,16 @@ Idx     Met         MTU          State                Name
     fn vpn_resolvers_come_only_from_vpn_adapters() {
         let output = "\nConfiguration for interface \"ProtonVPN\"\n    Statically Configured DNS Servers:    10.2.0.1\n    Register with which suffix:           Primary only\n\nConfiguration for interface \"Ethernet\"\n    Statically Configured DNS Servers:    127.0.0.1\n    Register with which suffix:           Primary only\n\nConfiguration for interface \"Loopback Pseudo-Interface 1\"\n    Statically Configured DNS Servers:    None\n";
         assert_eq!(super::parse_vpn_dns(output), vec![std::net::Ipv4Addr::new(10, 2, 0, 1)]);
+    }
+
+    #[test]
+    fn router_resolvers_come_from_connected_non_vpn_leases() {
+        let output = "Ethernet 2|10.123.21.96\r\nWi-Fi|192.168.1.1 8.8.8.8\r\nProtonVPN|10.2.0.1\r\nEthernet|\r\nvEthernet (WSL)|172.20.0.1\r\nEthernet 3|10.123.21.96, 127.0.0.1\r\n";
+        assert_eq!(
+            super::parse_router_dns(output),
+            [[10, 123, 21, 96], [192, 168, 1, 1], [8, 8, 8, 8], [172, 20, 0, 1]]
+                .map(std::net::Ipv4Addr::from)
+                .to_vec()
+        );
     }
 }

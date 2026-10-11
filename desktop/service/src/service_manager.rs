@@ -6,7 +6,8 @@ use tokio::sync::oneshot;
 use windows_service::{
     define_windows_service,
     service::{
-        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
+        ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
+        ServiceErrorControl, ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod,
         ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
     },
     service_control_handler::{self, ServiceControlHandlerResult},
@@ -44,14 +45,18 @@ fn run_service_loop() -> anyhow::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let control_tx = tx.clone();
 
+    // try_send, not blocking_send: the SCM calls this on the dispatcher thread,
+    // which sits inside main's tokio runtime, and blocking there panics across
+    // the FFI boundary and aborts the process with no cleanup. A full channel
+    // already holds an event that ends the loop, so dropping this one is fine.
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop => {
-                let _ = control_tx.blocking_send(ServiceEvent::StopRequested);
+                let _ = control_tx.try_send(ServiceEvent::StopRequested);
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Shutdown => {
-                let _ = control_tx.blocking_send(ServiceEvent::ShutdownRequested);
+                let _ = control_tx.try_send(ServiceEvent::ShutdownRequested);
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -60,6 +65,12 @@ fn run_service_loop() -> anyhow::Result<()> {
     };
 
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
+
+    // Installs from older builds have no failure actions, so set them on every
+    // start rather than only at install.
+    if let Err(e) = ensure_restart_on_crash() {
+        crate::dns_manager::log_tamper_event(&format!("Could not set restart-on-crash: {e}"));
+    }
 
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
@@ -72,7 +83,7 @@ fn run_service_loop() -> anyhow::Result<()> {
     })?;
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
+    let proxy_died = rt.block_on(async {
         let config_path = libreascent_shared::config::default_config_path();
         let (ready_tx, ready_rx) = oneshot::channel();
         let dns_exit_tx = tx.clone();
@@ -145,6 +156,16 @@ fn run_service_loop() -> anyhow::Result<()> {
                                 );
                                 released = false;
                             }
+                            // While the network's own DNS stands in, the proxy
+                            // stops trying the filtered tiers, so check them here.
+                            // Spawned: a dead tier costs its timeout, and the pin
+                            // below must keep its 2s cadence.
+                            if crate::dns::router_fallback_active()
+                                && last_probe.elapsed() >= Duration::from_secs(30)
+                            {
+                                last_probe = Instant::now();
+                                tokio::spawn(crate::dns::upstream_probe());
+                            }
                             if let Err(e) = crate::dns_manager::enforce_system_dns("127.0.0.1") {
                                 crate::dns_manager::log_tamper_event(&format!(
                                     "DNS enforcement failed: {e}"
@@ -176,6 +197,10 @@ fn run_service_loop() -> anyhow::Result<()> {
             let mut firewall_failed_at: Option<Instant> = None;
             let mut last_dns_enforced: Option<bool> = None;
             let mut last_vpn_dns: Option<Vec<std::net::Ipv4Addr>> = None;
+            let mut last_open_dns: Option<Vec<std::net::Ipv4Addr>> = None;
+            let mut stale_rules_removed = false;
+            // One PowerShell run per lookup, so cached while the fallback is wanted.
+            let mut router_dns: Option<(Vec<std::net::Ipv4Addr>, Instant)> = None;
             // ~150 reg.exe runs per write, so only on a config change or as a
             // slow repair pass, not on every firewall refresh.
             let mut last_policy: Option<(String, Instant)> = None;
@@ -215,10 +240,33 @@ fn run_service_loop() -> anyhow::Result<()> {
                     };
                     let vpn_changed = last_vpn_dns.as_ref() != Some(&vpn_dns);
 
+                    // Last resort once every filtered upstream is down: the
+                    // network's own resolver, cut out of the :53 seal only for as
+                    // long as the proxy needs it. The blocklist still runs first.
+                    let router = if dns_enforced && crate::dns::router_fallback_wanted() {
+                        if router_dns
+                            .as_ref()
+                            .is_none_or(|(_, at)| at.elapsed() >= Duration::from_secs(60))
+                        {
+                            router_dns = Some((crate::dns_manager::router_dns_servers(), Instant::now()));
+                        }
+                        router_dns.as_ref().map(|(ips, _)| ips.clone()).unwrap_or_default()
+                    } else {
+                        router_dns = None;
+                        Vec::new()
+                    };
+                    let mut open_dns = vpn_dns.clone();
+                    open_dns.extend(router.iter().filter(|ip| !vpn_dns.contains(ip)));
+                    let open_changed = last_open_dns.as_ref() != Some(&open_dns);
+                    if router.is_empty() {
+                        crate::dns::set_router_fallback(&[]);
+                    }
+
                     if !firewall_paused
                         && (!newly_blocked_paths.is_empty()
                             || last_dns_enforced != Some(dns_enforced)
                             || vpn_changed
+                            || open_changed
                             || last_firewall_refresh.elapsed() >= Duration::from_secs(60))
                     {
                         if vpn_changed && !vpn_dns.is_empty() {
@@ -230,12 +278,20 @@ fn run_service_loop() -> anyhow::Result<()> {
                             &config,
                             &runtime_blocked_paths,
                             dns_enforced,
-                            &vpn_dns,
+                            &open_dns,
                         ) {
-                            Ok(()) => {
+                            Ok(kept) => {
+                                if !stale_rules_removed {
+                                    crate::firewall_manager::remove_stale_rules(&kept);
+                                    stale_rules_removed = true;
+                                }
                                 firewall_failed_at = None;
                                 last_dns_enforced = Some(dns_enforced);
                                 last_vpn_dns = Some(vpn_dns.clone());
+                                last_open_dns = Some(open_dns.clone());
+                                // Only now: before the seal opens, every query
+                                // to the router would fail and count against it.
+                                crate::dns::set_router_fallback(&router);
                             }
                             Err(e) => {
                                 crate::dns_manager::log_tamper_event(&format!(
@@ -344,13 +400,20 @@ fn run_service_loop() -> anyhow::Result<()> {
                 "Service stopped in Hardcore mode. DNS NOT reset.",
             );
         }
+        proxy_died
     });
 
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(0),
+        // Non-zero so the SCM's failure actions bring the proxy back; a clean
+        // exit here left the machine unprotected until the next reboot.
+        exit_code: if proxy_died {
+            ServiceExitCode::ServiceSpecific(1)
+        } else {
+            ServiceExitCode::Win32(0)
+        },
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
@@ -391,7 +454,37 @@ pub fn install_service() -> anyhow::Result<()> {
     };
 
     let _service = manager.create_service(&info, ServiceAccess::QUERY_STATUS)?;
+    // The service is installed either way, and sets this again on every start.
+    if let Err(e) = ensure_restart_on_crash() {
+        crate::dns_manager::log_tamper_event(&format!("Could not set restart-on-crash: {e}"));
+    }
 
+    Ok(())
+}
+
+/// A crash used to leave the pin, NRPT rule and seal in place with nothing
+/// answering behind them until the next reboot. Applies only to crashes: a stop
+/// through the SCM is a clean exit and stays stopped.
+fn ensure_restart_on_crash() -> anyhow::Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    // SC_ACTION_RESTART is refused without START on the handle.
+    let service = manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::CHANGE_CONFIG | ServiceAccess::START,
+    )?;
+    let restart = || ServiceAction {
+        action_type: ServiceActionType::Restart,
+        delay: Duration::from_secs(2),
+    };
+    service.update_failure_actions(ServiceFailureActions {
+        reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(3600)),
+        reboot_msg: None,
+        command: None,
+        actions: Some(vec![restart(), restart(), restart()]),
+    })?;
+    // A proxy that cannot bind ends the service with an error exit, not a
+    // crash; this makes the SCM retry that too.
+    service.set_failure_actions_on_non_crash_failures(true)?;
     Ok(())
 }
 
@@ -458,7 +551,9 @@ pub fn restart_service() -> anyhow::Result<()> {
     if service.query_status()?.current_state != ServiceState::Stopped {
         let _ = service.stop();
     }
-    for _ in 0..30 {
+    // As long as the 60s stop wait hint: outside Hardcore the stop resets DNS,
+    // firewall and browser policy, and that alone outlasted the old 15s.
+    for _ in 0..120 {
         if service.query_status()?.current_state == ServiceState::Stopped {
             break;
         }
@@ -467,4 +562,23 @@ pub fn restart_service() -> anyhow::Result<()> {
 
     service.start(&Vec::<OsString>::new())?;
     Ok(())
+}
+
+/// Recover Internet: brings the connection back without lowering protection,
+/// so the UI runs it without friction in every mode. The restart rebuilds the
+/// proxy's upstreams and re-applies the pin, NRPT rule, seal and policies.
+/// Releasing is left to the service: if its proxy cannot bind it releases DNS
+/// itself, and releasing from here while it starts would undo what it applies.
+pub async fn recover() -> anyhow::Result<()> {
+    crate::dns_manager::recover_network();
+    restart_service()?;
+
+    for _ in 0..15 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if crate::dns::local_dns_proxy_responds().await.unwrap_or(false) {
+            crate::dns_manager::log_tamper_event("Recover Internet: DNS proxy answering.");
+            return Ok(());
+        }
+    }
+    anyhow::bail!("the DNS proxy did not answer after the restart")
 }

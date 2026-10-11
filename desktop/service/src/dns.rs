@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
-use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
-use hickory_proto::rr::{Name, RecordType};
-use hickory_resolver::TokioResolver;
+use hickory_proto::rr::{Name, Record, RecordType};
+use hickory_resolver::{ResponseCache, TokioResolver, TtlConfig};
 use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::{DnsError, NetError};
 use libreascent_shared::blocklist::DomainBlocklist;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -45,16 +45,41 @@ pub static UPSTREAM_DOWN: AtomicBool = AtomicBool::new(false);
 
 static UPSTREAM: OnceLock<Arc<Upstream>> = OnceLock::new();
 
-/// Quad9 over DoT, then DoH, then plain UDP, in that order. Every tier is the
-/// same resolver, so a fallback never widens what the firewall already grants
-/// to Quad9 on :853; firewall_manager carves Quad9 out of its :53 and :443
-/// seals to match. The plaintext tier is what survives a reset clock: with the
-/// CMOS cleared every TLS handshake fails as "not yet valid", and w32time cannot
-/// fix the clock because it needs DNS first.
+/// Backup resolvers that filter adult content themselves. The bypass seal never
+/// covers them on :443 or :853, which is safe for the same reason: an app that
+/// talks to them directly still gets their filtering.
+pub(crate) const BACKUP_UPSTREAM_IPS: [Ipv4Addr; 4] = [
+    Ipv4Addr::new(1, 1, 1, 3),
+    Ipv4Addr::new(1, 0, 0, 3),
+    Ipv4Addr::new(185, 228, 168, 168),
+    Ipv4Addr::new(185, 228, 169, 168),
+];
+
+/// Quad9 over DoT, then DoH, then plain UDP, then the filtering backups, in
+/// that order. The Quad9 tiers never widen what the firewall already grants to
+/// Quad9 on :853; firewall_manager carves Quad9 out of its :53 and :443 seals
+/// to match. The plaintext tier is what survives a reset clock: with the CMOS
+/// cleared every TLS handshake fails as "not yet valid", and w32time cannot fix
+/// the clock because it needs DNS first. When every tier is down the network's
+/// own resolver stands in (see `router`).
 pub struct Upstream {
     tiers: Vec<Tier>,
+    /// One cache in front of every tier, so only an answer off the network
+    /// counts as a tier answering. Per-tier caches served hits that reset the
+    /// breakers, so a dead upstream never stayed skipped and kept costing every
+    /// query its timeouts.
+    cache: ResponseCache,
+    /// Set once every tier's breaker is open; cleared by the next real answer
+    /// from a tier. service_manager opens the router fallback on it.
+    router_wanted: AtomicBool,
+    /// The network's own resolvers, set by service_manager once the firewall
+    /// lets them through. The blocklist has already run by the time a query
+    /// gets here, so this changes where answers come from, not what is blocked.
+    router: RwLock<Option<(Vec<Ipv4Addr>, TokioResolver)>>,
     started: Instant,
-    last_ok: AtomicU64,
+    /// Seconds since `started` of the first failure since the last answer,
+    /// plus one; zero while answers flow.
+    failing_since: AtomicU64,
 }
 
 struct Tier {
@@ -73,8 +98,27 @@ impl Upstream {
 
     /// Ok: answers. Err(Some): an authoritative negative answer (NXDOMAIN and
     /// friends) to pass through. Err(None): every tier tried failed.
-    async fn lookup(&self, name: Name, rtype: RecordType) -> Result<Lookup, Option<ResponseCode>> {
+    async fn lookup(&self, name: Name, rtype: RecordType) -> Result<Vec<Record>, Option<ResponseCode>> {
+        let query = Query::query(name.clone(), rtype);
+        match self.cache.get(&query, Instant::now()) {
+            Some(Ok(message)) => return Ok(message.answers),
+            Some(Err(NetError::Dns(DnsError::NoRecordsFound(no_records)))) => {
+                return Err(Some(no_records.response_code))
+            }
+            _ => {}
+        }
+
         let now = self.secs();
+        // The tiers are left to upstream_probe while the router stands in:
+        // trying them first would cost every query their timeouts.
+        if let Some(router) = self.router_resolver() {
+            if let Ok(answer) = self.network_answer(query, router.lookup(name, rtype).await, false) {
+                self.router_answered();
+                return answer;
+            }
+            return self.failed(now);
+        }
+
         let mut live: Vec<&Tier> = self
             .tiers
             .iter()
@@ -87,14 +131,10 @@ impl Upstream {
             live.push(&self.tiers[0]);
         }
         for tier in live {
-            match tier.resolver.lookup(name.clone(), rtype).await {
-                Ok(lookup) => {
-                    self.answered(tier, now);
-                    return Ok(lookup);
-                }
-                Err(NetError::Dns(DnsError::NoRecordsFound(no_records))) => {
-                    self.answered(tier, now);
-                    return Err(Some(no_records.response_code));
+            match self.network_answer(query.clone(), tier.resolver.lookup(name.clone(), rtype).await, true) {
+                Ok(answer) => {
+                    self.answered(tier);
+                    return answer;
                 }
                 Err(error) => {
                     let failures = tier.failures.fetch_add(1, Ordering::Relaxed) + 1;
@@ -110,37 +150,186 @@ impl Upstream {
                 }
             }
         }
-        if now.saturating_sub(self.last_ok.load(Ordering::Relaxed)) >= FAIL_OPEN_SECS {
+        if self
+            .tiers
+            .iter()
+            .all(|tier| tier.down_until.load(Ordering::Relaxed) > now)
+            && !self.router_wanted.swap(true, Ordering::Relaxed)
+        {
+            crate::dns_manager::log_tamper_event(
+                "Every filtered upstream is down: falling back to the network's own DNS. The blocklist still applies.",
+            );
+        }
+        self.failed(now)
+    }
+
+    /// UPSTREAM_DOWN counts from the first failure, not the last answer: after
+    /// an idle spell the last answer can be minutes old, and Locked would then
+    /// release the pin before the router fallback had a chance to open.
+    fn failed(&self, now: u64) -> Result<Vec<Record>, Option<ResponseCode>> {
+        let since = match self.failing_since.compare_exchange(
+            0,
+            now + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => now,
+            Err(stored) => stored - 1,
+        };
+        if now.saturating_sub(since) >= FAIL_OPEN_SECS {
             UPSTREAM_DOWN.store(true, Ordering::Relaxed);
         }
         Err(None)
     }
 
-    fn answered(&self, tier: &Tier, now: u64) {
+    /// Ok for anything the network answered; Err only for a failure to get an
+    /// answer. A SERVFAIL or REFUSED is the server answering about one name,
+    /// not the server being down: counted as a failure, one broken domain
+    /// queried a few times tripped every tier and opened the router.
+    fn network_answer(
+        &self,
+        query: Query,
+        result: Result<Lookup, NetError>,
+        cache: bool,
+    ) -> Result<Result<Vec<Record>, Option<ResponseCode>>, NetError> {
+        match result {
+            Ok(lookup) => {
+                let answers = lookup.answers().to_vec();
+                if cache {
+                    self.cache.insert(query, Ok(lookup.message().clone()), Instant::now());
+                }
+                Ok(Ok(answers))
+            }
+            Err(NetError::Dns(DnsError::NoRecordsFound(no_records))) => {
+                let code = no_records.response_code;
+                if cache {
+                    self.cache.insert(
+                        query,
+                        Err(NetError::Dns(DnsError::NoRecordsFound(no_records))),
+                        Instant::now(),
+                    );
+                }
+                Ok(Err(Some(code)))
+            }
+            Err(NetError::Dns(DnsError::ResponseCode(code))) => Ok(Err(Some(code))),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Router answers are not cached: they would outlive the fallback by up to
+    /// their TTL once the filtered tiers are back.
+    fn router_answered(&self) {
+        self.failing_since.store(0, Ordering::Relaxed);
+        UPSTREAM_DOWN.store(false, Ordering::Relaxed);
+    }
+
+    fn answered(&self, tier: &Tier) {
         tier.failures.store(0, Ordering::Relaxed);
         tier.down_until.store(0, Ordering::Relaxed);
-        self.last_ok.store(now, Ordering::Relaxed);
+        self.failing_since.store(0, Ordering::Relaxed);
         UPSTREAM_DOWN.store(false, Ordering::Relaxed);
+        if self.router_wanted.swap(false, Ordering::Relaxed) {
+            crate::dns_manager::log_tamper_event(&format!(
+                "Upstream {} answered again: leaving the network's own DNS.",
+                tier.label
+            ));
+        }
+    }
+
+    fn router_resolver(&self) -> Option<TokioResolver> {
+        if !self.router_wanted.load(Ordering::Relaxed) {
+            return None;
+        }
+        let router = self.router.read().ok()?;
+        router.as_ref().map(|(_, resolver)| resolver.clone())
+    }
+
+    fn set_router(&self, ips: &[Ipv4Addr], port: u16) {
+        let Ok(mut router) = self.router.write() else {
+            return;
+        };
+        let current = router.as_ref().map(|(current, _)| current.as_slice()).unwrap_or_default();
+        if current == ips {
+            return;
+        }
+        if ips.is_empty() {
+            *router = None;
+            crate::dns_manager::log_tamper_event("Network DNS fallback closed.");
+            return;
+        }
+        let mut udp = ConnectionConfig::udp();
+        udp.port = port;
+        let addrs: Vec<IpAddr> = ips.iter().copied().map(IpAddr::V4).collect();
+        match build_resolver(&addrs, udp) {
+            Ok(resolver) => {
+                *router = Some((ips.to_vec(), resolver));
+                crate::dns_manager::log_tamper_event(&format!(
+                    "Network DNS fallback open: {ips:?}. The blocklist still applies."
+                ));
+            }
+            Err(error) => crate::dns_manager::log_tamper_event(&format!(
+                "Network DNS fallback could not start: {error}"
+            )),
+        }
+    }
+
+    /// Asks every tier directly, past breakers and cache. Answers on success.
+    async fn probe(&self) -> bool {
+        let Ok(name) = Name::from_ascii("dns.quad9.net.") else {
+            return false;
+        };
+        let query = Query::query(name.clone(), RecordType::A);
+        for tier in &self.tiers {
+            let result = tier.resolver.lookup(name.clone(), RecordType::A).await;
+            if self.network_answer(query.clone(), result, true).is_ok() {
+                self.answered(tier);
+                return true;
+            }
+        }
+        if let Some(router) = self.router_resolver() {
+            if self.network_answer(query, router.lookup(name, RecordType::A).await, false).is_ok() {
+                self.router_answered();
+                return true;
+            }
+        }
+        false
     }
 }
 
 fn build_upstream() -> Result<Upstream> {
-    use std::net::{IpAddr, Ipv4Addr};
-
-    // IPv4-only Quad9 endpoints. Talking to the upstream over IPv4 avoids a
-    // hard failure on hosts without an IPv6 route; clients still receive AAAA
+    // IPv4-only endpoints. Talking to the upstream over IPv4 avoids a hard
+    // failure on hosts without an IPv6 route; clients still receive AAAA
     // records normally. Ports set explicitly rather than by protocol default:
     // the firewall exemptions are written against Quad9 on exactly these.
-    build_upstream_for(
+    let mut upstream = build_upstream_for(
         &[
             IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)),
             IpAddr::V4(Ipv4Addr::new(149, 112, 112, 112)),
         ],
         [853, 443, 53],
-    )
+    )?;
+
+    let [cloudflare_a, cloudflare_b, cleanbrowsing_a, cleanbrowsing_b] =
+        BACKUP_UPSTREAM_IPS.map(IpAddr::V4);
+    let mut cloudflare = ConnectionConfig::https(Arc::from("family.cloudflare-dns.com"), None);
+    cloudflare.port = 443;
+    let mut cleanbrowsing = ConnectionConfig::tls(Arc::from("family-filter-dns.cleanbrowsing.org"));
+    cleanbrowsing.port = 853;
+    for (label, ips, connection) in [
+        ("Cloudflare Family DoH", [cloudflare_a, cloudflare_b], cloudflare),
+        ("CleanBrowsing Family DoT", [cleanbrowsing_a, cleanbrowsing_b], cleanbrowsing),
+    ] {
+        upstream.tiers.push(Tier {
+            label,
+            resolver: build_resolver(&ips, connection)?,
+            failures: AtomicU32::new(0),
+            down_until: AtomicU64::new(0),
+        });
+    }
+    Ok(upstream)
 }
 
-fn build_upstream_for(ips: &[std::net::IpAddr], ports: [u16; 3]) -> Result<Upstream> {
+fn build_upstream_for(ips: &[IpAddr], ports: [u16; 3]) -> Result<Upstream> {
     let server_name: Arc<str> = Arc::from("dns.quad9.net");
     let mut dot = ConnectionConfig::tls(Arc::clone(&server_name));
     dot.port = ports[0];
@@ -162,8 +351,11 @@ fn build_upstream_for(ips: &[std::net::IpAddr], ports: [u16; 3]) -> Result<Upstr
         .collect::<Result<Vec<_>>>()?;
     Ok(Upstream {
         tiers,
+        cache: ResponseCache::new(4096, TtlConfig::default()),
+        router_wanted: AtomicBool::new(false),
+        router: RwLock::new(None),
         started: Instant::now(),
-        last_ok: AtomicU64::new(0),
+        failing_since: AtomicU64::new(0),
     })
 }
 
@@ -175,7 +367,8 @@ fn build_resolver(ips: &[std::net::IpAddr], connection: ConnectionConfig) -> Res
     let config = ResolverConfig::from_parts(None, Vec::new(), quad9);
 
     let mut opts = ResolverOpts::default();
-    opts.cache_size = 1024;
+    // Upstream::cache does the caching; see there for why not here.
+    opts.cache_size = 0;
     opts.timeout = UPSTREAM_TIMEOUT;
     opts.attempts = 1;
     TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
@@ -192,13 +385,34 @@ pub fn upstream() -> Result<Arc<Upstream>> {
     Ok(Arc::clone(UPSTREAM.get_or_init(|| built)))
 }
 
-/// One lookup through the tiers. While the pin is released nothing reaches the
-/// proxy, so this is how service_manager learns the upstream is back.
+/// Asks the tiers directly. While the pin is released, or while the router
+/// stands in, no query reaches them, so this is how service_manager learns the
+/// upstream is back.
 pub async fn upstream_probe() -> bool {
-    let (Ok(upstream), Ok(name)) = (upstream(), Name::from_ascii("dns.quad9.net.")) else {
-        return false;
-    };
-    !matches!(upstream.lookup(name, RecordType::A).await, Err(None))
+    match upstream() {
+        Ok(upstream) => upstream.probe().await,
+        Err(_) => false,
+    }
+}
+
+pub fn router_fallback_wanted() -> bool {
+    UPSTREAM
+        .get()
+        .is_some_and(|upstream| upstream.router_wanted.load(Ordering::Relaxed))
+}
+
+pub fn router_fallback_active() -> bool {
+    UPSTREAM
+        .get()
+        .is_some_and(|upstream| upstream.router_resolver().is_some())
+}
+
+/// Called by service_manager once the firewall lets `ips` through on :53, and
+/// with none to close the fallback.
+pub fn set_router_fallback(ips: &[Ipv4Addr]) {
+    if let Some(upstream) = UPSTREAM.get() {
+        upstream.set_router(ips, 53);
+    }
 }
 
 /// Where the browser blocker asks whether a host is blocked. Plain TCP on a
@@ -405,11 +619,9 @@ async fn resolve_via_upstream(resolver: &Upstream, request: &[u8]) -> Result<Vec
     response.add_query(query.clone());
 
     match resolver.lookup(query.name().clone(), query.query_type()).await {
-        Ok(lookup) => {
+        Ok(answers) => {
             response.metadata.response_code = ResponseCode::NoError;
-            for record in lookup.answers() {
-                response.add_answer(record.clone());
-            }
+            response.add_answers(answers);
         }
         // A name that does not resolve is a normal answer, not a failure: pass
         // the upstream's code through so NXDOMAIN stays NXDOMAIN.
@@ -529,7 +741,7 @@ mod tests {
     #[ignore]
     async fn resolves_via_every_quad9_tier() {
         let upstream = build_upstream().expect("upstream should build");
-        assert_eq!(upstream.tiers.len(), 3);
+        assert_eq!(upstream.tiers.len(), 5);
         for tier in &upstream.tiers {
             let name = Name::from_ascii("example.com.").unwrap();
             let lookup = tier
@@ -587,8 +799,133 @@ mod tests {
         // Quad9 :853; a tier on any other port would be sealed by our own rules.
         let upstream = build_upstream().expect("upstream should build");
         let labels: Vec<_> = upstream.tiers.iter().map(|t| t.label).collect();
-        assert_eq!(labels, ["DoT", "DoH", "UDP"]);
+        assert_eq!(
+            labels,
+            ["DoT", "DoH", "UDP", "Cloudflare Family DoH", "CleanBrowsing Family DoT"]
+        );
         assert!(!UPSTREAM_DOWN.load(Ordering::Relaxed));
+    }
+
+    async fn trip_every_breaker(upstream: &Upstream) {
+        let name = Name::from_ascii("dead.example.").unwrap();
+        for _ in 0..TRIP_AFTER {
+            assert!(matches!(upstream.lookup(name.clone(), RecordType::A).await, Err(None)));
+        }
+        assert!(upstream.router_wanted.load(Ordering::Relaxed));
+    }
+
+    /// Answers every A query with 192.0.2.7, like a home router's resolver.
+    async fn fake_router_dns() -> u16 {
+        fake_dns(ResponseCode::NoError).await
+    }
+
+    async fn fake_dns(code: ResponseCode) -> u16 {
+        use hickory_proto::rr::RData;
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut buffer = [0_u8; 512];
+            while let Ok((size, peer)) = socket.recv_from(&mut buffer).await {
+                let request = Message::from_bytes(&buffer[..size]).unwrap();
+                let query = request.queries[0].clone();
+                let mut response =
+                    Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+                response.metadata.recursion_desired = request.metadata.recursion_desired;
+                response.metadata.recursion_available = true;
+                response.metadata.response_code = code;
+                if code == ResponseCode::NoError {
+                    response.add_answer(Record::from_rdata(
+                        query.name().clone(),
+                        60,
+                        RData::A(Ipv4Addr::new(192, 0, 2, 7).into()),
+                    ));
+                }
+                response.add_query(query);
+                let _ = socket.send_to(&response.to_bytes().unwrap(), peer).await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_router_answers_once_every_tier_is_down_and_steps_aside_when_one_returns() {
+        let upstream = build_upstream_for(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], [1, 1, 1])
+            .expect("upstream should build");
+        let name = Name::from_ascii("example.com.").unwrap();
+
+        // Down but not yet opened by service_manager: still a plain failure.
+        trip_every_breaker(&upstream).await;
+        assert!(matches!(upstream.lookup(name.clone(), RecordType::A).await, Err(None)));
+
+        upstream.set_router(&[Ipv4Addr::LOCALHOST], fake_router_dns().await);
+        let started = Instant::now();
+        let answers = upstream.lookup(name.clone(), RecordType::A).await.expect("router answers");
+        assert!(started.elapsed() < UPSTREAM_TIMEOUT, "the dead tiers must be skipped");
+        assert_eq!(answers[0].data, Ipv4Addr::new(192, 0, 2, 7).into());
+        // A router answer says nothing about the filtered tiers.
+        assert!(upstream.tiers.iter().all(|tier| tier.failures.load(Ordering::Relaxed) >= TRIP_AFTER));
+
+        upstream.answered(&upstream.tiers[0]);
+        assert!(!upstream.router_wanted.load(Ordering::Relaxed));
+        assert!(upstream.router_resolver().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_servfail_for_one_name_is_an_answer_not_an_outage() {
+        let servfail = fake_dns(ResponseCode::ServFail).await;
+        let upstream = build_upstream_for(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], [1, 1, servfail])
+            .expect("upstream should build");
+        let name = Name::from_ascii("broken-dnssec.example.").unwrap();
+
+        for _ in 0..TRIP_AFTER * 2 {
+            assert_eq!(
+                upstream.lookup(name.clone(), RecordType::A).await,
+                Err(Some(ResponseCode::ServFail))
+            );
+        }
+        assert_eq!(upstream.tiers[2].failures.load(Ordering::Relaxed), 0);
+        assert_eq!(upstream.tiers[2].down_until.load(Ordering::Relaxed), 0);
+        assert!(!upstream.router_wanted.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cached_answer_does_not_close_the_breakers() {
+        use hickory_proto::rr::RData;
+
+        let upstream = build_upstream_for(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], [1, 1, 1])
+            .expect("upstream should build");
+        trip_every_breaker(&upstream).await;
+        let name = Name::from_ascii("cached.example.").unwrap();
+        let mut message = Message::response(0, OpCode::Query);
+        message.add_query(Query::query(name.clone(), RecordType::A));
+        message.add_answer(Record::from_rdata(
+            name.clone(),
+            300,
+            RData::A(Ipv4Addr::new(192, 0, 2, 9).into()),
+        ));
+        upstream.cache.insert(Query::query(name.clone(), RecordType::A), Ok(message), Instant::now());
+
+        upstream.lookup(name, RecordType::A).await.expect("served from the cache");
+
+        assert!(upstream.router_wanted.load(Ordering::Relaxed));
+        for tier in &upstream.tiers {
+            assert!(tier.down_until.load(Ordering::Relaxed) > 0, "{} closed on a cache hit", tier.label);
+            assert!(tier.failures.load(Ordering::Relaxed) >= TRIP_AFTER);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn router_answers_do_not_outlive_the_fallback() {
+        let upstream = build_upstream_for(&[IpAddr::V4(Ipv4Addr::LOCALHOST)], [1, 1, 1])
+            .expect("upstream should build");
+        trip_every_breaker(&upstream).await;
+        upstream.set_router(&[Ipv4Addr::LOCALHOST], fake_router_dns().await);
+        let name = Name::from_ascii("via-router.example.").unwrap();
+        upstream.lookup(name.clone(), RecordType::A).await.expect("router answers");
+
+        upstream.set_router(&[], 53);
+        assert!(matches!(upstream.lookup(name, RecordType::A).await, Err(None)));
     }
 
     #[test]

@@ -50,6 +50,10 @@ async fn main() -> Result<()> {
             service_manager::restart_service()?;
             println!("Service restarted.");
         }
+        Some("recover") => {
+            service_manager::recover().await?;
+            println!("Network recovered.");
+        }
         Some("set-dns") => {
             crate::dns_manager::log_tamper_event("Manual set-dns requested.");
             if !dns::local_dns_proxy_responds().await? {
@@ -74,7 +78,9 @@ async fn main() -> Result<()> {
         Some("service-run") => {
             service_manager::run_service()?;
         }
-        _ => {
+        // An app newer than this exe must not read a verb it never ran as success.
+        Some(verb) => bail!("unknown command: {verb}"),
+        None => {
             println!("usage:");
             println!("  libreascent-service check-domain <domain>");
             println!("  libreascent-service update-sources");
@@ -83,6 +89,7 @@ async fn main() -> Result<()> {
             println!("  libreascent-service uninstall");
             println!("  libreascent-service set-dns");
             println!("  libreascent-service reset-dns");
+            println!("  libreascent-service recover");
             println!("  libreascent-service block-apps");
         }
     }

@@ -439,14 +439,29 @@ mod tests {
 
     #[test]
     fn recovery_message_never_claims_blocking_when_the_filter_did_not_return() {
-        assert!(recovery_message(Ok(()), true, true).unwrap().contains("Blocking is still on"));
-        assert!(recovery_message(Ok(()), true, false).unwrap().contains("DNS blocking is off"));
+        assert!(recovery_message(Ok(()), true, true, "").unwrap().contains("Blocking is still on"));
+        assert!(recovery_message(Ok(()), true, false, "").unwrap().contains("DNS blocking is off"));
         // Declining UAC on a connection that already works is not an outage.
-        assert!(recovery_message(Err("x".into()), true, true).unwrap().contains("Blocking is still on"));
-        assert!(recovery_message(Ok(()), false, true).is_err());
+        assert!(recovery_message(Err("x".into()), true, true, "").unwrap().contains("Blocking is still on"));
+        assert!(recovery_message(Ok(()), false, true, "").is_err());
         assert_eq!(
-            recovery_message(Err("UAC was declined".into()), false, false),
+            recovery_message(Err("UAC was declined".into()), false, false, ""),
             Err("Recovery failed: UAC was declined".to_string())
+        );
+    }
+
+    #[test]
+    fn an_offline_recovery_names_where_the_path_breaks() {
+        let cause = |diagnosis| recovery_message(Ok(()), false, true, diagnosis).unwrap_err();
+        assert!(cause("nolink").contains("No network cable or Wi-Fi"));
+        assert!(cause("noaddress").contains("isn't giving this PC an address"));
+        assert!(cause("norouter").contains("router isn't responding"));
+        assert!(cause("nointernet").contains("has no internet"));
+        assert!(cause("dns").contains("name lookups are failing"));
+        assert!(
+            recovery_message(Err("UAC was declined".into()), false, true, "nolink")
+                .unwrap_err()
+                .ends_with("(Recovery did not finish: UAC was declined)")
         );
     }
 
@@ -650,25 +665,58 @@ fn recover_internet(handle: tauri::AppHandle) -> Result<String, String> {
     // Freshly restarted with an empty cache, the probe's first lookup can take
     // longer than its 750ms, so one miss is not proof the filter is down.
     let filtering = (0..3).any(|_| is_local_dns_proxy_running());
-    recovery_message(recovered, online, filtering)
+    let diagnosis = if online { String::new() } else { network_diagnosis() };
+    recovery_message(recovered, online, filtering, &diagnosis)
+}
+
+/// Where the path to the internet breaks, walked from the adapter outward.
+/// Needs no elevation.
+fn network_diagnosis() -> String {
+    let script = "$a = @(Get-NetAdapter -Physical | Where-Object Status -eq 'Up'); \
+        if (-not $a) { 'nolink'; exit }; \
+        $ip = $a | ForEach-Object { Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue } | Where-Object IPAddress -notlike '169.254.*'; \
+        if (-not $ip) { 'noaddress'; exit }; \
+        $gw = $a | ForEach-Object { Get-NetRoute -InterfaceIndex $_.ifIndex -DestinationPrefix 0.0.0.0/0 -ErrorAction SilentlyContinue } | Select-Object -First 1 -ExpandProperty NextHop; \
+        if (-not $gw -or -not (Test-Connection $gw -Count 2 -Quiet)) { 'norouter'; exit }; \
+        if (-not (Test-Connection 9.9.9.9 -Count 2 -Quiet) -and -not (Test-Connection 1.1.1.3 -Count 2 -Quiet)) { 'nointernet'; exit }; \
+        'dns'";
+    let mut command = Command::new("powershell");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 fn recovery_message(
     recovered: Result<(), String>,
     online: bool,
     filtering: bool,
+    diagnosis: &str,
 ) -> Result<String, String> {
-    match (recovered, online) {
-        (_, true) if filtering => Ok("Internet is back. Blocking is still on.".to_string()),
-        (_, true) => Ok(
+    let cause = match diagnosis {
+        "nolink" => Some("No network cable or Wi-Fi connection. Plug in the cable or connect to Wi-Fi, then try again."),
+        "noaddress" => Some("The cable or Wi-Fi is connected, but the router isn't giving this PC an address. Restart the router or check its DHCP settings, then try again."),
+        "norouter" => Some("This PC has an address, but the router isn't responding. Restart the router, then try again."),
+        "nointernet" => Some("The router is reachable, but it has no internet. The internet provider or the router's connection is down."),
+        "dns" => Some("The internet is reachable, but name lookups are failing. Run Repair Service or restart the PC."),
+        _ => None,
+    };
+    match (recovered, online, cause) {
+        (_, true, _) if filtering => Ok("Internet is back. Blocking is still on.".to_string()),
+        (_, true, _) => Ok(
             "Internet is back, but the DNS filter is not running, so DNS blocking is off. Run Repair Service or restart the PC to turn it back on."
                 .to_string(),
         ),
-        (Ok(()), false) => Err(
+        (Ok(()), false, Some(cause)) => Err(cause.to_string()),
+        (Err(error), false, Some(cause)) => Err(format!("{cause} (Recovery did not finish: {error})")),
+        (Ok(()), false, None) => Err(
             "Recovery finished, but this PC still can't reach the internet. Check the cable or Wi-Fi, or restart the router, then try again."
                 .to_string(),
         ),
-        (Err(error), false) => Err(format!("Recovery failed: {error}")),
+        (Err(error), false, None) => Err(format!("Recovery failed: {error}")),
     }
 }
 

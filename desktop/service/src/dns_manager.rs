@@ -156,8 +156,17 @@ pub fn recover_network() {
         "Get-NetAdapter -Physical | Where-Object AdminStatus -eq 'Down' | Enable-NetAdapter -Confirm:$false",
     )
     .status();
-    // An adapter just enabled needs a moment before it can ask for a lease.
-    std::thread::sleep(std::time::Duration::from_secs(5));
+    // A link with no usable address: DHCP can be left off (adding then
+    // removing an address turns it off), or the link can come up degraded at
+    // 10 Mbps; a restart renegotiates it. Adapters with a working address,
+    // static ones included, are left alone.
+    let _ = powershell(
+        "Get-NetAdapter -Physical | Where-Object Status -eq 'Up' | Where-Object { -not (Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object IPAddress -notlike '169.254.*') } | ForEach-Object { Set-NetIPInterface -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -Dhcp Enabled; Restart-NetAdapter -Name $_.Name -Confirm:$false }",
+    )
+    .status();
+    // An adapter just enabled or restarted needs a moment before it can ask
+    // for a lease.
+    std::thread::sleep(std::time::Duration::from_secs(8));
     // Physical adapters only: renewing a VPN's virtual adapter can drop its
     // tunnel. An adapter with no DHCP server answering holds a renew for about
     // a minute.

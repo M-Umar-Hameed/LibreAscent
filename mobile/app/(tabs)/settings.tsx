@@ -8,6 +8,11 @@ import {
   useBlockingStore,
   type BlockingState,
 } from "@/stores/useBlockingStore";
+import {
+  getEffectiveMode,
+  strengthenOnly,
+  type ImportableLists,
+} from "@/types/blocking";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import * as FreedomForeground from "@/modules/freedom-foreground-service/src";
 import * as FreedomVpn from "@/modules/freedom-vpn-service/src";
@@ -307,7 +312,16 @@ export default function SettingsScreen(): ReactNode {
         return;
       }
 
-      importSettings(data as Partial<BlockingState>);
+      // Outside Flexible an import may only add protection; the whitelist and
+      // any removals in the file are ignored, as the lists' own screens would.
+      const current = useBlockingStore.getState();
+      const locked =
+        getEffectiveMode(controlMode, current.siteControlMode) !== "flexible";
+      importSettings(
+        locked
+          ? strengthenOnly(current, data as Partial<ImportableLists>)
+          : (data as Partial<BlockingState>),
+      );
       if (data.appThemeId) setAppThemeId(data.appThemeId as string);
       if (data.customTheme) setCustomTheme(data.customTheme as AppTheme);
       if (data.overlayTexts)
@@ -321,7 +335,9 @@ export default function SettingsScreen(): ReactNode {
         );
       Alert.alert(
         "Success",
-        "Settings imported successfully. Syncing with native services...",
+        locked
+          ? "Settings imported. Control Mode is on, so only additions were applied; whitelist entries and removals in the file were ignored."
+          : "Settings imported successfully. Syncing with native services...",
       );
       await BlocklistService.syncBlocklistToNative();
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);

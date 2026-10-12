@@ -67,6 +67,54 @@ export function isModeUpgrade(
   return pending !== current && getEffectiveMode(current, pending) === pending;
 }
 
+export interface ImportableLists {
+  keywords: string[];
+  includedUrls: BlockedUrl[];
+  excludedUrls: BlockedUrl[];
+  adultBlockingEnabled: boolean;
+  blockedApps: BlockedApp[];
+}
+
+/**
+ * What an imported settings file may change outside Flexible: only what
+ * blocks more. Import used to replace every list, so a file with an emptied
+ * blocklist or a longer whitelist undid a lock the app itself never would.
+ */
+export function strengthenOnly(
+  current: ImportableLists,
+  imported: Partial<ImportableLists>,
+): ImportableLists {
+  const extraUrls = imported.includedUrls ?? [];
+  const includedUrls = current.includedUrls.map((u) => ({
+    ...u,
+    enabled: u.enabled || extraUrls.some((e) => e.url === u.url && e.enabled),
+  }));
+  for (const e of extraUrls) {
+    if (e.enabled && !includedUrls.some((u) => u.url === e.url)) {
+      includedUrls.push(e);
+    }
+  }
+  const keywords = [...current.keywords];
+  for (const k of imported.keywords ?? []) {
+    const lower = k.trim().toLowerCase();
+    if (lower && !keywords.includes(lower)) keywords.push(lower);
+  }
+  return {
+    keywords,
+    includedUrls,
+    excludedUrls: current.excludedUrls,
+    adultBlockingEnabled:
+      current.adultBlockingEnabled || imported.adultBlockingEnabled === true,
+    blockedApps: [
+      ...current.blockedApps,
+      ...(imported.blockedApps ?? []).filter(
+        (a) =>
+          !current.blockedApps.some((c) => c.packageName === a.packageName),
+      ),
+    ],
+  };
+}
+
 export function getEffectiveSurveillance(
   mainMode: ControlMode,
   mainSurv: SurveillanceConfig,

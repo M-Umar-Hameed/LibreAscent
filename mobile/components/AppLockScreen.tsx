@@ -32,7 +32,12 @@ export function AppLockScreen({
   const promptInFlight = useRef(false);
 
   const attemptBiometric = useCallback(async (): Promise<void> => {
-    if (promptInFlight.current) return;
+    // A prompt opened as the app went to the background can vanish without
+    // its promise ever settling; returning here then made every later tap a
+    // no-op with no way in. Cancel the lost one and ask again instead.
+    if (promptInFlight.current) {
+      await LocalAuthentication.cancelAuthenticate().catch(() => undefined);
+    }
     promptInFlight.current = true;
     try {
       const result = await LocalAuthentication.authenticateAsync({

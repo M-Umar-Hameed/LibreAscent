@@ -36,6 +36,13 @@ class ContentMatcher {
     )
 
     @Volatile private var blockedDomains = ConcurrentHashMap.newKeySet<String>()
+    /**
+     * Keywords that name a kind of site, not explicit content. The VPN blocks
+     * domains that contain them; on screen they are left alone, since an
+     * article, a search or a home-screen tile that mentions manga is not a
+     * reason to block, and treating it as one made the phone unusable.
+     */
+    private val DOMAIN_ONLY_KEYWORDS = setOf("manga", "manhwa", "manhua", "webtoon")
     @Volatile private var blockedKeywords = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var blockedApps = ConcurrentHashMap<String, AppConfig>()
     @Volatile private var whitelist = ConcurrentHashMap.newKeySet<String>()
@@ -293,6 +300,23 @@ class ContentMatcher {
         return false
     }
 
+    /**
+     * [text] with every whitelisted site's name blanked out, for the page-text
+     * keyword scan. A browser's home screen lists sites as bare names
+     * ("topmanhua", "mangaread"), and with a "manhua" and a "manga" keyword
+     * those two allowed tiles alone counted as two keywords and blocked it.
+     */
+    fun withoutWhitelistedNames(text: String): String {
+        var result = text
+        for (domain in whitelist) {
+            result = result.replace(domain, " ", ignoreCase = true)
+            // A bare label as short as "x" or "bbc" would blank ordinary words.
+            val label = domain.substringBefore('.')
+            if (label.length >= 5) result = result.replace(label, " ", ignoreCase = true)
+        }
+        return result
+    }
+
     private fun isDomainWhitelisted(domain: String): Boolean {
         if (domain.isEmpty()) return false
         val normalizedDomain = domain.removePrefix("www.")
@@ -513,7 +537,7 @@ class ContentMatcher {
         blockedKeywords.clear()
         keywords.forEach { k ->
             val normalized = k.trim().lowercase()
-            if (normalized.isNotEmpty() && !normalized.startsWith("#")) {
+            if (normalized.isNotEmpty() && !normalized.startsWith("#") && normalized !in DOMAIN_ONLY_KEYWORDS) {
                 blockedKeywords.add(normalized)
             }
         }
@@ -584,7 +608,7 @@ class ContentMatcher {
         val newSet = ConcurrentHashMap.newKeySet<String>()
         keywords.forEach { k ->
             val normalized = k.trim().lowercase()
-            if (normalized.isNotEmpty() && !normalized.startsWith("#")) {
+            if (normalized.isNotEmpty() && !normalized.startsWith("#") && normalized !in DOMAIN_ONLY_KEYWORDS) {
                 newSet.add(normalized)
             }
         }
@@ -1031,6 +1055,7 @@ class ContentMatcher {
      */
     fun loadPersistedData(context: Context) {
         loadSet(context, KEY_KEYWORDS, blockedKeywords)
+        blockedKeywords.removeAll(DOMAIN_ONLY_KEYWORDS)
         loadApps(context)
         loadSet(context, KEY_WHITELIST, whitelist)
 

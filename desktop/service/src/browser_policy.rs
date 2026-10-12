@@ -78,6 +78,7 @@ const BLOCKER_XPI_SIGNED: &str = env!("BLOCKER_XPI_SIGNED");
 const BLOCKER_XPI: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libreascent-blocker.xpi"));
 const BLOCKER_XPI_VERSION: &str = env!("BLOCKER_XPI_VERSION");
 const BLOCKER_XPI_HASH: &str = env!("BLOCKER_XPI_HASH");
+const DOMAIN_ONLY_KEYWORDS: [&str; 4] = ["manga", "manhwa", "manhua", "webtoon"];
 const BLOCKER_XPI_DIR: &str = r"C:\ProgramData\LibreAscent";
 const BLOCKER_XPI_PREFIX: &str = "libreascent-blocker-";
 
@@ -217,7 +218,15 @@ pub fn firefox_extension_lockdown_values(config: &DesktopConfig) -> Vec<PolicyVa
         "xpinstall.signatures.required": { "Value": false, "Status": "locked", "Type": "boolean" }
     });
 
-    let keywords = serde_json::json!(config.keywords).to_string();
+    // Words that name a kind of site, not explicit content: the DNS proxy
+    // blocks domains containing them, but a page or a search that mentions
+    // manga is no reason to block it.
+    let page_keywords: Vec<&String> = config
+        .keywords
+        .iter()
+        .filter(|k| !DOMAIN_ONLY_KEYWORDS.contains(&k.as_str()))
+        .collect();
+    let keywords = serde_json::json!(page_keywords).to_string();
     let excluded = serde_json::json!(config.excluded_domains).to_string();
 
     let mut values = vec![
@@ -666,7 +675,7 @@ mod tests {
     #[test]
     fn blocker_gets_keywords_and_excluded_domains_as_json_arrays() {
         let mut config = default_config();
-        config.keywords = vec!["onlyfans".to_string(), "nsfw".to_string()];
+        config.keywords = vec!["onlyfans".to_string(), "manga".to_string(), "nsfw".to_string()];
         config.excluded_domains = vec!["example.com".to_string()];
         let values = firefox_extension_lockdown_values(&config);
         let key = librewolf(r"\3rdparty\Extensions\blocker@libreascent.app");
@@ -674,7 +683,7 @@ mod tests {
         let keywords = find(&values, &key, "keywords");
         assert_eq!(keywords.kind, "REG_MULTI_SZ");
         let parsed: Vec<String> = serde_json::from_str(&keywords.data).unwrap();
-        assert_eq!(parsed, config.keywords);
+        assert_eq!(parsed, ["onlyfans", "nsfw"], "site-kind words stay at the DNS level");
 
         let excluded = find(&values, &key, "excludedDomains");
         assert_eq!(excluded.kind, "REG_MULTI_SZ");

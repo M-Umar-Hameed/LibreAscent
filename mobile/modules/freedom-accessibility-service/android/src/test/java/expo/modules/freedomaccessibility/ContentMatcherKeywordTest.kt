@@ -146,4 +146,28 @@ class ContentMatcherKeywordTest {
         assertTrue(matcher.findDistinctKeywords("Free hentai and nude galleries", 2) in setOf("hentai", "nude"))
         assertNull(matcher.findDistinctKeywords("Nothing to see here", 2))
     }
+
+    @Test
+    fun siteKindKeywordsNeverMatchPageText() {
+        // "manga" names a kind of site: the VPN blocks such domains, but an
+        // article, a search or a browser home screen that mentions manga is
+        // not explicit content. Firefox's home page was blocked by its own
+        // shortcut tiles for the user's allowed manga sites.
+        val matcher = ContentMatcher()
+        matcher.setKeywordsForTest(listOf("manga", "manhwa", "manhua", "webtoon", "hentai"))
+
+        assertNull(matcher.findDistinctKeywords("Shortcuts topmanhua mangaread manga news manhwa webtoon", 2))
+        assertNull(matcher.findMatchingKeywordDirectly("best manga of 2026"))
+        assertEquals("hentai", matcher.findMatchingKeywordDirectly("hentai gallery"))
+    }
+
+    @Test
+    fun allowedSiteNamesAreBlankedBeforeTheTextScan() {
+        val matcher = ContentMatcher()
+        matcher.setWhitelist(listOf("topmanhua.fan", "mangaread.org", "x.com"))
+
+        val text = matcher.withoutWhitelistedNames("Tiles: TopManhua mangaread www.topmanhua.fan news x marks x.com")
+        assertTrue("topmanhua" !in text.lowercase() && "mangaread" !in text.lowercase())
+        assertTrue("news" in text && "x marks" in text, "a short bare label is left alone")
+    }
 }

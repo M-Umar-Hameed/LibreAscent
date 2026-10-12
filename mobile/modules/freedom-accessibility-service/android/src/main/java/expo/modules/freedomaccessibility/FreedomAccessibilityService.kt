@@ -1030,11 +1030,11 @@ class FreedomAccessibilityService : AccessibilityService() {
     ) {
         // One walk over visible text: Compose screens (X) expose no text to
         // findAccessibilityNodeInfosByText, so a per-keyword search misses them.
-        val text = visibleText(
+        val text = contentMatcher.withoutWhitelistedNames(visibleText(
             rootNode,
             android.os.SystemClock.uptimeMillis() + APP_SCAN_BUDGET_MS,
             ContentSettingGuard.RULES[packageName]
-        )
+        ))
         if (text.isBlank()) return
         // NSFW labels count only in the monitored social apps and on their
         // sites. Any other page, an app's own web view included (Drive shows

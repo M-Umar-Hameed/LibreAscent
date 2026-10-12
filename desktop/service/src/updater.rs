@@ -39,6 +39,7 @@ pub async fn update_sources(config_path: &Path) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to load config: {}", e))?;
     let blocklist_path = config_path.parent().unwrap().join("blocklist.txt");
     let mut all_domains = Vec::new();
+    let mut allowed = std::collections::HashSet::new();
     let mut failed = Vec::new();
 
     for source in &config.sources {
@@ -48,6 +49,13 @@ pub async fn update_sources(config_path: &Path) -> Result<()> {
 
         println!("Fetching {}...", source.name);
         match fetch_source(&source.url).await {
+            // An "allow" list takes its domains back out of the others: the
+            // proxy lists also carry VPN providers, which stay reachable.
+            Ok(content) if source.format == "allow" => {
+                let domains = parse_domain_list(&content);
+                println!("  Allowing {} domains", domains.len());
+                allowed.extend(domains);
+            }
             Ok(content) => {
                 let domains = parse_domain_list(&content);
                 println!("  Found {} domains", domains.len());
@@ -74,7 +82,8 @@ pub async fn update_sources(config_path: &Path) -> Result<()> {
         }
     }
 
-    // Merge with manually included domains and remove duplicates
+    // Manually included domains are added after, so a user's own block wins.
+    all_domains.retain(|domain| !allowed.contains(domain));
     all_domains.extend(config.included_domains.clone());
     all_domains.sort();
     all_domains.dedup();
@@ -150,6 +159,52 @@ mod tests {
         let list = std::fs::read_to_string(dir.join("blocklist.txt")).unwrap();
         assert!(list.lines().any(|l| l == "kept.example"));
         assert!(list.lines().any(|l| l == "also-kept.example"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_allow_source_takes_its_domains_out_but_not_manual_blocks() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = [0_u8; 1024];
+                let read = stream.read(&mut request).await.unwrap_or(0);
+                let body = if String::from_utf8_lossy(&request[..read]).contains("/allow") {
+                    "nordvpn.com\nmanual.example\n"
+                } else {
+                    "nordvpn.com\ncroxyproxy.com\n"
+                };
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!("la-updater-allow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("config.json");
+        let mut config = libreascent_shared::config::default_config();
+        config.sources = ["block", "allow"]
+            .map(|kind| libreascent_shared::config::BlocklistSource {
+                id: kind.into(),
+                name: kind.into(),
+                url: format!("http://127.0.0.1:{port}/{kind}"),
+                format: if kind == "allow" { "allow".into() } else { "domains".into() },
+                enabled: true,
+            })
+            .to_vec();
+        config.included_domains = vec!["manual.example".into()];
+        libreascent_shared::config::save(&config_path, &config).unwrap();
+
+        update_sources(&config_path).await.unwrap();
+
+        let list = std::fs::read_to_string(dir.join("blocklist.txt")).unwrap();
+        let lines: Vec<&str> = list.lines().collect();
+        assert!(lines.contains(&"croxyproxy.com"));
+        assert!(!lines.contains(&"nordvpn.com"), "allow list must take it out");
+        assert!(lines.contains(&"manual.example"), "a manual block beats the allow list");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

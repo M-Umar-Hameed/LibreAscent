@@ -37,7 +37,9 @@ pub async fn update_if_stale(config_path: &Path) -> bool {
 pub async fn update_sources(config_path: &Path) -> Result<()> {
     let config = crate::config_loader::load_or_create(config_path)
         .map_err(|e| anyhow::anyhow!("failed to load config: {}", e))?;
+    let blocklist_path = config_path.parent().unwrap().join("blocklist.txt");
     let mut all_domains = Vec::new();
+    let mut failed = Vec::new();
 
     for source in &config.sources {
         if !source.enabled {
@@ -45,19 +47,31 @@ pub async fn update_sources(config_path: &Path) -> Result<()> {
         }
 
         println!("Fetching {}...", source.name);
-        let response = reqwest::get(&source.url)
-            .await
-            .with_context(|| format!("failed to fetch source {}", source.name))?;
-        
-        if !response.status().is_success() {
-            println!("Warning: Failed to fetch {}: {}", source.name, response.status());
-            continue;
+        match fetch_source(&source.url).await {
+            Ok(content) => {
+                let domains = parse_domain_list(&content);
+                println!("  Found {} domains", domains.len());
+                all_domains.extend(domains);
+            }
+            Err(e) => {
+                println!("Warning: failed to fetch {}: {e:#}", source.name);
+                failed.push(source.name.clone());
+            }
         }
+    }
 
-        let content = response.text().await.context("failed to read response text")?;
-        let domains = parse_domain_list(&content);
-        println!("  Found {} domains", domains.len());
-        all_domains.extend(domains);
+    // One unreachable source used to abort the whole update, so a newly added
+    // list never landed. Dropping its entries instead would unblock everything
+    // only it covered, so the previous list is kept alongside.
+    // ponytail: entries a failing source has since retired stay until it fetches again.
+    if !failed.is_empty() {
+        crate::dns_manager::log_tamper_event(&format!(
+            "Blocklist update: could not fetch {}; kept their previous entries.",
+            failed.join(", ")
+        ));
+        if let Ok(previous) = fs::read_to_string(&blocklist_path) {
+            all_domains.extend(previous.lines().map(str::to_string));
+        }
     }
 
     // Merge with manually included domains and remove duplicates
@@ -67,11 +81,25 @@ pub async fn update_sources(config_path: &Path) -> Result<()> {
 
     println!("Total unique domains: {}", all_domains.len());
 
-    let blocklist_path = config_path.parent().unwrap().join("blocklist.txt");
     fs::write(&blocklist_path, all_domains.join("\n"))
         .with_context(|| format!("failed to write blocklist to {}", blocklist_path.display()))?;
 
     Ok(())
+}
+
+/// System DNS is the proxy, which can block a list's own host (the "nsfw"
+/// keyword matches nsfw.oisd.nl), and Quad9 does not resolve every list host.
+/// So the host is looked up through the filtered upstreams directly.
+async fn fetch_source(url: &str) -> Result<String> {
+    let parsed = reqwest::Url::parse(url).context("invalid source URL")?;
+    let mut client = reqwest::Client::builder();
+    if let (Some(host), Some(port)) = (parsed.host_str(), parsed.port_or_known_default()) {
+        if let Some(ip) = crate::dns::resolve_bypassing_blocklist(host).await {
+            client = client.resolve(host, std::net::SocketAddr::new(ip, port));
+        }
+    }
+    let response = client.build()?.get(parsed).send().await?.error_for_status()?;
+    Ok(response.text().await?)
 }
 
 #[cfg(test)]
@@ -98,5 +126,39 @@ mod tests {
             "past MAX_AGE it is refetched"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_source_keeps_the_previous_entries() {
+        let dir = std::env::temp_dir().join(format!("la-updater-dead-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("config.json");
+        let mut config = libreascent_shared::config::default_config();
+        config.sources.iter_mut().for_each(|s| s.enabled = false);
+        config.sources.push(libreascent_shared::config::BlocklistSource {
+            id: "dead".into(),
+            name: "Dead".into(),
+            url: "http://127.0.0.1:1/list".into(),
+            format: "domains".into(),
+            enabled: true,
+        });
+        libreascent_shared::config::save(&config_path, &config).unwrap();
+        std::fs::write(dir.join("blocklist.txt"), "kept.example\nalso-kept.example").unwrap();
+
+        update_sources(&config_path).await.expect("a dead source is not fatal");
+
+        let list = std::fs::read_to_string(dir.join("blocklist.txt")).unwrap();
+        assert!(list.lines().any(|l| l == "kept.example"));
+        assert!(list.lines().any(|l| l == "also-kept.example"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Live: Quad9 does not resolve this host and the "nsfw" keyword blocks it
+    // at the proxy, so only the direct lookup can reach the list. Run with:
+    //   cargo test -p libreascent-service list_hosts_resolve -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn list_hosts_resolve_past_the_blocklist() {
+        assert!(crate::dns::resolve_bypassing_blocklist("nsfw.oisd.nl").await.is_some());
     }
 }

@@ -395,6 +395,25 @@ pub async fn upstream_probe() -> bool {
     }
 }
 
+/// The first address any filtered tier gives for `host`, skipping the
+/// blocklist and moving on when a tier says it does not exist. For fetching
+/// the blocklists themselves, never for client queries.
+pub async fn resolve_bypassing_blocklist(host: &str) -> Option<IpAddr> {
+    let name = Name::from_ascii(format!("{host}.")).ok()?;
+    let upstream = build_upstream().ok()?;
+    for tier in &upstream.tiers {
+        if let Ok(lookup) = tier.resolver.lookup(name.clone(), RecordType::A).await {
+            if let Some(ip) = lookup.answers().iter().find_map(|record| match &record.data {
+                hickory_proto::rr::RData::A(a) => Some(IpAddr::V4(a.0)),
+                _ => None,
+            }) {
+                return Some(ip);
+            }
+        }
+    }
+    None
+}
+
 pub fn router_fallback_wanted() -> bool {
     UPSTREAM
         .get()

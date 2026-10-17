@@ -13,7 +13,7 @@ const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 
 const KEYSET_SQL =
-  "SELECT DISTINCT domain FROM cached_domains WHERE category_id = ? AND domain > ? ORDER BY domain LIMIT ?";
+  "SELECT DISTINCT domain FROM cached_domains WHERE category_id = ? AND domain > ? AND domain NOT IN (SELECT domain FROM cached_domains WHERE category_id = 'allow') ORDER BY domain LIMIT ?";
 const OFFSET_SQL =
   "SELECT DISTINCT domain FROM cached_domains WHERE category_id = ? LIMIT ? OFFSET ?";
 
@@ -49,8 +49,11 @@ const seed = (sourceId, categoryId, domains) => {
 const gen = (n) =>
   Array.from({ length: n }, (_, i) => `d${String((i * 7) % n).padStart(4, "0")}.example`);
 
+// allow: domains listed here are taken out of every other category.
+seed("src-allow", "allow", ["x-allowed.example"]);
 // exact: 20 distinct domains, an exact multiple of PAGE below.
 seed("src-a", "exact", gen(20));
+seed("src-b", "exact", ["x-allowed.example"]);
 // ragged: 23 distinct domains, not a multiple of PAGE.
 seed("src-a", "ragged", gen(23));
 // dupes: two sources contributing an overlapping set to one category.
@@ -84,7 +87,7 @@ function readKeyset(categoryId) {
 function readOffset(categoryId) {
   const total = db
     .prepare(
-      "SELECT COUNT(DISTINCT domain) as c FROM cached_domains WHERE category_id = ?",
+      "SELECT COUNT(DISTINCT domain) as c FROM cached_domains WHERE category_id = ? AND domain NOT IN (SELECT domain FROM cached_domains WHERE category_id = 'allow')",
     )
     .get(categoryId).c;
   const all = [];
@@ -136,6 +139,9 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(readKeyset("empty").all.length, 0, "empty category");
 assert.strictEqual(readKeyset("empty").pages.length, 0, "empty terminates at once");
+
+// The allow list removes its domains from the category it is read against.
+assert.ok(!readKeyset("exact").all.includes("x-allowed.example"), "allowed domain gone");
 
 // DISTINCT must collapse the two sources' overlap: 22 rows, 14 unique domains.
 assert.strictEqual(

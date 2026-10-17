@@ -16,6 +16,7 @@ import * as DeviceAdmin from "@/modules/freedom-device-admin/src";
 import * as FreedomAccessibility from "@/modules/freedom-accessibility-service/src";
 import * as FreedomVpn from "@/modules/freedom-vpn-service/src";
 import { shouldFetchOnLaunch } from "./blocklistFirstRun";
+import type { BlocklistSource } from "@/types/blocking";
 
 const SUSPENDED_PKGS_KEY = "libreascent.suspendedPkgs";
 /** Per-category fingerprint of what native was last given; see categoryFingerprint. */
@@ -500,7 +501,7 @@ export const BlocklistService = {
    */
   fetchRemoteList: async (
     url: string,
-    _format: "domains" | "hosts" | "keywords",
+    _format: BlocklistSource["format"],
   ): Promise<string[]> => {
     try {
       // Handle comma-separated multi-URL strings for multi-language sources
@@ -617,7 +618,7 @@ export const BlocklistService = {
   fetchSourceWithCache: async (
     sourceId: string,
     url: string,
-    format: "domains" | "hosts" | "keywords",
+    format: BlocklistSource["format"],
     categoryId: string,
   ): Promise<{
     changed: boolean;
@@ -1009,7 +1010,7 @@ export const BlocklistService = {
             saveFailed = true;
             throw e;
           }
-          dirtyCategories.add(categoryId);
+          dirtyCategories.add(source.format === "allow" ? "adult" : categoryId);
           // eslint-disable-next-line no-console
           console.log(
             `[BlocklistService] ${source.name}: ${result.list.length} domains cached`,

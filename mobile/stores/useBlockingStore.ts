@@ -116,6 +116,22 @@ export const DEFAULT_SOURCES: BlocklistSource[] = [
     enabled: true,
     category: "ads",
   },
+  {
+    id: "ut1-redirector",
+    name: "UT1 redirector (Web proxies)",
+    url: "https://raw.githubusercontent.com/olbat/ut1-blacklists/master/blacklists/redirector/domains",
+    format: "domains",
+    enabled: true,
+    category: "adult",
+  },
+  {
+    id: "ut1-vpn-allow",
+    name: "UT1 VPN providers (allowed)",
+    url: "https://raw.githubusercontent.com/olbat/ut1-blacklists/master/blacklists/vpn/domains",
+    format: "allow",
+    enabled: true,
+    category: "allow",
+  },
 ];
 
 export const ADS_CATEGORY: BlockingCategory = {

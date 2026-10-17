@@ -11,8 +11,8 @@ export interface BlocklistSource {
   url: string;
   name: string;
   enabled: boolean;
-  format: "domains" | "hosts" | "keywords";
-  category?: "adult" | "hentai" | "ads";
+  format: "domains" | "hosts" | "keywords" | "allow";
+  category?: "adult" | "hentai" | "ads" | "allow";
   lastFetchedAt?: string;
 }
 

@@ -281,7 +281,7 @@ export function readCachedDomainsBatch(
   afterDomain: string,
 ): string[] {
   const rows = db.getAllSync<{ domain: string }>(
-    "SELECT DISTINCT domain FROM cached_domains WHERE category_id = ? AND domain > ? ORDER BY domain LIMIT ?",
+    "SELECT DISTINCT domain FROM cached_domains WHERE category_id = ? AND domain > ? AND domain NOT IN (SELECT domain FROM cached_domains WHERE category_id = 'allow') ORDER BY domain LIMIT ?",
     categoryId,
     afterDomain,
     limit,
@@ -296,7 +296,7 @@ export function getCachedDomainCount(categoryId: string): number {
   const known = distinctCounts.get(categoryId);
   if (known !== undefined) return known;
   const row = db.getFirstSync<{ c: number }>(
-    "SELECT COUNT(DISTINCT domain) as c FROM cached_domains WHERE category_id = ?",
+    "SELECT COUNT(DISTINCT domain) as c FROM cached_domains WHERE category_id = ? AND (category_id = 'allow' OR domain NOT IN (SELECT domain FROM cached_domains WHERE category_id = 'allow'))",
     categoryId,
   );
   const count = row?.c ?? 0;

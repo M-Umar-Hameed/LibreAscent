@@ -82,6 +82,12 @@ class FreedomVpnService : VpnService() {
         private const val UPSTREAM_SECONDARY = "1.0.0.3"
         private const val UPSTREAM_PRIMARY_V6 = "2606:4700:4700::1113"
         private const val UPSTREAM_SECONDARY_V6 = "2606:4700:4700::1003"
+        // Allowed domains skip the family filter, which sinkholes manga sites
+        // the user has explicitly allowed.
+        private const val PLAIN_UPSTREAM_PRIMARY = "1.1.1.1"
+        private const val PLAIN_UPSTREAM_SECONDARY = "1.0.0.1"
+        private const val PLAIN_UPSTREAM_PRIMARY_V6 = "2606:4700:4700::1111"
+        private const val PLAIN_UPSTREAM_SECONDARY_V6 = "2606:4700:4700::1001"
         private const val TUN_ADDRESS_V6 = "fd00:1:1::2"
         // Kept short so a dead upstream frees its worker quickly instead of
         // holding it (and its socket) for seconds.
@@ -838,7 +844,12 @@ class FreedomVpnService : VpnService() {
             dnsExecutor?.execute {
                 val pinned = target != null && isSafeSearchEnabled(this) &&
                     answerSafeSearch(target, dnsPayload, dnsLength, srcIp, dstIp, srcPort)
-                if (!pinned) forwardDnsQuery(dnsPayload, dnsLength, srcIp, dstIp, srcPort)
+                if (!pinned) {
+                    forwardDnsQuery(
+                        dnsPayload, dnsLength, srcIp, dstIp, srcPort,
+                        blocklist.isWhitelisted(result.domain)
+                    )
+                }
             }
         }
     }
@@ -870,9 +881,10 @@ class FreedomVpnService : VpnService() {
         dnsLength: Int,
         srcIp: ByteArray,
         dstIp: ByteArray,
-        srcPort: Int
+        srcPort: Int,
+        plainUpstream: Boolean = false
     ) {
-        val dnsResponse = queryUpstream(dnsPayload, dnsLength, srcIp.size == 16) ?: return
+        val dnsResponse = queryUpstream(dnsPayload, dnsLength, srcIp.size == 16, plainUpstream) ?: return
         writeDnsResponse(dnsResponse, srcIp, dstIp, srcPort)
     }
 
@@ -911,14 +923,25 @@ class FreedomVpnService : VpnService() {
      * Send a DNS query upstream from a protected socket and return the raw
      * response, or null when every upstream failed.
      */
-    private fun queryUpstream(dnsPayload: ByteArray, dnsLength: Int, preferIpv6: Boolean): ByteArray? {
+    private fun queryUpstream(
+        dnsPayload: ByteArray,
+        dnsLength: Int,
+        preferIpv6: Boolean,
+        plainUpstream: Boolean = false
+    ): ByteArray? {
         // An IPv6 query prefers the IPv6 upstreams but falls back to the IPv4
         // ones: the tunnel advertises IPv6 resolvers even on a network with no
         // IPv6 route, where those sends fail with ENETUNREACH. The DNS payload
         // is family-agnostic and buildResponseIpPacket rebuilds the answer in
         // the client's family from the captured srcIp, so a v6 client can be
         // answered from a v4 resolver.
-        val dnsServers = if (preferIpv6) {
+        val dnsServers = if (plainUpstream) {
+            if (preferIpv6) {
+                listOf(PLAIN_UPSTREAM_PRIMARY_V6, PLAIN_UPSTREAM_SECONDARY_V6, PLAIN_UPSTREAM_PRIMARY, PLAIN_UPSTREAM_SECONDARY)
+            } else {
+                listOf(PLAIN_UPSTREAM_PRIMARY, PLAIN_UPSTREAM_SECONDARY)
+            }
+        } else if (preferIpv6) {
             listOf(UPSTREAM_PRIMARY_V6, UPSTREAM_SECONDARY_V6, UPSTREAM_PRIMARY, UPSTREAM_SECONDARY)
         } else {
             listOf(UPSTREAM_PRIMARY, UPSTREAM_SECONDARY)

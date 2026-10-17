@@ -136,6 +136,12 @@ class DomainBlocklist {
         return false
     }
 
+    /** True when the domain, or a parent of it, is on the user's allowed list. */
+    fun isWhitelisted(domain: String): Boolean {
+        val normalized = normalize(domain)
+        return normalized.isNotEmpty() && matchesList(parentChain(normalized), whitelist)
+    }
+
     /**
      * The domain followed by each of its parent domains.
      * Example: "sub.example.com" → ["sub.example.com", "example.com", "com"]

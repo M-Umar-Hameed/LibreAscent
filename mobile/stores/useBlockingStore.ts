@@ -1,3 +1,4 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { DEFAULT_ADULT_KEYWORDS } from "@/data/keywords/defaultAdultKeywords";
 import { sqliteStorage } from "@/db/database";
 import { mergeDefaultKeywords } from "@/services/blocklistFirstRun";
@@ -92,6 +93,8 @@ export interface BlockingState {
   // Mass actions
   importSettings: (data: Partial<BlockingState>) => void;
 }
+
+const ALLOW_SWAP_KEY = "allow-swap-2026-10-17f";
 
 export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
@@ -427,6 +430,23 @@ export const useBlockingStore = create<BlockingState>()(
               categories: [...state.categories, ADS_CATEGORY],
             });
           }
+
+          void AsyncStorage.getItem(ALLOW_SWAP_KEY).then((done) => {
+            if (done) return;
+            const next = state.excludedUrls.map((u) =>
+              u.url === "topmanhua.fan" || u.url === "manhwato.com"
+                ? { ...u, enabled: false }
+                : u,
+            );
+            for (const url of ["manhwaus.net", "nelomanga.net"]) {
+              const at = next.findIndex((u) => u.url === url);
+              if (at === -1) next.push({ url, enabled: true });
+              else next[at] = { url, enabled: true };
+            }
+            state.importSettings({ excludedUrls: next });
+            state.setKeywords(state.keywords.filter((k) => k !== "manganelo"));
+            void AsyncStorage.setItem(ALLOW_SWAP_KEY, "1");
+          });
 
           // Migrate old string[] URLs to BlockedUrl[] objects
           if (

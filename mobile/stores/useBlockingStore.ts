@@ -94,7 +94,7 @@ export interface BlockingState {
   importSettings: (data: Partial<BlockingState>) => void;
 }
 
-const ALLOW_SWAP_KEY = "allow-swap-2026-10-17f";
+const ALLOW_SWAP_KEY = "allow-swap-2026-10-19a";
 
 export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
@@ -433,17 +433,19 @@ export const useBlockingStore = create<BlockingState>()(
 
           void AsyncStorage.getItem(ALLOW_SWAP_KEY).then((done) => {
             if (done) return;
+            const banned = ["manhwaus.net", "nelomanga.net"];
             const next = state.excludedUrls.map((u) =>
-              u.url === "topmanhua.fan" || u.url === "manhwato.com"
+              u.url === "topmanhua.fan" ||
+              u.url === "manhwato.com" ||
+              banned.includes(u.url)
                 ? { ...u, enabled: false }
                 : u,
             );
-            for (const url of ["manhwaus.net", "nelomanga.net"]) {
-              const at = next.findIndex((u) => u.url === url);
-              if (at === -1) next.push({ url, enabled: true });
-              else next[at] = { url, enabled: true };
-            }
-            state.importSettings({ excludedUrls: next });
+            const blocked = state.includedUrls.filter(
+              (u) => !banned.includes(u.url),
+            );
+            for (const url of banned) blocked.push({ url, enabled: true });
+            state.importSettings({ excludedUrls: next, includedUrls: blocked });
             state.setKeywords(state.keywords.filter((k) => k !== "manganelo"));
             void AsyncStorage.setItem(ALLOW_SWAP_KEY, "1");
           });

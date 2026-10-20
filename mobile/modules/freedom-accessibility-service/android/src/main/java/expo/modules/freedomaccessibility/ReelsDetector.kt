@@ -448,7 +448,10 @@ class ReelsDetector {
                 // A reel opened from a profile lives at /<user>/reel/<id>.
                 on("instagram.com") && segments.take(2).any { it == "reel" || it == "reels" } ->
                     listOf("com.instagram.android")
-                on("facebook.com") && (firstSegment == "reel" || firstSegment == "reels") ->
+                // A reel opened from a page or profile lives at /<page>/reel/<id>,
+                // and a shared one at /share/r/<id>.
+                on("facebook.com") && (segments.take(2).any { it == "reel" || it == "reels" } ||
+                    (firstSegment == "share" && segments.getOrNull(1) == "r")) ->
                     listOf("com.facebook.katana")
                 host == "story.snapchat.com" ||
                     (on("snapchat.com") && (firstSegment == "spotlight" || firstSegment == "discover")) ->

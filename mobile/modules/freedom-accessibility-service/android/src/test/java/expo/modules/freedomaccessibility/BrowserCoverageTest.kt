@@ -23,6 +23,9 @@ class BrowserCoverageTest {
 
         assertEquals(listOf("com.facebook.katana"), ReelsDetector.shortVideoPackages("m.facebook.com/reel/123"))
         assertEquals(listOf("com.facebook.katana"), ReelsDetector.shortVideoPackages("www.facebook.com/reels/"))
+        assertEquals(listOf("com.facebook.katana"), ReelsDetector.shortVideoPackages("m.facebook.com/sportsyaariofficial/reel/123"))
+        assertEquals(listOf("com.facebook.katana"), ReelsDetector.shortVideoPackages("m.facebook.com/share/r/AbC/"))
+        assertEquals(emptyList<String>(), ReelsDetector.shortVideoPackages("m.facebook.com/sportsyaariofficial/posts/123"))
         val snapchat = listOf("com.snapchat.android")
         assertEquals(snapchat, ReelsDetector.shortVideoPackages("www.snapchat.com/spotlight/abc"))
         assertEquals(snapchat, ReelsDetector.shortVideoPackages("snapchat.com/discover"))

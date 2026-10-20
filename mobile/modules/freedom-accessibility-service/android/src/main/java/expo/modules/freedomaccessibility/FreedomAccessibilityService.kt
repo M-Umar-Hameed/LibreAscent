@@ -55,6 +55,9 @@ class FreedomAccessibilityService : AccessibilityService() {
     // Written on the scan thread by applyBlock, on main by the reels and NSFW
     // overlay posts and the overlay buttons; read on main.
     @Volatile private var reelsOverlayPackage: String? = null
+    // Set while the sticky overlay was raised by an NSFW scan, so a reels scan
+    // that was already in flight cannot dismiss it as "left reels".
+    @Volatile private var nsfwOverlayPackage: String? = null
     private val handler = Handler(Looper.getMainLooper())
 
     // Browser URL extraction, reels detection and the NSFW keyword scan all
@@ -995,7 +998,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 Log.i(TAG, "Reels detected in ${result.appName}")
                 reelsOverlayPackage = packageName
                 showInstantOverlay(packageName, "${result.appName} Reels blocked", requireForeground = true)
-            } else {
+            } else if (nsfwOverlayPackage != packageName) {
                 Log.i(TAG, "User left reels in ${result.appName}")
                 reelsOverlayPackage = null
                 hideInstantOverlay()
@@ -1057,6 +1060,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             if (foregroundAppPackage != packageName) return@post
             lastNsfwBlockTime = now
             reelsOverlayPackage = packageName
+            nsfwOverlayPackage = packageName
             showInstantOverlay(packageName, "Explicit content blocked", requireForeground = true)
         }
     }
@@ -1233,7 +1237,11 @@ class FreedomAccessibilityService : AccessibilityService() {
                 val container = object : FrameLayout(this@FreedomAccessibilityService) {
                     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
                         if (event.action == android.view.KeyEvent.ACTION_DOWN && event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
-                            if (reelsDetector.isReelsApp(targetPackage)) {
+                            if (nsfwOverlayPackage == targetPackage) {
+                                reelsOverlayPackage = null
+                                hideInstantOverlay()
+                                performGlobalAction(GLOBAL_ACTION_HOME)
+                            } else if (reelsDetector.isReelsApp(targetPackage)) {
                                 reelsOverlayPackage = null
                                 hideInstantOverlay()
                                 // Wait for overlay to detach, then press back to return to App's Feed/Camera
@@ -1423,6 +1431,12 @@ class FreedomAccessibilityService : AccessibilityService() {
                              } else {
                                  Log.w(TAG, "Launch intent for $targetPackage is null, unable to reopen.")
                              }
+                         } else if (nsfwOverlayPackage == targetPackage) {
+                             // NSFW block: leave the app, so the page cannot be reopened with Back
+                             reelsOverlayPackage = null
+                             hideInstantOverlay()
+                             performGlobalAction(GLOBAL_ACTION_HOME)
+                             return@setOnClickListener
                          } else if (reelsDetector.isReelsApp(targetPackage)) {
                              // Reels block: exit reels trap by pressing Back, placing user on the app's Feed/Camera
                              reelsOverlayPackage = null
@@ -1593,6 +1607,7 @@ class FreedomAccessibilityService : AccessibilityService() {
             // Drop this overlay's queued auto-dismiss. Left pending, it would
             // fire during a later overlay and cut that one short.
             handler.removeCallbacksAndMessages(OVERLAY_DISMISS_TOKEN)
+            nsfwOverlayPackage = null
             if (!isInstantOverlayShowing) return@post
             try {
                 instantOverlay?.let { windowManager?.removeView(it) }

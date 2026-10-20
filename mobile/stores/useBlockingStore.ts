@@ -94,7 +94,7 @@ export interface BlockingState {
   importSettings: (data: Partial<BlockingState>) => void;
 }
 
-const ALLOW_SWAP_KEY = "allow-swap-2026-10-19a";
+const ALLOW_SWAP_KEY = "allow-swap-2026-10-20b";
 
 export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
@@ -433,7 +433,7 @@ export const useBlockingStore = create<BlockingState>()(
 
           void AsyncStorage.getItem(ALLOW_SWAP_KEY).then((done) => {
             if (done) return;
-            const banned = ["manhwaus.net", "nelomanga.net"];
+            const banned = ["manhwaus.net", "nelomanga.net", "mangapill.com"];
             const next = state.excludedUrls.map((u) =>
               u.url === "topmanhua.fan" ||
               u.url === "manhwato.com" ||
@@ -441,6 +441,9 @@ export const useBlockingStore = create<BlockingState>()(
                 ? { ...u, enabled: false }
                 : u,
             );
+            if (!next.some((u) => u.url === "mgeko.cc")) {
+              next.push({ url: "mgeko.cc", enabled: true });
+            }
             const blocked = state.includedUrls.filter(
               (u) => !banned.includes(u.url),
             );

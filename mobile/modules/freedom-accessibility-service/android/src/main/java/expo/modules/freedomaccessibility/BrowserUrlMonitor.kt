@@ -715,8 +715,11 @@ class BrowserUrlMonitor {
     private fun scanNodeForUrl(node: AccessibilityNodeInfo, depth: Int, maxDepth: Int): String? {
         if (depth > maxDepth || overBudget()) return null
 
+        // Only the toolbar's own nodes: a page link in the web content can carry a
+        // URL-like description too, and it can come before the toolbar in tree order.
+        val id = node.viewIdResourceName
         val desc = node.contentDescription?.toString()
-        if (desc != null) {
+        if (desc != null && id != null && TOOLBAR_ID_MARKERS.any { id.contains(it, ignoreCase = true) }) {
             val extracted = extractUrlFromDescription(desc)
             if (extracted != null) return extracted
         }
@@ -948,6 +951,8 @@ class BrowserUrlMonitor {
             // An empty bar reads as the hint alone, whose first word is not a URL.
             return if (token != null && token.length >= 3 && token.contains('.')) token else null
         }
+
+        private val TOOLBAR_ID_MARKERS = listOf("ADDRESSBAR", "url_bar", "url_view", "toolbar")
 
         // Firefox has changed URL bar IDs across versions
         private val FIREFOX_URL_BAR_FALLBACKS = listOf(

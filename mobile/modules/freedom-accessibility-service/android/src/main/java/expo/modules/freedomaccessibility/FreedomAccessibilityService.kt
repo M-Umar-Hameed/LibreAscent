@@ -479,6 +479,17 @@ class FreedomAccessibilityService : AccessibilityService() {
             return
         }
 
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            settingsProtector.isHardcoreEnabled() && browserMonitor.isBrowser(packageName)) {
+            rootInActiveWindow?.let { root ->
+                try {
+                    settingsProtector.checkBrowserExtensionScreen(this, root)
+                } finally {
+                    root.recycle()
+                }
+            }
+        }
+
         val isBlockedApp = contentMatcher.getAppConfig(packageName) != null || ExplicitApps.matches(packageName)
         val isSettingsApp = settingsProtector.isHardcoreEnabled() && isSettingsPackage(packageName)
 

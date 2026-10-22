@@ -43,6 +43,10 @@ class SettingsProtector {
             "remove access"
         )
 
+        // Firefox's add-ons screens name the extension beside its Remove and Disable
+        // controls; the extension is how Firefox gets blocked, so it must stay.
+        private const val BROWSER_EXTENSION_NAME = "libreascent mobile blocker"
+
         private val DEVICE_ADMIN_TRIGGERS = listOf(
             "deactivate this device admin app",
             "deactivate this device admin",
@@ -124,6 +128,14 @@ class SettingsProtector {
         }
 
         return false
+    }
+
+    fun checkBrowserExtensionScreen(service: AccessibilityService, rootNode: AccessibilityNodeInfo?) {
+        if (!isHardcoreModeEnabled || rootNode == null) return
+        if (containsAny(collectAllText(rootNode), listOf(BROWSER_EXTENSION_NAME))) {
+            Log.w(TAG, "Protection: browser extension screen for Freedom! Navigating back.")
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        }
     }
 
     fun checkSettingsScreen(service: AccessibilityService, packageName: String, rootNode: AccessibilityNodeInfo?) {

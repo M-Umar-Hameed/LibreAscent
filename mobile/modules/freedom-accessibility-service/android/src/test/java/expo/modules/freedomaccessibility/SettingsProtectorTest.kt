@@ -14,6 +14,18 @@ class SettingsProtectorTest {
     }
 
     @Test
+    fun advancedProtectionScreenIsBlockedButOtherGoogleScreensAreNot() {
+        assertTrue(
+            SettingsProtector.isAdvancedProtectionScreen(
+                "com.google.android.gms",
+                ".advancedprotection.ui.advancedprotectionsettingsactivity"
+            )
+        )
+        assertFalse(SettingsProtector.isAdvancedProtectionScreen("com.google.android.gms", ".auth.uiflows.consent.consentactivity"))
+        assertFalse(SettingsProtector.isAdvancedProtectionScreen("com.example.app", ".advancedprotectionactivity"))
+    }
+
+    @Test
     fun accessibilityPageForLibreAscentIsBlockedWhenTurnOffIsVisible() {
         val protector = SettingsProtector()
         val texts = listOf("Accessibility", "LibreAscent", "Turn off LibreAscent")

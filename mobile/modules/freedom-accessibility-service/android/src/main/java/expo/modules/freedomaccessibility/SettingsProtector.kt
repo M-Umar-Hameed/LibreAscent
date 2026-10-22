@@ -67,6 +67,14 @@ class SettingsProtector {
         private val SETTINGS_PKGS = listOf(
             "settings", "manageapp", "applications", "com.google.android.settings"
         )
+
+        /**
+         * Android's Advanced Protection screen lives in Google Play Services, not
+         * the Settings app, and turning it on shuts LibreAscent down. [className]
+         * is lowercased.
+         */
+        internal fun isAdvancedProtectionScreen(packageName: String, className: String): Boolean =
+            packageName.startsWith("com.google.android.") && className.contains("advancedprotection")
     }
 
     fun updateConfig(enabled: Boolean, packageName: String) {

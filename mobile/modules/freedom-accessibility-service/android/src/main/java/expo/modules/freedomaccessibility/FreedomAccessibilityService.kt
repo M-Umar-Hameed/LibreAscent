@@ -471,6 +471,14 @@ class FreedomAccessibilityService : AccessibilityService() {
             Log.d(TAG, "WINDOW STATE CHANGED | Pkg: $packageName | Class: $classNameStr")
         }
 
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            settingsProtector.isHardcoreEnabled() &&
+            SettingsProtector.isAdvancedProtectionScreen(packageName, classNameStr)) {
+            Log.w(TAG, "Protection: Advanced Protection screen. Navigating back.")
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            return
+        }
+
         val isBlockedApp = contentMatcher.getAppConfig(packageName) != null || ExplicitApps.matches(packageName)
         val isSettingsApp = settingsProtector.isHardcoreEnabled() && isSettingsPackage(packageName)
 

@@ -14,6 +14,22 @@ class SettingsProtectorTest {
     }
 
     @Test
+    fun fullDeviceAccessCardForLibreAscentIsBlockedButOtherAppsAreNot() {
+        val protector = SettingsProtector()
+
+        assertTrue(
+            protector.shouldBlockSettingsTextsForTest(
+                listOf("Review app with full device access", "LibreAscent Content Protection", "Remove access")
+            )
+        )
+        assertFalse(
+            protector.shouldBlockSettingsTextsForTest(
+                listOf("Review app with full device access", "Some Other App", "Remove access")
+            )
+        )
+    }
+
+    @Test
     fun advancedProtectionScreenIsBlockedButOtherGoogleScreensAreNot() {
         assertTrue(
             SettingsProtector.isAdvancedProtectionScreen(

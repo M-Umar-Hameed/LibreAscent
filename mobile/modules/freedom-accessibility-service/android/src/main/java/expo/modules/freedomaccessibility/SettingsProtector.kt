@@ -37,6 +37,12 @@ class SettingsProtector {
             "clear data"
         )
 
+        // Android's "Review app with full device access" card and list put a
+        // Remove access button beside the app, which strips its accessibility access.
+        private val REMOVE_ACCESS_TRIGGERS = listOf(
+            "remove access"
+        )
+
         private val DEVICE_ADMIN_TRIGGERS = listOf(
             "deactivate this device admin app",
             "deactivate this device admin",
@@ -162,6 +168,12 @@ class SettingsProtector {
             return
         }
 
+        if (containsAny(allText, REMOVE_ACCESS_TRIGGERS)) {
+            Log.w(TAG, "Protection: Remove access action for Freedom! Navigating back.")
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            return
+        }
+
         // Accessibility settings for Freedom. Keep this narrow: network/VPN
         // settings can show "LibreAscent" and "Off" without being tamper UI.
         if (shouldBlockAccessibilitySettings(allText)) {
@@ -174,6 +186,7 @@ class SettingsProtector {
     internal fun shouldBlockSettingsTextsForTest(texts: List<String>): Boolean {
         return containsFreedom(texts) &&
             (containsAny(texts, APP_INFO_TRIGGERS) ||
+                containsAny(texts, REMOVE_ACCESS_TRIGGERS) ||
                 containsAny(texts, DEVICE_ADMIN_TRIGGERS) ||
                 shouldBlockAccessibilitySettings(texts))
     }

@@ -793,6 +793,15 @@ class FreedomAccessibilityService : AccessibilityService() {
             }
         }
 
+        // Sites blocked in browsers only. The address bar alone says where the user
+        // is: page text names them in footers and links on unrelated sites.
+        if (blockedResult == null && urlBar != null) {
+            UrlBarOnlyBlocks.hostFor(urlBar)?.let { host ->
+                blockedResult = ContentMatcher.MatchResult(true, ContentMatcher.MatchType.DOMAIN, host)
+                blockedCandidate = urlBar
+            }
+        }
+
         // Shorts and reels on the web, for the apps whose reels the user blocked.
         // URL bar only: a results page links to them without playing them.
         if (blockedResult == null && urlBar != null) {
@@ -1861,6 +1870,19 @@ internal object MangaPages {
             }
         }
         return null
+    }
+}
+
+/** Domains blocked when they are the page the browser is on, while the apps that share them keep working. */
+internal object UrlBarOnlyBlocks {
+    private val DOMAINS = listOf("x.com", "twitter.com")
+
+    /** The blocked domain [urlBar] is on, or null. */
+    fun hostFor(urlBar: String): String? {
+        val u = urlBar.trim().lowercase().substringAfter("://").substringBefore(' ')
+        val host = u.substring(0, u.indexOfAny(charArrayOf('/', '?', '#')).let { if (it < 0) u.length else it })
+            .substringBefore(':')
+        return DOMAINS.firstOrNull { host == it || host.endsWith(".$it") }
     }
 }
 

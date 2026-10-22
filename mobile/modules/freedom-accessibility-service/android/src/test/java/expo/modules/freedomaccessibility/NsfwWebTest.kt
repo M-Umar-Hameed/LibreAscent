@@ -3,7 +3,19 @@ package expo.modules.freedomaccessibility
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+class UrlBarOnlyBlocksTest {
+    @Test
+    fun blocksTheSiteAndItsSubdomainsOnly() {
+        assertEquals("x.com", UrlBarOnlyBlocks.hostFor("https://x.com/home"))
+        assertEquals("twitter.com", UrlBarOnlyBlocks.hostFor("mobile.twitter.com/user"))
+        assertNull(UrlBarOnlyBlocks.hostFor("mangakatana.com"))
+        assertNull(UrlBarOnlyBlocks.hostFor("notx.com"))
+        assertNull(UrlBarOnlyBlocks.hostFor("example.com/share?u=twitter.com"))
+    }
+}
 
 class NsfwWebTest {
 

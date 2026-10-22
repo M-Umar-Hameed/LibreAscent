@@ -207,15 +207,9 @@ export async function setCategoryEnabled(
   return FreedomAccessibilityNative.setCategoryEnabled(categoryId, enabled);
 }
 
-// Blocked in browsers only: the DNS tunnel never gets these, so the apps that
-// share the domains keep working.
-const BROWSER_ONLY_BLOCKED = ["x.com", "twitter.com"];
-
 export async function setIncludedDomains(domains: string[]): Promise<void> {
   if (!FreedomAccessibilityNative) return;
-  return FreedomAccessibilityNative.setIncludedDomains([
-    ...new Set([...domains, ...BROWSER_ONLY_BLOCKED]),
-  ]);
+  return FreedomAccessibilityNative.setIncludedDomains(domains);
 }
 
 export async function getProtectionSnapshot(): Promise<{

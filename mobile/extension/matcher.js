@@ -119,15 +119,19 @@
     const u = parseWebUrl(url);
     if (!u) return null;
     const host = u.hostname;
-    if (config.excludedDomains.some((d) => onDomain(host, String(d).toLowerCase().trim()))) return null;
+    const allowed = config.excludedDomains.some((d) => onDomain(host, String(d).toLowerCase().trim()));
 
     const labelSite = LABEL_SITES.some((d) => onDomain(host, d));
     const mangaSite = MANGA_HINTS.some((h) => host.includes(h));
     const lower = text.toLowerCase().replace(/[‘’]/g, "'").replace(/\s+/g, " ");
     const label = (labelSite && LABELS.find((l) => hasLabel(lower, l))) || ageGate(lower);
     if (label) return `NSFW label "${label}"`;
-    const genre = mangaSite && adultGenre(text);
+    // A genre menu lists "Smut" and "Adult" as plain tags, so an allowed site is not scanned for them.
+    const genre = !allowed && mangaSite && adultGenre(text);
     if (genre) return `Adult genre "${genre}"`;
+
+    // An allowed site keeps every check except keywords.
+    if (allowed) return null;
 
     let path = u.pathname + " " + u.search;
     try {

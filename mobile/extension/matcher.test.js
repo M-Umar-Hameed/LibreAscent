@@ -150,11 +150,13 @@ test("manga sites block on standalone adult genre tags", () => {
   assert.strictEqual(blockReason("https://en.wikipedia.org/wiki/Manga", "Genres :\nSmut", none), null);
 });
 
-test("excluded domains skip keywords and labels but not reels", () => {
+test("excluded domains skip keywords and genre tags; labels, age gates and reels still apply", () => {
   const cfg = { keywords: config.keywords, excludedDomains: ["reddit.com", "example.org"] };
   assert.strictEqual(blockReason("https://example.org/porn", "porn", cfg), null);
   assert.strictEqual(blockReason("https://sub.example.org/", "hentai", cfg), null);
-  assert.strictEqual(blockReason("https://www.reddit.com/r/x", "NSFW porn", cfg), null);
+  assert.match(blockReason("https://www.reddit.com/r/x", "NSFW porn", cfg), /NSFW label/);
+  assert.strictEqual(blockReason("https://www.reddit.com/r/x", "a porn link", cfg), null);
+  assert.strictEqual(blockReason("https://www.mangaread.org/x", "Genres :\nAction\nSmut", { keywords: [], excludedDomains: ["mangaread.org"] }), null);
   assert.match(blockReason("https://example.org.evil.com/porn", "", cfg), /porn/);
   assert.strictEqual(
     blockReason("https://www.facebook.com/reel/1", "", { keywords: [], excludedDomains: ["facebook.com"] }),

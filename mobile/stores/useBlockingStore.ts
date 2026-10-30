@@ -95,6 +95,7 @@ export interface BlockingState {
 }
 
 const ALLOW_SWAP_KEY = "allow-swap-2026-10-20b";
+const MANGABALL_SWAP_KEY = "allow-swap-2026-10-31c";
 
 export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
@@ -451,6 +452,25 @@ export const useBlockingStore = create<BlockingState>()(
             state.importSettings({ excludedUrls: next, includedUrls: blocked });
             state.setKeywords(state.keywords.filter((k) => k !== "manganelo"));
             void AsyncStorage.setItem(ALLOW_SWAP_KEY, "1");
+          });
+
+          void AsyncStorage.getItem(MANGABALL_SWAP_KEY).then((done) => {
+            if (done) return;
+            const current = useBlockingStore.getState();
+            const site = ["mangaball.net", "mangaball.com"];
+            const allowed = current.excludedUrls
+              .filter((u) => !site.includes(u.url))
+              .map((u) =>
+                u.url === "manhwato.com" ? { ...u, enabled: false } : u,
+              );
+            for (const url of site) allowed.push({ url, enabled: true });
+            current.importSettings({
+              excludedUrls: allowed,
+              includedUrls: current.includedUrls.filter(
+                (u) => !site.includes(u.url),
+              ),
+            });
+            void AsyncStorage.setItem(MANGABALL_SWAP_KEY, "1");
           });
 
           // Migrate old string[] URLs to BlockedUrl[] objects

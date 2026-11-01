@@ -99,6 +99,7 @@ const MANGABALL_SWAP_KEY = "allow-swap-2026-10-31c";
 const MANGABALL_BLOCK_KEY = "block-mangaball-2026-11-01a";
 const CLAUDE_ALLOW_KEY = "allow-claude-2026-11-01a";
 const PROXY_KEYWORD_KEY = "drop-proxy-keyword-2026-11-01a";
+const TANGO_BLOCK_KEY = "block-tango-2026-11-02a";
 
 export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
@@ -511,6 +512,20 @@ export const useBlockingStore = create<BlockingState>()(
             const current = useBlockingStore.getState();
             current.setKeywords(current.keywords.filter((k) => k !== "proxy"));
             void AsyncStorage.setItem(PROXY_KEYWORD_KEY, "1");
+          });
+
+          void AsyncStorage.getItem(TANGO_BLOCK_KEY).then((done) => {
+            if (done) return;
+            const current = useBlockingStore.getState();
+            current.importSettings({
+              excludedUrls: current.excludedUrls.map((u) =>
+                u.url === "tango.me" ? { ...u, enabled: false } : u,
+              ),
+              includedUrls: current.includedUrls
+                .filter((u) => u.url !== "tango.me")
+                .concat({ url: "tango.me", enabled: true }),
+            });
+            void AsyncStorage.setItem(TANGO_BLOCK_KEY, "1");
           });
 
           // Migrate old string[] URLs to BlockedUrl[] objects

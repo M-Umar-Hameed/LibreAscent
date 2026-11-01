@@ -1265,7 +1265,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 val container = object : FrameLayout(this@FreedomAccessibilityService) {
                     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
                         if (event.action == android.view.KeyEvent.ACTION_DOWN && event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
-                            if (nsfwOverlayPackage == targetPackage) {
+                            if (leavesAppOnDismiss(targetPackage)) {
                                 reelsOverlayPackage = null
                                 hideInstantOverlay()
                                 performGlobalAction(GLOBAL_ACTION_HOME)
@@ -1459,7 +1459,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                              } else {
                                  Log.w(TAG, "Launch intent for $targetPackage is null, unable to reopen.")
                              }
-                         } else if (nsfwOverlayPackage == targetPackage) {
+                         } else if (leavesAppOnDismiss(targetPackage)) {
                              // NSFW block: leave the app, so the page cannot be reopened with Back
                              reelsOverlayPackage = null
                              hideInstantOverlay()
@@ -1629,6 +1629,11 @@ class FreedomAccessibilityService : AccessibilityService() {
             BitmapFactory.decodeStream(it, null, options)
         }
     }
+
+    // Facebook's reel viewer can be re-entered and blocked again indefinitely, so a
+    // block there ends in the home screen, as an NSFW block does.
+    private fun leavesAppOnDismiss(targetPackage: String): Boolean =
+        nsfwOverlayPackage == targetPackage || targetPackage.startsWith("com.facebook.")
 
     private fun hideInstantOverlay() {
         handler.post {

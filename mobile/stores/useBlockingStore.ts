@@ -97,6 +97,7 @@ export interface BlockingState {
 const ALLOW_SWAP_KEY = "allow-swap-2026-10-20b";
 const MANGABALL_SWAP_KEY = "allow-swap-2026-10-31c";
 const MANGABALL_BLOCK_KEY = "block-mangaball-2026-11-01a";
+const CLAUDE_ALLOW_KEY = "allow-claude-2026-11-01a";
 
 export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
@@ -490,6 +491,18 @@ export const useBlockingStore = create<BlockingState>()(
                 .concat(blocked.map((url) => ({ url, enabled: true }))),
             });
             void AsyncStorage.setItem(MANGABALL_BLOCK_KEY, "1");
+          });
+
+          void AsyncStorage.getItem(CLAUDE_ALLOW_KEY).then((done) => {
+            if (done) return;
+            const current = useBlockingStore.getState();
+            const claude = ["claude.ai", "claude.com", "anthropic.com"];
+            current.importSettings({
+              excludedUrls: current.excludedUrls
+                .filter((u) => !claude.includes(u.url))
+                .concat(claude.map((url) => ({ url, enabled: true }))),
+            });
+            void AsyncStorage.setItem(CLAUDE_ALLOW_KEY, "1");
           });
 
           // Migrate old string[] URLs to BlockedUrl[] objects

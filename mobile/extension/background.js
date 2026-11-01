@@ -1,6 +1,6 @@
 // Lists baked into this build; changing them means a new version and a new signing.
 const EXTRA_KEYWORDS = ["mydesi", "aagmaal", "manhwa18", "desihub", "desi49", "wataa", "chudai", "mujra"];
-const EXCLUDED_DOMAINS = ["mangaread.org", "mangakatana.com", "mgeko.cc", "tango.me", "google.com"];
+const EXCLUDED_DOMAINS = ["mangaread.org", "mangakatana.com", "mgeko.cc", "tango.me", "claude.ai", "claude.com", "anthropic.com", "google.com"];
 // Blocked in the browser only; the DNS tunnel does not get these, so the apps that share them keep working.
 const BLOCKED_DOMAINS = ["x.com", "twitter.com", "mangaball.net", "mangaball.com"];
 

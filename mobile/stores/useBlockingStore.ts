@@ -98,6 +98,7 @@ const ALLOW_SWAP_KEY = "allow-swap-2026-10-20b";
 const MANGABALL_SWAP_KEY = "allow-swap-2026-10-31c";
 const MANGABALL_BLOCK_KEY = "block-mangaball-2026-11-01a";
 const CLAUDE_ALLOW_KEY = "allow-claude-2026-11-01a";
+const PROXY_KEYWORD_KEY = "drop-proxy-keyword-2026-11-01a";
 
 export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
@@ -503,6 +504,13 @@ export const useBlockingStore = create<BlockingState>()(
                 .concat(claude.map((url) => ({ url, enabled: true }))),
             });
             void AsyncStorage.setItem(CLAUDE_ALLOW_KEY, "1");
+          });
+
+          void AsyncStorage.getItem(PROXY_KEYWORD_KEY).then((done) => {
+            if (done) return;
+            const current = useBlockingStore.getState();
+            current.setKeywords(current.keywords.filter((k) => k !== "proxy"));
+            void AsyncStorage.setItem(PROXY_KEYWORD_KEY, "1");
           });
 
           // Migrate old string[] URLs to BlockedUrl[] objects

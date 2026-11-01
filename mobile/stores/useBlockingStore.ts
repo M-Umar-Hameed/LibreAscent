@@ -96,6 +96,7 @@ export interface BlockingState {
 
 const ALLOW_SWAP_KEY = "allow-swap-2026-10-20b";
 const MANGABALL_SWAP_KEY = "allow-swap-2026-10-31c";
+const MANGABALL_BLOCK_KEY = "block-mangaball-2026-11-01a";
 
 export const DEFAULT_SOURCES: BlocklistSource[] = [
   {
@@ -457,7 +458,7 @@ export const useBlockingStore = create<BlockingState>()(
           void AsyncStorage.getItem(MANGABALL_SWAP_KEY).then((done) => {
             if (done) return;
             const current = useBlockingStore.getState();
-            const site = ["mangaball.net", "mangaball.com"];
+            const site = ["tango.me"];
             const allowed = current.excludedUrls
               .filter((u) => !site.includes(u.url))
               .map((u) =>
@@ -471,6 +472,24 @@ export const useBlockingStore = create<BlockingState>()(
               ),
             });
             void AsyncStorage.setItem(MANGABALL_SWAP_KEY, "1");
+          });
+
+          void AsyncStorage.getItem(MANGABALL_BLOCK_KEY).then((done) => {
+            if (done) return;
+            const current = useBlockingStore.getState();
+            const blocked = ["mangaball.net", "mangaball.com"];
+            current.importSettings({
+              excludedUrls: current.excludedUrls
+                .filter((u) => u.url !== "tango.me")
+                .map((u) =>
+                  blocked.includes(u.url) ? { ...u, enabled: false } : u,
+                )
+                .concat({ url: "tango.me", enabled: true }),
+              includedUrls: current.includedUrls
+                .filter((u) => !blocked.includes(u.url))
+                .concat(blocked.map((url) => ({ url, enabled: true }))),
+            });
+            void AsyncStorage.setItem(MANGABALL_BLOCK_KEY, "1");
           });
 
           // Migrate old string[] URLs to BlockedUrl[] objects

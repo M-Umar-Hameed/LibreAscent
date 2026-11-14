@@ -84,7 +84,9 @@ class SettingsProtector {
          * is lowercased.
          */
         internal fun isAdvancedProtectionScreen(packageName: String, className: String): Boolean =
-            packageName.startsWith("com.google.android.") && className.contains("advancedprotection")
+            packageName.startsWith("com.google.android.") &&
+                (className.contains("advancedprotection") ||
+                    className.contains("intrusiondetection"))
     }
 
     fun updateConfig(enabled: Boolean, packageName: String) {

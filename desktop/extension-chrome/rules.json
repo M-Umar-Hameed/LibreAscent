@@ -1,0 +1,44 @@
+[
+  {
+    "id": 1,
+    "priority": 2,
+    "action": { "type": "allow" },
+    "condition": { "regexFilter": "^https?://([^/]+\\.)?google\\.[a-z.]+/(search|images).*[?&]safe=active(&|#|$)", "resourceTypes": ["main_frame"] }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": { "type": "redirect", "redirect": { "transform": { "queryTransform": { "addOrReplaceParams": [{ "key": "safe", "value": "active" }] } } } },
+    "condition": { "regexFilter": "^https?://([^/]+\\.)?google\\.[a-z.]+/(search|images)", "resourceTypes": ["main_frame"] }
+  },
+  {
+    "id": 3,
+    "priority": 2,
+    "action": { "type": "allow" },
+    "condition": { "regexFilter": "^https?://([^/]+\\.)?bing\\.com/(search|images|videos).*[?&]adlt=strict(&|#|$)", "resourceTypes": ["main_frame"] }
+  },
+  {
+    "id": 4,
+    "priority": 1,
+    "action": { "type": "redirect", "redirect": { "transform": { "queryTransform": { "addOrReplaceParams": [{ "key": "adlt", "value": "strict" }] } } } },
+    "condition": { "regexFilter": "^https?://([^/]+\\.)?bing\\.com/(search|images|videos)", "resourceTypes": ["main_frame"] }
+  },
+  {
+    "id": 5,
+    "priority": 2,
+    "action": { "type": "allow" },
+    "condition": { "regexFilter": "^https?://([^/]+\\.)?duckduckgo\\.com/.*[?&]kp=1(&|#|$)", "resourceTypes": ["main_frame"] }
+  },
+  {
+    "id": 6,
+    "priority": 1,
+    "action": { "type": "redirect", "redirect": { "transform": { "queryTransform": { "addOrReplaceParams": [{ "key": "kp", "value": "1" }] } } } },
+    "condition": { "regexFilter": "^https?://([^/]+\\.)?duckduckgo\\.com/.*[?&]q=", "resourceTypes": ["main_frame"] }
+  },
+  {
+    "id": 7,
+    "priority": 1,
+    "action": { "type": "modifyHeaders", "requestHeaders": [{ "header": "YouTube-Restrict", "operation": "set", "value": "Moderate" }] },
+    "condition": { "requestDomains": ["youtube.com", "youtube-nocookie.com", "youtubei.googleapis.com"], "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest"] }
+  }
+]

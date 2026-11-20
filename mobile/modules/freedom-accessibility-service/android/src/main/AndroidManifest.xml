@@ -17,6 +17,7 @@
             android:name="expo.modules.freedomaccessibility.FreedomAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="false"
+            android:directBootAware="true"
             android:label="LibreAscent Content Protection">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />

@@ -54,6 +54,9 @@ class SettingsProtector {
             "disable device admin"
         )
 
+        // Page titles of the Device admin list: "Device admin" here, "Device admin apps" elsewhere.
+        private val DEVICE_ADMIN_TITLES = setOf("device admin", "device admin apps")
+
         // Only phrases that appear on LibreAscent's own accessibility detail
         // page (the toggle screen). Generic "off"/"shortcut" would match the
         // main Accessibility list, where every service shows an On/Off status,
@@ -78,15 +81,21 @@ class SettingsProtector {
             "settings", "manageapp", "applications", "com.google.android.settings"
         )
 
+        internal fun isActivateButtonText(text: String): Boolean {
+            val t = text.trim().lowercase()
+            return t.startsWith("activate") && !t.contains("deactivate")
+        }
+
         /**
-         * Android's Advanced Protection screen lives in Google Play Services, not
-         * the Settings app, and turning it on shuts LibreAscent down. [className]
-         * is lowercased.
+         * Intrusion Detection lives in Google Play Services, not the Settings app.
+         * The Advanced Protection screen is no longer blocked: the service declares
+         * isAccessibilityTool, so Advanced Protection no longer shuts it down, and
+         * its unknown-sources restriction needs the screen reachable to switch off.
+         * [className] is lowercased.
          */
-        internal fun isAdvancedProtectionScreen(packageName: String, className: String): Boolean =
+        internal fun isIntrusionDetectionScreen(packageName: String, className: String): Boolean =
             packageName.startsWith("com.google.android.") &&
-                (className.contains("advancedprotection") ||
-                    className.contains("intrusiondetection"))
+                className.contains("intrusiondetection")
     }
 
     fun updateConfig(enabled: Boolean, packageName: String) {
@@ -96,6 +105,30 @@ class SettingsProtector {
     }
 
     fun isHardcoreEnabled(): Boolean = isHardcoreModeEnabled
+
+    // Uptime until which the device admin activate page is let through and clicked.
+    @Volatile private var adminActivationUntil = 0L
+
+    fun allowAdminActivationFor(ms: Long) {
+        adminActivationUntil = android.os.SystemClock.uptimeMillis() + ms
+    }
+
+    private fun adminActivationOpen(): Boolean =
+        android.os.SystemClock.uptimeMillis() < adminActivationUntil
+
+    private fun clickActivate(node: AccessibilityNodeInfo, depth: Int = 0): Boolean {
+        if (depth > MAX_DEPTH) return false
+        if (node.text?.toString()?.let(::isActivateButtonText) == true) {
+            var target: AccessibilityNodeInfo? = node
+            while (target != null && !target.isClickable) target = target.parent
+            return target?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+        }
+        for (i in 0 until node.childCount) {
+            val child = try { node.getChild(i) } catch (_: Exception) { null } ?: continue
+            if (clickActivate(child, depth + 1)) return true
+        }
+        return false
+    }
 
     /**
      * Check for sensitive activity by class name.
@@ -160,6 +193,16 @@ class SettingsProtector {
 
         val allText = collectAllText(rootNode)
 
+        // Re-activation after the admin was switched off: the activate page must
+        // stay up long enough to be clicked. A deactivate page never takes this branch.
+        if (adminActivationOpen() && containsFreedom(allText) && !containsAny(allText, DEVICE_ADMIN_TRIGGERS)) {
+            if (clickActivate(rootNode)) {
+                Log.w(TAG, "Protection: Device Admin re-activated.")
+                adminActivationUntil = 0L
+            }
+            return
+        }
+
         // Device Admin page: re-check on every event until content loads
         if (onDeviceAdminPage) {
             if (containsFreedom(allText)) {
@@ -188,6 +231,14 @@ class SettingsProtector {
             return
         }
 
+        // The device admin class event arrives after the first content events, so
+        // waiting on it leaves the Deactivate button tappable for a few hundred ms.
+        if (shouldBlockDeviceAdmin(allText)) {
+            Log.w(TAG, "Protection: Device Admin screen for Freedom! Navigating back.")
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            return
+        }
+
         // Accessibility settings for Freedom. Keep this narrow: network/VPN
         // settings can show "LibreAscent" and "Off" without being tamper UI.
         if (shouldBlockAccessibilitySettings(allText)) {
@@ -201,8 +252,14 @@ class SettingsProtector {
         return containsFreedom(texts) &&
             (containsAny(texts, APP_INFO_TRIGGERS) ||
                 containsAny(texts, REMOVE_ACCESS_TRIGGERS) ||
-                containsAny(texts, DEVICE_ADMIN_TRIGGERS) ||
+                shouldBlockDeviceAdmin(texts) ||
                 shouldBlockAccessibilitySettings(texts))
+    }
+
+    // The deactivate screen, or the Device admin list whose LibreAscent row leads to it.
+    private fun shouldBlockDeviceAdmin(texts: List<String>): Boolean {
+        return containsAny(texts, DEVICE_ADMIN_TRIGGERS) ||
+            texts.any { it.trim().lowercase() in DEVICE_ADMIN_TITLES }
     }
 
     private fun shouldBlockAccessibilitySettings(texts: List<String>): Boolean {

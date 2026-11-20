@@ -30,15 +30,66 @@ class SettingsProtectorTest {
     }
 
     @Test
-    fun advancedProtectionScreenIsBlockedButOtherGoogleScreensAreNot() {
+    fun intrusionDetectionScreenIsBlockedButAdvancedProtectionAndOtherGoogleScreensAreNot() {
         assertTrue(
-            SettingsProtector.isAdvancedProtectionScreen(
+            SettingsProtector.isIntrusionDetectionScreen(
+                "com.google.android.gms",
+                ".intrusiondetection.ui.intrusiondetectionsettingsactivity"
+            )
+        )
+        assertFalse(
+            SettingsProtector.isIntrusionDetectionScreen(
                 "com.google.android.gms",
                 ".advancedprotection.ui.advancedprotectionsettingsactivity"
             )
         )
-        assertFalse(SettingsProtector.isAdvancedProtectionScreen("com.google.android.gms", ".auth.uiflows.consent.consentactivity"))
-        assertFalse(SettingsProtector.isAdvancedProtectionScreen("com.example.app", ".advancedprotectionactivity"))
+        assertFalse(SettingsProtector.isIntrusionDetectionScreen("com.google.android.gms", ".auth.uiflows.consent.consentactivity"))
+        assertFalse(SettingsProtector.isIntrusionDetectionScreen("com.example.app", ".intrusiondetectionactivity"))
+    }
+
+    @Test
+    fun deviceAdminListAndDeactivateScreenForLibreAscentAreBlocked() {
+        val protector = SettingsProtector()
+
+        assertTrue(
+            protector.shouldBlockSettingsTextsForTest(
+                listOf("Device admin", "Navigate up", "Find Hub", "LibreAscent Content Protection")
+            )
+        )
+        assertTrue(
+            protector.shouldBlockSettingsTextsForTest(
+                listOf("LibreAscent Content Protection", "Deactivate this device admin app")
+            )
+        )
+    }
+
+    @Test
+    fun deviceAdminScreensForOtherAppsAndTheSpecialAccessEntryAreNotBlocked() {
+        val protector = SettingsProtector()
+
+        assertFalse(
+            protector.shouldBlockSettingsTextsForTest(
+                listOf("Device admin", "Navigate up", "Find Hub", "Authenticator")
+            )
+        )
+        assertFalse(
+            protector.shouldBlockSettingsTextsForTest(
+                listOf("Special app access", "Device admin apps", "1 active app")
+            )
+        )
+        assertFalse(
+            protector.shouldBlockSettingsTextsForTest(
+                listOf("LibreAscent Content Protection", "Activate this device admin app")
+            )
+        )
+    }
+
+    @Test
+    fun onlyTheActivateButtonIsClickedNeverDeactivate() {
+        assertTrue(SettingsProtector.isActivateButtonText("Activate this device admin app"))
+        assertTrue(SettingsProtector.isActivateButtonText("  Activate "))
+        assertFalse(SettingsProtector.isActivateButtonText("Deactivate this device admin app"))
+        assertFalse(SettingsProtector.isActivateButtonText("Cancel"))
     }
 
     @Test

@@ -2,6 +2,8 @@ package expo.modules.freedomaccessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
@@ -13,6 +15,7 @@ import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.UserManager
 import android.widget.ImageView
 import android.util.Log
 import android.util.TypedValue
@@ -46,6 +49,10 @@ class FreedomAccessibilityService : AccessibilityService() {
     // stays foreground. Scan results are applied only while it still matches.
     private var foregroundAppPackage: String = ""
     private var imePackages: Set<String> = emptySet()
+    // Main thread only. False until the first unlock after boot.
+    private var stateLoaded = false
+    private var unlockReceiver: BroadcastReceiver? = null
+    private var adminDisabledReceiver: BroadcastReceiver? = null
 
     // Instant overlay drawn directly by the accessibility service
     private var windowManager: WindowManager? = null
@@ -136,6 +143,9 @@ class FreedomAccessibilityService : AccessibilityService() {
                 AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
                 AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
         private const val NOTIFICATION_TIMEOUT_MS = 100L
+        private const val ADMIN_DISABLED_ACTION = "expo.modules.freedomdeviceadmin.ADMIN_DISABLED"
+        private const val ADMIN_RECEIVER_CLASS = "expo.modules.freedomdeviceadmin.FreedomDeviceAdminReceiver"
+        private const val ADMIN_REACTIVATE_WINDOW_MS = 20_000L
         // Transient windows (IME, shade, recents, edge panels) report their own
         // package while a monitored app stays foreground. Re-resolve the real
         // foreground window this long after such an event instead of trusting it.
@@ -271,6 +281,27 @@ class FreedomAccessibilityService : AccessibilityService() {
         isRunning = true
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
+        // directBootAware binds the service before the first unlock, so it is
+        // already running when Settings becomes reachable. The config lives in
+        // credential-encrypted storage, which cannot be read until then.
+        if (getSystemService(UserManager::class.java).isUserUnlocked) {
+            loadState()
+            return
+        }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) = loadState()
+        }
+        unlockReceiver = receiver
+        registerReceiver(receiver, IntentFilter(Intent.ACTION_USER_UNLOCKED))
+        // The unlock may have landed between the check and the registration.
+        if (getSystemService(UserManager::class.java).isUserUnlocked) loadState()
+    }
+
+    private fun loadState() {
+        if (stateLoaded) return
+        stateLoaded = true
+        unregisterUnlockReceiver()
+
         // Load persisted browser configs immediately so browsers are recognized
         // before JS has a chance to call updateBrowserConfigs
         browserMonitor.loadPersistedConfigs(this)
@@ -309,6 +340,19 @@ class FreedomAccessibilityService : AccessibilityService() {
             syncScopeToForegroundWindow()
         }, 300)
 
+        if (adminDisabledReceiver == null) {
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) = onAdminDisabled()
+            }
+            val filter = IntentFilter(ADMIN_DISABLED_ACTION)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(receiver, filter)
+            }
+            adminDisabledReceiver = receiver
+        }
+
         // PACKAGE_ADDED/PACKAGE_REMOVED are not on the implicit-broadcast
         // exception list, so a manifest receiver never fires on API 26+;
         // register at runtime for the service's lifetime instead.
@@ -319,6 +363,37 @@ class FreedomAccessibilityService : AccessibilityService() {
             }
             packageAddedReceiver = PackageAddedReceiver().also { registerReceiver(it, filter) }
         }
+    }
+
+    // Switching the admin off is the first step of removing the app, so ask for it
+    // straight back; the protector clicks the activate button when the page opens.
+    private fun onAdminDisabled() {
+        if (!settingsProtector.isHardcoreEnabled()) return
+        Log.w(TAG, "Device admin disabled in hardcore mode; requesting activation")
+        settingsProtector.allowAdminActivationFor(ADMIN_REACTIVATE_WINDOW_MS)
+        try {
+            startActivity(
+                Intent(android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+                    .putExtra(
+                        android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN,
+                        android.content.ComponentName(packageName, ADMIN_RECEIVER_CLASS)
+                    )
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not open the device admin activation page: ${e.message}")
+        }
+    }
+
+    private fun unregisterUnlockReceiver() {
+        unlockReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (e: IllegalArgumentException) {
+                // Not registered — nothing to do.
+            }
+        }
+        unlockReceiver = null
     }
 
     /**
@@ -452,7 +527,7 @@ class FreedomAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null) return
+        if (event == null || !stateLoaded) return
 
         val packageName = event.packageName?.toString() ?: return
 
@@ -473,8 +548,8 @@ class FreedomAccessibilityService : AccessibilityService() {
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             settingsProtector.isHardcoreEnabled() &&
-            SettingsProtector.isAdvancedProtectionScreen(packageName, classNameStr)) {
-            Log.w(TAG, "Protection: Advanced Protection screen. Navigating back.")
+            SettingsProtector.isIntrusionDetectionScreen(packageName, classNameStr)) {
+            Log.w(TAG, "Protection: Intrusion Detection screen. Navigating back.")
             performGlobalAction(GLOBAL_ACTION_BACK)
             return
         }
@@ -1712,6 +1787,15 @@ class FreedomAccessibilityService : AccessibilityService() {
         handler.removeCallbacksAndMessages(null)
         scanHandler.removeCallbacksAndMessages(null)
         scanThread.quitSafely()
+        unregisterUnlockReceiver()
+        adminDisabledReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (e: IllegalArgumentException) {
+                // Not registered — nothing to do.
+            }
+        }
+        adminDisabledReceiver = null
         packageAddedReceiver?.let {
             try {
                 unregisterReceiver(it)

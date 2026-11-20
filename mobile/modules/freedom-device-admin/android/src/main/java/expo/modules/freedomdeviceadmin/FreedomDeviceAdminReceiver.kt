@@ -23,5 +23,11 @@ class FreedomDeviceAdminReceiver : DeviceAdminReceiver() {
     override fun onDisabled(context: Context, intent: Intent) {
         super.onDisabled(context, intent)
         Toast.makeText(context, "LibreAscent: Device admin disabled", Toast.LENGTH_SHORT).show()
+        context.sendBroadcast(Intent(ACTION_ADMIN_DISABLED).setPackage(context.packageName))
+    }
+
+    companion object {
+        // Heard by the accessibility service, which re-requests activation in hardcore mode.
+        const val ACTION_ADMIN_DISABLED = "expo.modules.freedomdeviceadmin.ADMIN_DISABLED"
     }
 }

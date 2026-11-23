@@ -19,6 +19,8 @@ class DomainBlocklist {
         // matched only as a whole label part, as the accessibility matcher does.
         private val WHOLE_PART_KEYWORDS = setOf("desi", "dick")
 
+        private val LIST_EXEMPT_DOMAINS = setOf("reddit.com", "redd.it", "redditstatic.com", "redditmedia.com")
+
         internal fun normalizeKeywords(values: Collection<String>): List<String> =
             values.map { it.trim().lowercase().replace(" ", "") }.filter { it.isNotEmpty() }.distinct()
 
@@ -128,6 +130,10 @@ class DomainBlocklist {
         if (matchesList(candidates, blockedDomains)) return true
 
         if (keywordInDomain(normalized, keywords)) return true
+
+        // Reddit shows "We had a server error" with the adult lists' Reddit
+        // subdomains refused, so those lists only keep its NSFW hosts.
+        if ("nsfw" !in normalized && matchesList(candidates, LIST_EXEMPT_DOMAINS)) return false
 
         for ((name, categorySet) in categories) {
             if (name !in disabledCategories && matchesList(candidates, categorySet)) return true

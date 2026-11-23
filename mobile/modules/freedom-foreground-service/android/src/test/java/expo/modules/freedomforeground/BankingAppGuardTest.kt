@@ -66,6 +66,17 @@ class BankingAppGuardTest {
     }
 
     @Test
+    fun aRestoreRequestedForOneWindowDoesNotCoverTheNext() {
+        // Hopping from one bank to another closes a window and opens the next
+        // inside one tick; the second window must still get its own restore.
+        val first = 1_000_000L
+        val second = first + 1_800_000L
+        assertFalse(BankingAppGuard.isRestoreRequested(0L, first), "nothing requested yet")
+        assertTrue(BankingAppGuard.isRestoreRequested(first, first), "same window")
+        assertFalse(BankingAppGuard.isRestoreRequested(first, second), "next window")
+    }
+
+    @Test
     fun settingsAndInstallerAreTamperSurfaces() {
         // The uninstall path during a banking window is Settings > Security >
         // Device admin apps > Deactivate, then the installer's confirm dialog.

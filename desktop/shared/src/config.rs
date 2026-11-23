@@ -249,11 +249,27 @@ pub fn load_blocklist(config_path: &std::path::Path) -> crate::blocklist::Domain
     let cached_path = config_path.parent().unwrap().join("blocklist.txt");
     if cached_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&cached_path) {
-            blocklist.extend_blocked(content.lines().map(|s| s.to_string()));
+            blocklist.extend_blocked(
+                content
+                    .lines()
+                    .filter(|line| crate::blocklist::normalize_domain(line).map_or(true, |d| !exempt_from_lists(&d)))
+                    .map(|s| s.to_string()),
+            );
         }
     }
 
     blocklist
+}
+
+/// Reddit shows "We had a server error" with the adult lists' Reddit
+/// subdomains refused, so those lists only keep its NSFW hosts.
+const LIST_EXEMPT_DOMAINS: [&str; 4] = ["reddit.com", "redd.it", "redditstatic.com", "redditmedia.com"];
+
+fn exempt_from_lists(domain: &str) -> bool {
+    !domain.contains("nsfw")
+        && LIST_EXEMPT_DOMAINS
+            .iter()
+            .any(|d| domain == *d || domain.ends_with(&format!(".{d}")))
 }
 
 impl DesktopConfig {
@@ -593,5 +609,23 @@ mod doh_bootstrap_tests {
         assert!(blocklist.is_blocked("mozilla.cloudflare-dns.com"));
         // An unrelated domain must still resolve.
         assert!(!blocklist.is_blocked("example.com"));
+    }
+
+    #[test]
+    fn lists_never_block_reddit_except_its_nsfw_host() {
+        let dir = std::env::temp_dir().join(format!("libreascent-reddit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("blocklist.txt"),
+            "w3-reporting.reddit.com\nevents.redditmedia.com\nnsfw.reddit.com\nbad.example",
+        )
+        .unwrap();
+        let blocklist = load_blocklist(&dir.join("config.json"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!blocklist.is_blocked("w3-reporting.reddit.com"));
+        assert!(!blocklist.is_blocked("events.redditmedia.com"));
+        assert!(blocklist.is_blocked("nsfw.reddit.com"));
+        assert!(blocklist.is_blocked("bad.example"));
     }
 }

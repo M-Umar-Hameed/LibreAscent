@@ -105,18 +105,25 @@ class FreedomForegroundService : Service() {
         )
     }
 
+    // One line per kind of problem: "VPN not running" and "another VPN holds the slot" are one cause.
+    private fun shownProblems(): List<String> =
+        problems.groupBy { settingsAction(it) }.values.map { group ->
+            group.firstOrNull { it.startsWith(ProtectionCheck.VPN_TAKEN) } ?: group.first()
+        }
+
     private fun alertNotification(): Notification {
-        val first = problems.first()
+        val shown = shownProblems()
+        val first = shown.first()
         val builder = NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
             .setContentTitle("Protection is off")
             .setContentText(problemText(first))
-            .setStyle(NotificationCompat.BigTextStyle().bigText(problems.joinToString("\n") { problemText(it) }))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(shown.joinToString("\n") { problemText(it) }))
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setContentIntent(settingsIntent(first))
-        problems.distinctBy { settingsAction(it) }.forEach {
+        shown.forEach {
             val label = if (it == ProtectionCheck.ACCESSIBILITY_OFF) "Accessibility settings" else "VPN settings"
             builder.addAction(0, label, settingsIntent(it))
         }

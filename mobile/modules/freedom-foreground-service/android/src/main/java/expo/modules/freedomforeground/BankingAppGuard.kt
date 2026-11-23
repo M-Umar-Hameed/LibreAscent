@@ -36,7 +36,7 @@ class BankingAppGuard(private val context: Context) {
 
     private val handler = Handler(Looper.getMainLooper())
     private var running = false
-    private var restoreRequested = false
+    private var restoreRequestedFor = 0L
     private var grantWarned = false
     private var bankSeenAt = 0L
     private var lastForeground: Pair<String, String?>? = null
@@ -72,7 +72,7 @@ class BankingAppGuard(private val context: Context) {
         val prefs = context.getSharedPreferences(BANKING_PREFS, Context.MODE_PRIVATE)
         val until = prefs.getLong(KEY_BANKING_UNTIL, 0L)
         if (!isWindowPending(until)) {
-            restoreRequested = false
+            restoreRequestedFor = 0L
             bankSeenAt = 0L
             lastForeground = null
             grantWarned = false
@@ -86,9 +86,9 @@ class BankingAppGuard(private val context: Context) {
         // restore ourselves the moment the deadline passes; the alarm stays as
         // a backstop. Same-package broadcast reaches the non-exported receiver.
         // This needs no permission, so it runs before the usage-stats check.
-        if (shouldRequestRestore(until, System.currentTimeMillis(), restoreRequested)) {
+        if (shouldRequestRestore(until, System.currentTimeMillis(), isRestoreRequested(restoreRequestedFor, until))) {
             Log.i(TAG, "Banking deadline passed, requesting restore now")
-            requestRestore()
+            requestRestore(until)
         }
 
         if (!hasUsageStatsPermission(context)) {
@@ -117,9 +117,9 @@ class BankingAppGuard(private val context: Context) {
         if (stop == PauseStop.NONE || bankSeenAt == 0L) bankSeenAt = now
         val ends = bank.isEmpty() || stop == PauseStop.NOW ||
             (stop == PauseStop.AFTER_GRACE && now - bankSeenAt >= AWAY_GRACE_MS)
-        if (!restoreRequested && ends) {
+        if (!isRestoreRequested(restoreRequestedFor, until) && ends) {
             Log.i(TAG, "Banking pause for $bank over at $foreground, requesting restore")
-            requestRestore()
+            requestRestore(until)
             // Settings stays unguarded until the service reconnects.
             if (isTamperSurface(foreground)) sendHome()
             return true
@@ -133,8 +133,8 @@ class BankingAppGuard(private val context: Context) {
         return true
     }
 
-    private fun requestRestore() {
-        restoreRequested = true
+    private fun requestRestore(until: Long) {
+        restoreRequestedFor = until
         context.sendBroadcast(Intent(ACTION_BANKING_RESTORE).setPackage(context.packageName))
     }
 
@@ -250,6 +250,14 @@ class BankingAppGuard(private val context: Context) {
          * exactly that gap.
          */
         fun isWindowPending(until: Long): Boolean = until != 0L
+
+        /**
+         * A restore is tied to the window it was asked for. Hopping between banks
+         * ends one window and opens the next inside a single tick, so a plain flag
+         * stayed set and the next window was never restored before its alarm.
+         */
+        fun isRestoreRequested(requestedFor: Long, until: Long): Boolean =
+            requestedFor != 0L && requestedFor == until
 
         /** Once per window: the deadline has passed and restore has not yet cleared the key. */
         fun shouldRequestRestore(until: Long, now: Long, alreadyRequested: Boolean): Boolean =

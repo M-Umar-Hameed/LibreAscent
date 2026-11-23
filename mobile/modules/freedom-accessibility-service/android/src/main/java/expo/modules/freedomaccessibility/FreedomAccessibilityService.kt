@@ -416,6 +416,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         return browserMonitor.isBrowser(packageName) ||
                 reelsDetector.isReelsApp(packageName) ||
                 contentMatcher.isNsfwMonitoredApp(packageName) ||
+                SearchQueryGuard.queryId(packageName) != null ||
                 contentMatcher.getAppConfig(packageName) != null ||
                 (settingsProtector.isHardcoreEnabled() && isSettingsPackage(packageName))
     }
@@ -627,7 +628,8 @@ class FreedomAccessibilityService : AccessibilityService() {
             return
         }
 
-        val isNsfwMonitored = contentMatcher.isNsfwMonitoredApp(packageName)
+        val isNsfwMonitored = contentMatcher.isNsfwMonitoredApp(packageName) ||
+            SearchQueryGuard.queryId(packageName) != null
         val shouldHandleAsBrowser =
             browserMonitor.isBrowser(packageName) || isDetachedWebview
 
@@ -1134,6 +1136,15 @@ class FreedomAccessibilityService : AccessibilityService() {
         packageName: String,
         now: Long
     ) {
+        val queryId = SearchQueryGuard.queryId(packageName)
+        if (queryId != null) {
+            val query = rootNode.findAccessibilityNodeInfosByViewId(queryId)
+                .joinToString("\n") { it.text?.toString().orEmpty() }
+            val hit = contentMatcher.findMatchingKeywordDirectly(query) ?: return
+            Log.i(TAG, "Search keyword '$hit' found in $packageName")
+            blockExplicit(packageName, now)
+            return
+        }
         // One walk over visible text: Compose screens (X) expose no text to
         // findAccessibilityNodeInfosByText, so a per-keyword search misses them.
         val text = contentMatcher.withoutWhitelistedNames(visibleText(
@@ -1157,6 +1168,10 @@ class FreedomAccessibilityService : AccessibilityService() {
                 else contentMatcher.findMatchingKeywordDirectly(text))
             ?: return
         Log.i(TAG, "NSFW keyword '$keyword' found in $packageName")
+        blockExplicit(packageName, now)
+    }
+
+    private fun blockExplicit(packageName: String, now: Long) {
         // On main against foregroundAppPackage, as for reels. A match
         // dropped as stale must not start the cooldown.
         handler.post {
@@ -1931,6 +1946,18 @@ internal object ContentSettingGuard {
     // Labels that name NSFW only to say it is hidden, such as the chip on a
     // Reddit profile; matched whole, so a post tagged NSFW still counts.
     val SAFE_LABELS = setOf("Hiding NSFW")
+}
+
+/**
+ * Apps whose search box is checked for blocked keywords, keyed by the view id
+ * of the box. The rest of such an app's screen is not scanned.
+ */
+internal object SearchQueryGuard {
+    private val QUERY_IDS = mapOf(
+        "com.google.android.youtube" to "com.google.android.youtube:id/search_edit_text"
+    )
+
+    fun queryId(packageName: String): String? = QUERY_IDS[packageName]
 }
 
 /**

@@ -81,6 +81,18 @@ class SettingsProtector {
             "settings", "manageapp", "applications", "com.google.android.settings"
         )
 
+        // System > Multiple users: another profile is a way around the blocks.
+        internal fun isUserSettingsScreen(className: String): Boolean =
+            className.lowercase().contains("usersettingsactivity")
+
+        // The Users page opened from System is a generic SubSettings screen, so it
+        // is told apart by its own text, not its class.
+        internal fun isUsersPage(texts: List<String>): Boolean =
+            texts.any {
+                val t = it.trim().lowercase()
+                t.contains("adding new users") || t == "allow user switch"
+            }
+
         internal fun isActivateButtonText(text: String): Boolean {
             val t = text.trim().lowercase()
             return t.startsWith("activate") && !t.contains("deactivate")
@@ -146,6 +158,12 @@ class SettingsProtector {
             return false
         }
 
+        if (isUserSettingsScreen(className)) {
+            Log.w(TAG, "Protection: Multiple users screen. Navigating back.")
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            return true
+        }
+
         // Track device admin pages — can't block here because the activity
         // class is the same for ALL apps. Text content needed to verify
         // it's Freedom's page, but it hasn't rendered yet at this point.
@@ -192,6 +210,12 @@ class SettingsProtector {
         if (!SETTINGS_PKGS.any { pkg.contains(it) }) return
 
         val allText = collectAllText(rootNode)
+
+        if (isUsersPage(allText)) {
+            Log.w(TAG, "Protection: Users page. Navigating back.")
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            return
+        }
 
         // Re-activation after the admin was switched off: the activate page must
         // stay up long enough to be clicked. A deactivate page never takes this branch.

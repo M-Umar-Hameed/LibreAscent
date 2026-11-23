@@ -30,6 +30,20 @@ class SettingsProtectorTest {
     }
 
     @Test
+    fun multipleUsersScreenIsBlockedButOtherSettingsScreensAreNot() {
+        assertTrue(SettingsProtector.isUserSettingsScreen("com.android.settings.Settings\$UserSettingsActivity"))
+        assertFalse(SettingsProtector.isUserSettingsScreen("com.android.settings.Settings\$UserDictionarySettingsActivity"))
+        assertFalse(SettingsProtector.isUserSettingsScreen("com.android.settings.Settings\$SystemDashboardActivity"))
+    }
+
+    @Test
+    fun usersPageIsBlockedByItsTextButTheSystemListRowIsNot() {
+        assertTrue(SettingsProtector.isUsersPage(listOf("Share your phone by adding new users. Each user has a personal space", "Add user")))
+        assertTrue(SettingsProtector.isUsersPage(listOf("Users", "Allow user switch", "Guest")))
+        assertFalse(SettingsProtector.isUsersPage(listOf("Gestures", "Date & time", "Users", "Signed in as Umar Bin")))
+    }
+
+    @Test
     fun intrusionDetectionScreenIsBlockedButAdvancedProtectionAndOtherGoogleScreensAreNot() {
         assertTrue(
             SettingsProtector.isIntrusionDetectionScreen(

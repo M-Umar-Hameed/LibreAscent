@@ -254,4 +254,22 @@ class DomainBlocklistTest {
         assertFalse(list.setWhitelistIfAbsent(listOf("other.com")))
         assertFalse(list.isBlocked("blocked.com"))
     }
+
+    @Test
+    fun listsNeverBlockRedditExceptItsNsfwHost() {
+        val list = DomainBlocklist()
+        list.addCategory(
+            "adult",
+            setOf("w3-reporting.reddit.com", "events.redditmedia.com", "nsfw.reddit.com", "bad.org"),
+            replace = true
+        )
+
+        assertFalse(list.isBlocked("w3-reporting.reddit.com"))
+        assertFalse(list.isBlocked("events.redditmedia.com"))
+        assertTrue(list.isBlocked("nsfw.reddit.com"))
+        assertTrue(list.isBlocked("bad.org"))
+
+        list.setDomains(setOf("reddit.com"))
+        assertTrue(list.isBlocked("www.reddit.com"))
+    }
 }

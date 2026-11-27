@@ -672,7 +672,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                     // e.g. the Play Protect scan dialog layered over the package
                     // installer, attributed to com.android.vending — emit only
                     // content-changed events and must not trip the app block.
-                    if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                    if ((event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || isScreenPinned()) &&
                         !isSystemServedDialog(classNameStr)) {
                         Log.w(TAG, "Blocking app launch: $packageName (Config: ${appConfig.appName}, surveillance: ${appConfig.surveillanceType})")
                         showInstantOverlay(packageName, "${appConfig.appName} is blocked", appConfig.surveillanceType, appConfig.surveillanceValue)
@@ -1082,7 +1082,7 @@ class FreedomAccessibilityService : AccessibilityService() {
      * Handle a reels app event - detect reels/shorts section.
      */
     private fun handleReelsEvent(packageName: String) {
-        val rootNode = rootInActiveWindow ?: return
+        val rootNode = rootOf(packageName) ?: return
         val deadline = android.os.SystemClock.uptimeMillis() + APP_SCAN_BUDGET_MS
         val result = try {
             reelsDetector.detectReels(rootNode, packageName, deadline)
@@ -1094,7 +1094,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         // scan of app A can finish after the switch to B, and a sticky overlay
         // raised then would sit over B.
         handler.post {
-            if (foregroundAppPackage != packageName) {
+            if (!isForeground(packageName)) {
                 // The switch already reset this package; drop what the stale scan wrote.
                 reelsDetector.resetState(packageName)
                 return@post
@@ -1121,10 +1121,8 @@ class FreedomAccessibilityService : AccessibilityService() {
         val now = System.currentTimeMillis()
         if (now - lastNsfwBlockTime < 2000) return
 
-        val rootNode = rootInActiveWindow ?: return
+        val rootNode = rootOf(packageName) ?: return
         try {
-            // The event may have been pending while the user switched apps.
-            if (rootNode.packageName?.toString() != packageName) return
             scanNsfwKeywords(rootNode, packageName, now)
         } finally {
             rootNode.recycle()
@@ -1175,7 +1173,7 @@ class FreedomAccessibilityService : AccessibilityService() {
         // On main against foregroundAppPackage, as for reels. A match
         // dropped as stale must not start the cooldown.
         handler.post {
-            if (foregroundAppPackage != packageName) return@post
+            if (!isForeground(packageName)) return@post
             lastNsfwBlockTime = now
             reelsOverlayPackage = packageName
             nsfwOverlayPackage = packageName
@@ -1355,6 +1353,7 @@ class FreedomAccessibilityService : AccessibilityService() {
                 val container = object : FrameLayout(this@FreedomAccessibilityService) {
                     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
                         if (event.action == android.view.KeyEvent.ACTION_DOWN && event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+                            if (staysUntilUnpinned(surveillanceType)) return true
                             if (leavesAppOnDismiss(targetPackage)) {
                                 reelsOverlayPackage = null
                                 hideInstantOverlay()
@@ -1535,6 +1534,8 @@ class FreedomAccessibilityService : AccessibilityService() {
                         }
                         return@setOnClickListener
                     }
+
+                    if (staysUntilUnpinned(surveillanceType)) return@setOnClickListener
 
                     if (button.isEnabled) {
                          if (surveillanceType == "timer" || surveillanceType == "click") {
@@ -1724,6 +1725,41 @@ class FreedomAccessibilityService : AccessibilityService() {
     // block there ends in the home screen, as an NSFW block does.
     private fun leavesAppOnDismiss(targetPackage: String): Boolean =
         nsfwOverlayPackage == targetPackage || targetPackage.startsWith("com.facebook.")
+
+    // Screen pinning makes Home a no-op, so the app never changes and nothing re-triggers.
+    private fun isScreenPinned(): Boolean =
+        (getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager).lockTaskModeState !=
+            android.app.ActivityManager.LOCK_TASK_MODE_NONE
+
+    // Root of the app's own window. In split screen or right after pinning from Recents the
+    // focused window can belong to another app while this one is on screen.
+    private fun rootOf(packageName: String): android.view.accessibility.AccessibilityNodeInfo? {
+        rootInActiveWindow?.let {
+            if (it.packageName?.toString() == packageName) return it
+            it.recycle()
+        }
+        for (window in windows) {
+            val root = window.root ?: continue
+            if (root.packageName?.toString() == packageName) return root
+            root.recycle()
+        }
+        return null
+    }
+
+    // The launcher's window-state event can land after the app's, leaving the tracked
+    // foreground on the launcher while the scanned app is in front.
+    private fun isForeground(packageName: String): Boolean {
+        if (foregroundAppPackage == packageName) return true
+        val root = rootOf(packageName) ?: return false
+        root.recycle()
+        foregroundAppPackage = packageName
+        return true
+    }
+
+    // Dismissing would leave the blocked app on screen: Home and Back cannot leave a pinned app.
+    // Timer and click blocks unlock the app on purpose, so they stay dismissable.
+    private fun staysUntilUnpinned(surveillanceType: String): Boolean =
+        surveillanceType != "timer" && surveillanceType != "click" && isScreenPinned()
 
     private fun hideInstantOverlay() {
         handler.post {
